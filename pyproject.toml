@@ -8,7 +8,7 @@ version = "3.2.2"
 description = "Rust telemetry and serialization library"
 authors = [{ name = "Rylan Meilutis", email = "rylan.meilutis@gmail.com" }]
 readme = "README.md"
-license = "MIT"
+license = "GPL-2"
 requires-python = ">=3.8"
 
 
