@@ -102,6 +102,24 @@ relay.set_side_egress_enabled(side_c, false)?;  // C only ingresses
 Both `Router` and `Relay` also support `remove_side(side_id)` while preserving the remaining side
 IDs.
 
+For multi-path routing, both also support:
+
+```rust
+use sedsprintf_rs::RouteSelectionMode;
+
+router.set_source_route_mode(None, RouteSelectionMode::Weighted)?;
+router.set_route_weight(None, side_a, 3)?;
+router.set_route_weight(None, side_b, 1)?;
+
+relay.set_source_route_mode(Some(side_c), RouteSelectionMode::Failover)?;
+relay.set_route_priority(Some(side_c), side_a, 0)?; // preferred
+relay.set_route_priority(Some(side_c), side_b, 1)?; // backup
+```
+
+`Fanout` is the default and preserves the current behavior. `Weighted` chooses one eligible path
+per packet using weighted round-robin. `Failover` chooses the lowest-priority eligible path and
+automatically switches when discovery no longer reports the preferred path.
+
 ## Reliable delivery (opt-in)
 
 If a `DataType` is marked `reliable: true` in

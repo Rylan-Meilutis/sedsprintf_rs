@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sedsprintf_rs"
-version = "3.7.0"
+version = "3.8.0"
 description = "Rust telemetry and serialization library"
 authors = [{ name = "Rylan Meilutis", email = "rylan.meilutis@gmail.com" }]
 readme = "README.md"

@@ -35,16 +35,17 @@ use std::sync::{Arc as SArc, Mutex, OnceLock};
 #[cfg(feature = "timesync")]
 use crate::timesync::TimeSyncConfig;
 use crate::{
-    config::{DataEndpoint, DataType}, get_message_name, get_needed_message_size, message_meta, packet::Packet,
-    relay::{Relay, RelaySideOptions},
-    router::{
+    config::{DataEndpoint, DataType}, get_message_name, get_needed_message_size, message_meta,
+    packet::Packet, relay::{Relay, RelaySideOptions}, router::{
         Clock, EndpointHandler, LeBytes, Router, RouterConfig, RouterMode, RouterSideOptions,
-    }, serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet}, try_enum_from_u32,
-    MessageElement,
+    },
+    serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet},
+    try_enum_from_i32, try_enum_from_u32, MessageElement,
+    RouteSelectionMode,
     TelemetryError,
     TelemetryResult,
     MAX_VALUE_DATA_ENDPOINT,
-    MAX_VALUE_DATA_TYPE,
+    MAX_VALUE_DATA_TYPE, MAX_VALUE_ROUTE_SELECTION_MODE,
 };
 
 static GLOBAL_ROUTER_SINGLETON: OnceLock<SArc<Mutex<Router>>> = OnceLock::new();
@@ -700,6 +701,84 @@ impl PyRouter {
             .lock()
             .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
         rtr.clear_route(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
+    }
+
+    fn set_source_route_mode(&self, src_side_id: Option<u32>, mode: i32) -> PyResult<()> {
+        let mode = match mode {
+            0 => RouteSelectionMode::Fanout,
+            1 => RouteSelectionMode::Weighted,
+            2 => RouteSelectionMode::Failover,
+            _ => return Err(PyValueError::new_err("invalid route selection mode")),
+        };
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_source_route_mode(src_side_id.map(|id| id as usize), mode)
+            .map_err(py_err_from)
+    }
+
+    fn clear_source_route_mode(&self, src_side_id: Option<u32>) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.clear_source_route_mode(src_side_id.map(|id| id as usize))
+            .map_err(py_err_from)
+    }
+
+    fn set_route_weight(
+        &self,
+        src_side_id: Option<u32>,
+        dst_side_id: u32,
+        weight: u32,
+    ) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_route_weight(
+            src_side_id.map(|id| id as usize),
+            dst_side_id as usize,
+            weight,
+        )
+        .map_err(py_err_from)
+    }
+
+    fn clear_route_weight(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.clear_route_weight(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
+    }
+
+    fn set_route_priority(
+        &self,
+        src_side_id: Option<u32>,
+        dst_side_id: u32,
+        priority: u32,
+    ) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_route_priority(
+            src_side_id.map(|id| id as usize),
+            dst_side_id as usize,
+            priority,
+        )
+        .map_err(py_err_from)
+    }
+
+    fn clear_route_priority(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.clear_route_priority(src_side_id.map(|id| id as usize), dst_side_id as usize)
             .map_err(py_err_from)
     }
 
@@ -1548,6 +1627,66 @@ impl PyRelay {
             .map_err(py_err_from)
     }
 
+    fn set_source_route_mode(&self, src_side_id: Option<u32>, mode: i32) -> PyResult<()> {
+        let mode = match mode {
+            0 => RouteSelectionMode::Fanout,
+            1 => RouteSelectionMode::Weighted,
+            2 => RouteSelectionMode::Failover,
+            _ => return Err(PyValueError::new_err("invalid route selection mode")),
+        };
+        self.inner
+            .set_source_route_mode(src_side_id.map(|id| id as usize), mode)
+            .map_err(py_err_from)
+    }
+
+    fn clear_source_route_mode(&self, src_side_id: Option<u32>) -> PyResult<()> {
+        self.inner
+            .clear_source_route_mode(src_side_id.map(|id| id as usize))
+            .map_err(py_err_from)
+    }
+
+    fn set_route_weight(
+        &self,
+        src_side_id: Option<u32>,
+        dst_side_id: u32,
+        weight: u32,
+    ) -> PyResult<()> {
+        self.inner
+            .set_route_weight(
+                src_side_id.map(|id| id as usize),
+                dst_side_id as usize,
+                weight,
+            )
+            .map_err(py_err_from)
+    }
+
+    fn clear_route_weight(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
+        self.inner
+            .clear_route_weight(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
+    }
+
+    fn set_route_priority(
+        &self,
+        src_side_id: Option<u32>,
+        dst_side_id: u32,
+        priority: u32,
+    ) -> PyResult<()> {
+        self.inner
+            .set_route_priority(
+                src_side_id.map(|id| id as usize),
+                dst_side_id as usize,
+                priority,
+            )
+            .map_err(py_err_from)
+    }
+
+    fn clear_route_priority(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
+        self.inner
+            .clear_route_priority(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
+    }
+
     fn rx_serialized_from_side(
         &self,
         _py: Python<'_>,
@@ -1770,6 +1909,25 @@ pub fn sedsprintf_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
         let rm_enum = int_enum.call1(("RouterMode", rm_dict))?;
         m.add("RouterMode", rm_enum)?;
+    }
+
+    // ------------------ RouteSelectionMode ------------------
+    {
+        let rsm_dict = PyDict::new(py);
+        rsm_dict.set_item("__module__", &mod_name)?;
+        for v in 0..=MAX_VALUE_ROUTE_SELECTION_MODE {
+            if let Some(e) = try_enum_from_i32::<RouteSelectionMode>(v) {
+                let name = match e {
+                    RouteSelectionMode::Fanout => "Fanout",
+                    RouteSelectionMode::Weighted => "Weighted",
+                    RouteSelectionMode::Failover => "Failover",
+                };
+                rsm_dict.set_item(name, v)?;
+                m.add(name, v)?;
+            }
+        }
+        let rsm_enum = int_enum.call1(("RouteSelectionMode", rsm_dict))?;
+        m.add("RouteSelectionMode", rsm_enum)?;
     }
 
     Ok(())

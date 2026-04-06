@@ -1,5 +1,23 @@
 # Changelogs
 
+## Version 3.8.0 highlights
+
+- Multi-path traffic steering:
+    - Added `RouteSelectionMode` with `Fanout`, `Weighted`, and `Failover` modes for both routers
+      and relays.
+    - Added runtime per-route weights and priorities so traffic can be split unevenly or pinned to
+      a preferred primary path with ordered backups.
+    - Discovery reachability now acts as the liveness signal for failover, so expired paths stop
+      receiving traffic automatically.
+- ABI and binding parity:
+    - Added matching Rust, C ABI, and Python controls for source route mode, route weight, and
+      route priority configuration.
+- Regression coverage:
+    - Added router and relay tests for weighted split and failover behavior, plus C ABI coverage
+      for weighted local routing.
+- Full
+  changelog: [v3.7.0...v3.8.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.7.0...v3.8.0)
+
 ## Version 3.7.0 highlights
 
 - Runtime router and relay routing tables:

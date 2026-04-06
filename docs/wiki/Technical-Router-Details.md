@@ -163,9 +163,19 @@ application-level acknowledgement on top of the transport-level reliable mode.
 - `RouterMode::Relay`: seeds a full side-to-side forwarding mesh.
 
 Mode is now the starting policy. Runtime calls such as `remove_side`, `set_side_ingress_enabled`,
-`set_side_egress_enabled`, `set_route`, and `clear_route` can override it without rebuilding the
-router.
+`set_side_egress_enabled`, `set_route`, `clear_route`, `set_source_route_mode`,
+`set_route_weight`, and `set_route_priority` can override it without rebuilding the router.
 
 `Relay` now uses the same runtime side lifecycle and route-override model, but without
 `RouterMode`; relay defaults to a full mesh and runtime calls can remove sides or selectively
 remove and restore paths.
+
+When discovery reports multiple eligible paths for the same endpoint set:
+
+- `Fanout` keeps the current behavior and sends to every eligible path.
+- `Weighted` sends one packet on one eligible path using configured per-route weights.
+- `Failover` sends only on the lowest-priority eligible path.
+
+Failover health is driven by the existing discovery reachability TTL plus explicit side removal or
+ingress/egress disable state. When a preferred path expires or is removed, routing automatically
+uses the next eligible path.

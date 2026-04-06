@@ -135,10 +135,17 @@ Runtime side policy and routing controls:
 - `set_side_egress_enabled(side_id, enabled)`
 - `set_route(src_side_id, dst_side_id, enabled)`
 - `clear_route(src_side_id, dst_side_id)`
+- `set_source_route_mode(src_side_id, mode)`
+- `set_route_weight(src_side_id, dst_side_id, weight)`
+- `set_route_priority(src_side_id, dst_side_id, priority)`
 
 Use `None` for `src_side_id` when you want to control locally-originated router TX rather than
 traffic received from a specific side. `Relay` exposes the same side lifecycle, side-policy, and
 route-override methods, with the same `None` convention for locally-originated discovery TX.
+
+Use `RouteSelectionMode.Fanout` to preserve current behavior, `RouteSelectionMode.Weighted` for
+weighted multi-path splitting, and `RouteSelectionMode.Failover` to prefer one path until
+discovery says it is gone.
 
 ## Debugging tips
 

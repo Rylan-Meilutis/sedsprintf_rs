@@ -1,19 +1,33 @@
 #[cfg(test)]
 mod threaded_system_tests {
-    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
+    use sedsprintf_rs::discovery::{build_discovery_announce, DISCOVERY_ROUTE_TTL_MS};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
+    use sedsprintf_rs::RouteSelectionMode;
+    use sedsprintf_rs::TelemetryResult;
 
-    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
 
     fn zero_clock() -> Box<dyn Clock + Send + Sync> {
         Box::new(|| 0u64)
+    }
+
+    struct SharedClock {
+        now_ms: Arc<AtomicU64>,
+    }
+
+    impl Clock for SharedClock {
+        fn now_ms(&self) -> u64 {
+            self.now_ms.load(Ordering::SeqCst)
+        }
     }
 
     /// Simulated node in the Rust system test.
@@ -52,6 +66,183 @@ mod threaded_system_tests {
     /// system’s idea that every message goes to both "radio" and "SD".
     fn make_packet(ty: DataType, vals: &[f32], ts: u64) -> Packet {
         Packet::from_f32_slice(ty, vals, &[DataEndpoint::SdCard, DataEndpoint::Radio], ts).unwrap()
+    }
+
+    #[test]
+    fn router_runtime_route_modes_work_in_system_flow() {
+        let now_ms = Arc::new(AtomicU64::new(0));
+        let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_a_c = seen_a.clone();
+        let seen_b_c = seen_b.clone();
+
+        let router = Router::new_with_clock(
+            RouterMode::Sink,
+            RouterConfig::default(),
+            Box::new(SharedClock {
+                now_ms: now_ms.clone(),
+            }),
+        );
+        let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_a_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+        let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_b_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+
+        let discovery_a = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        router
+            .rx_serialized_queue_from_side(
+                &sedsprintf_rs::serialize::serialize_packet(&discovery_a),
+                side_a,
+            )
+            .unwrap();
+        router.process_all_queues().unwrap();
+        now_ms.store(DISCOVERY_ROUTE_TTL_MS / 2, Ordering::SeqCst);
+        let discovery_b = build_discovery_announce(
+            "REMOTE_B",
+            DISCOVERY_ROUTE_TTL_MS / 2,
+            &[DataEndpoint::Radio],
+        )
+        .unwrap();
+        router
+            .rx_serialized_queue_from_side(
+                &sedsprintf_rs::serialize::serialize_packet(&discovery_b),
+                side_b,
+            )
+            .unwrap();
+        router.process_all_queues().unwrap();
+        seen_a.lock().unwrap().clear();
+        seen_b.lock().unwrap().clear();
+
+        router
+            .set_source_route_mode(None, RouteSelectionMode::Weighted)
+            .unwrap();
+        router.set_route_weight(None, side_a, 2).unwrap();
+        router.set_route_weight(None, side_b, 1).unwrap();
+
+        for seq in 0..6 {
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                &[DataEndpoint::Radio],
+                seq as u64,
+            )
+            .unwrap();
+            router.tx_queue(pkt).unwrap();
+        }
+        router.process_tx_queue().unwrap();
+        assert_eq!(seen_a.lock().unwrap().len(), 4);
+        assert_eq!(seen_b.lock().unwrap().len(), 2);
+
+        router
+            .set_source_route_mode(None, RouteSelectionMode::Failover)
+            .unwrap();
+        router.set_route_priority(None, side_a, 0).unwrap();
+        router.set_route_priority(None, side_b, 1).unwrap();
+        now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+
+        let failover_pkt = Packet::from_f32_slice(
+            DataType::BatteryStatus,
+            &[7.0, 8.0],
+            &[DataEndpoint::Radio],
+            99,
+        )
+        .unwrap();
+        router.tx_queue(failover_pkt).unwrap();
+        router.process_tx_queue().unwrap();
+
+        assert_eq!(seen_a.lock().unwrap().len(), 4);
+        assert_eq!(seen_b.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn relay_runtime_route_modes_work_in_system_flow() {
+        let now_ms = Arc::new(AtomicU64::new(0));
+        let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_a_c = seen_a.clone();
+        let seen_b_c = seen_b.clone();
+
+        let relay = Relay::new(Box::new(SharedClock {
+            now_ms: now_ms.clone(),
+        }));
+        let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_a_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+        let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_b_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+        let ingress = relay.add_side_packet("INGRESS", |_pkt: &Packet| Ok(()));
+
+        let discovery_a = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        relay
+            .rx_serialized_from_side(
+                side_a,
+                &sedsprintf_rs::serialize::serialize_packet(&discovery_a),
+            )
+            .unwrap();
+        relay.process_all_queues().unwrap();
+        now_ms.store(DISCOVERY_ROUTE_TTL_MS / 2, Ordering::SeqCst);
+        let discovery_b = build_discovery_announce(
+            "REMOTE_B",
+            DISCOVERY_ROUTE_TTL_MS / 2,
+            &[DataEndpoint::Radio],
+        )
+        .unwrap();
+        relay
+            .rx_serialized_from_side(
+                side_b,
+                &sedsprintf_rs::serialize::serialize_packet(&discovery_b),
+            )
+            .unwrap();
+        relay.process_all_queues().unwrap();
+        seen_a.lock().unwrap().clear();
+        seen_b.lock().unwrap().clear();
+
+        relay
+            .set_source_route_mode(Some(ingress), RouteSelectionMode::Weighted)
+            .unwrap();
+        relay.set_route_weight(Some(ingress), side_a, 2).unwrap();
+        relay.set_route_weight(Some(ingress), side_b, 1).unwrap();
+
+        for seq in 0..6 {
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                &[DataEndpoint::Radio],
+                seq as u64,
+            )
+            .unwrap();
+            relay.rx_from_side(ingress, pkt).unwrap();
+        }
+        relay.process_all_queues().unwrap();
+        assert_eq!(seen_a.lock().unwrap().len(), 4);
+        assert_eq!(seen_b.lock().unwrap().len(), 2);
+
+        relay
+            .set_source_route_mode(Some(ingress), RouteSelectionMode::Failover)
+            .unwrap();
+        relay.set_route_priority(Some(ingress), side_a, 0).unwrap();
+        relay.set_route_priority(Some(ingress), side_b, 1).unwrap();
+        relay.remove_side(side_a).unwrap();
+
+        let failover_pkt = Packet::from_f32_slice(
+            DataType::BatteryStatus,
+            &[7.0, 8.0],
+            &[DataEndpoint::Radio],
+            99,
+        )
+        .unwrap();
+        relay.rx_from_side(ingress, failover_pkt).unwrap();
+        relay.process_all_queues().unwrap();
+
+        assert_eq!(seen_a.lock().unwrap().len(), 4);
+        assert_eq!(seen_b.lock().unwrap().len(), 3);
     }
 
     /// Threaded system test that mirrors `main.c` but now uses the Rust

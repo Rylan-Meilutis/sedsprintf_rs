@@ -16,6 +16,7 @@
       "rust": "GpsData",
       "name": "GPS_DATA",
       "doc": "GPS data (typically 3\u00d7 f32: latitude, longitude, altitude).",
+      "priority": 80,
       "reliable_mode": "Ordered",
       "class": "Data",
       "element": {
@@ -32,6 +33,7 @@
       "rust": "ImuData",
       "name": "IMU_DATA",
       "doc": "IMU data (typically 6\u00d7 f32: accel/gyro vector).",
+      "priority": 40,
       "class": "Data",
       "element": {
         "kind": "Static",
@@ -47,6 +49,7 @@
       "rust": "BatteryStatus",
       "name": "BATTERY_STATUS",
       "doc": "Battery status (e.g. voltage, current, etc.).",
+      "priority": 60,
       "class": "Data",
       "element": {
         "kind": "Static",
@@ -105,6 +108,7 @@
       "rust": "Heartbeat",
       "name": "HEARTBEAT",
       "doc": "Heartbeat message (no payload).",
+      "priority": 100,
       "class": "Data",
       "element": {
         "kind": "Static",

@@ -16,8 +16,9 @@ use crate::timesync::{NetworkTimeReading, PartialNetworkTime, TimeSyncConfig};
 use crate::{
     config::DataEndpoint, do_vec_log_typed, get_needed_message_size, message_meta, packet::Packet,
     router::{Clock, LeBytes, RouterSideOptions},
-    router::{EndpointHandler, Router, RouterConfig}, serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet}, DataType,
-    MessageElement,
+    router::{EndpointHandler, Router, RouterConfig},
+    serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet}, DataType, MessageElement,
+    RouteSelectionMode,
     TelemetryError,
     TelemetryErrorCode,
     TelemetryResult,
@@ -180,6 +181,16 @@ fn dtype_from_u32(x: u32) -> TelemetryResult<DataType> {
 #[inline]
 fn endpoint_from_u32(x: u32) -> TelemetryResult<DataEndpoint> {
     DataEndpoint::try_from_u32(x).ok_or(TelemetryError::Deserialize("bad endpoint"))
+}
+
+#[inline]
+fn route_selection_mode_from_i32(x: i32) -> TelemetryResult<RouteSelectionMode> {
+    match x {
+        0 => Ok(RouteSelectionMode::Fanout),
+        1 => Ok(RouteSelectionMode::Weighted),
+        2 => Ok(RouteSelectionMode::Failover),
+        _ => Err(TelemetryError::BadArg),
+    }
 }
 
 // ============================================================================
@@ -1090,6 +1101,116 @@ pub extern "C" fn seds_router_clear_route(
     ok_or_status(router.clear_route(src, dst_side_id as usize))
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_source_route_mode(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    mode: i32,
+) -> i32 {
+    if r.is_null() || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let mode = match route_selection_mode_from_i32(mode) {
+        Ok(mode) => mode,
+        Err(err) => return status_from_err(err),
+    };
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.set_source_route_mode(src, mode))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_clear_source_route_mode(r: *mut SedsRouter, src_side_id: i32) -> i32 {
+    if r.is_null() || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.clear_source_route_mode(src))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_route_weight(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    dst_side_id: i32,
+    weight: u32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.set_route_weight(src, dst_side_id as usize, weight))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_clear_route_weight(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.clear_route_weight(src, dst_side_id as usize))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_route_priority(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    dst_side_id: i32,
+    priority: u32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.set_route_priority(src, dst_side_id as usize, priority))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_clear_route_priority(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.clear_route_priority(src, dst_side_id as usize))
+}
+
 // ============================================================================
 //  FFI: Schema helper (fixed payload size)
 // ============================================================================
@@ -1380,6 +1501,116 @@ pub extern "C" fn seds_relay_clear_route(
         Some(src_side_id as usize)
     };
     ok_or_status(relay.clear_route(src, dst_side_id as usize))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_source_route_mode(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    mode: i32,
+) -> i32 {
+    if r.is_null() || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let mode = match route_selection_mode_from_i32(mode) {
+        Ok(mode) => mode,
+        Err(err) => return status_from_err(err),
+    };
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.set_source_route_mode(src, mode))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_clear_source_route_mode(r: *mut SedsRelay, src_side_id: i32) -> i32 {
+    if r.is_null() || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.clear_source_route_mode(src))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_route_weight(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    dst_side_id: i32,
+    weight: u32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.set_route_weight(src, dst_side_id as usize, weight))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_clear_route_weight(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.clear_route_weight(src, dst_side_id as usize))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_route_priority(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    dst_side_id: i32,
+    priority: u32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.set_route_priority(src, dst_side_id as usize, priority))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_clear_route_priority(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.clear_route_priority(src, dst_side_id as usize))
 }
 
 // ============================================================================
@@ -2872,6 +3103,83 @@ mod tests {
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        seds_router_free(router);
+    }
+
+    #[test]
+    fn router_c_abi_weighted_route_mode_splits_local_tx() {
+        let hits_a = AtomicUsize::new(0);
+        let hits_b = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+
+        let router = Router::new_with_clock(
+            RouterMode::Sink,
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                |_pkt| Ok(()),
+            )]),
+            Box::new(TestClock {
+                now_ms: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let router = Box::into_raw(Box::new(SedsRouter {
+            inner: Arc::from(router),
+        }));
+
+        let side_a = seds_router_add_side_packet(
+            router,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits_a as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_router_add_side_packet(
+            router,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits_b as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let discovery_pkt_a =
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_pkt_b =
+            build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+        unsafe {
+            (*router)
+                .inner
+                .rx_from_side(&discovery_pkt_a, side_a as usize)
+                .unwrap();
+            (*router)
+                .inner
+                .rx_from_side(&discovery_pkt_b, side_b as usize)
+                .unwrap();
+        }
+        hits_a.store(0, Ordering::SeqCst);
+        hits_b.store(0, Ordering::SeqCst);
+
+        assert_eq!(seds_router_set_source_route_mode(router, -1, 1), 0);
+        assert_eq!(seds_router_set_route_weight(router, -1, side_a, 2), 0);
+        assert_eq!(seds_router_set_route_weight(router, -1, side_b, 1), 0);
+
+        for seq in 0..6 {
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                &[DataEndpoint::Radio],
+                seq as u64,
+            )
+            .unwrap();
+            unsafe {
+                (*router).inner.tx(pkt).unwrap();
+            }
+        }
+
+        assert_eq!(hits_a.load(Ordering::SeqCst), 4);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 2);
 
         seds_router_free(router);
     }

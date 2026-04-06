@@ -6,8 +6,8 @@ mod compression_memory_pool_test {
 
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::ptr::null_mut;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     const HDR_WORDS: usize = 4;
     const HDR_RAW_OFF: usize = 0;

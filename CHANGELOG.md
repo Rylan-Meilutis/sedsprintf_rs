@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.8.0
+
+- Added path-selection policies for both `Router` and `Relay` across Rust, C, and Python.
+- New source-side route modes let traffic keep current fanout behavior, split across multiple
+  discovered paths with weighted round-robin, or use single-active failover routing.
+- Per-route weights and priorities can now be configured at runtime, so deployments can do
+  non-50/50 load balancing or choose a preferred primary link with ordered backups.
+- Path failover now follows discovery liveness, side removal, and side disable state, so traffic
+  automatically shifts to remaining eligible paths when a discovered path disappears.
+- Added regression coverage for weighted split and failover behavior in both router and relay
+  paths, including C ABI coverage.
+
 ## 3.7.0
 
 - Added runtime side routing controls for both `Router` and `Relay` across Rust, C, and Python.

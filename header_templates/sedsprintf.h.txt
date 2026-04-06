@@ -75,6 +75,13 @@ typedef enum SedsRouterMode
     Seds_RM_Relay = 1,
 } SedsRouterMode;
 
+typedef enum SedsRouteSelectionMode
+{
+    Seds_RSM_Fanout = 0,
+    Seds_RSM_Weighted = 1,
+    Seds_RSM_Failover = 2,
+} SedsRouteSelectionMode;
+
 
 typedef SedsResult (* SedsTransmitFn)(const uint8_t * bytes, size_t len, void * user);
 
@@ -353,6 +360,13 @@ SedsResult seds_router_set_route(SedsRouter * r, int32_t src_side_id, int32_t ds
  * Pass -1 for @p src_side_id to target locally-originated router TX traffic.
  */
 SedsResult seds_router_clear_route(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
+
+SedsResult seds_router_set_source_route_mode(SedsRouter * r, int32_t src_side_id, SedsRouteSelectionMode mode);
+SedsResult seds_router_clear_source_route_mode(SedsRouter * r, int32_t src_side_id);
+SedsResult seds_router_set_route_weight(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id, uint32_t weight);
+SedsResult seds_router_clear_route_weight(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
+SedsResult seds_router_set_route_priority(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id, uint32_t priority);
+SedsResult seds_router_clear_route_priority(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
 
 /* ==============================
    NEW: schema helper
@@ -675,6 +689,12 @@ SedsResult seds_relay_set_side_ingress_enabled(SedsRelay * r, int32_t side_id, b
 SedsResult seds_relay_set_side_egress_enabled(SedsRelay * r, int32_t side_id, bool enabled);
 SedsResult seds_relay_set_route(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, bool enabled);
 SedsResult seds_relay_clear_route(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
+SedsResult seds_relay_set_source_route_mode(SedsRelay * r, int32_t src_side_id, SedsRouteSelectionMode mode);
+SedsResult seds_relay_clear_source_route_mode(SedsRelay * r, int32_t src_side_id);
+SedsResult seds_relay_set_route_weight(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, uint32_t weight);
+SedsResult seds_relay_clear_route_weight(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
+SedsResult seds_relay_set_route_priority(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, uint32_t priority);
+SedsResult seds_relay_clear_route_priority(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
 
 
 /**

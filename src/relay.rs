@@ -12,13 +12,13 @@ use crate::serialize;
 use crate::{is_reliable_type, message_priority, reliable_mode};
 use crate::{
     router::Clock,
-    {lock::RouterMutex, TelemetryError, TelemetryResult},
+    {lock::RouterMutex, RouteSelectionMode, TelemetryError, TelemetryResult},
 };
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 /// Logical side index (CAN, UART, RADIO, etc.)
 pub type RelaySideId = usize;
@@ -138,6 +138,10 @@ struct DiscoverySideState {
 struct RelayInner {
     sides: Vec<Option<RelaySide>>,
     route_overrides: BTreeMap<(Option<RelaySideId>, RelaySideId), bool>,
+    route_weights: BTreeMap<(Option<RelaySideId>, RelaySideId), u32>,
+    route_priorities: BTreeMap<(Option<RelaySideId>, RelaySideId), u32>,
+    source_route_modes: BTreeMap<Option<RelaySideId>, RouteSelectionMode>,
+    route_selection_cursors: BTreeMap<Option<RelaySideId>, u64>,
     rx_queue: BoundedDeque<RelayRxItem>,
     tx_queue: BoundedDeque<RelayTxItem>,
     recent_rx: BoundedDeque<u64>,
@@ -177,6 +181,10 @@ impl Relay {
             state: RouterMutex::new(RelayInner {
                 sides: Vec::new(),
                 route_overrides: BTreeMap::new(),
+                route_weights: BTreeMap::new(),
+                route_priorities: BTreeMap::new(),
+                source_route_modes: BTreeMap::new(),
+                route_selection_cursors: BTreeMap::new(),
                 rx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 tx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 recent_rx: BoundedDeque::new(
@@ -261,6 +269,58 @@ impl Relay {
                 }
             })
             .collect()
+    }
+
+    fn apply_route_selection_locked(
+        &self,
+        st: &mut RelayInner,
+        src: Option<RelaySideId>,
+        mut sides: Vec<RelaySideId>,
+    ) -> Vec<RelaySideId> {
+        if sides.len() <= 1 {
+            return sides;
+        }
+
+        match st
+            .source_route_modes
+            .get(&src)
+            .copied()
+            .unwrap_or(RouteSelectionMode::Fanout)
+        {
+            RouteSelectionMode::Fanout => sides,
+            RouteSelectionMode::Weighted => {
+                sides.sort_unstable();
+                let total_weight = sides.iter().fold(0_u64, |acc, side| {
+                    acc + u64::from(st.route_weights.get(&(src, *side)).copied().unwrap_or(1))
+                });
+                if total_weight == 0 {
+                    return Vec::new();
+                }
+                let cursor = st.route_selection_cursors.entry(src).or_insert(0);
+                let pick = *cursor % total_weight;
+                *cursor = cursor.wrapping_add(1);
+                let mut remaining = pick;
+                for side in sides {
+                    let weight =
+                        u64::from(st.route_weights.get(&(src, side)).copied().unwrap_or(1));
+                    if remaining < weight {
+                        return vec![side];
+                    }
+                    remaining -= weight;
+                }
+                Vec::new()
+            }
+            RouteSelectionMode::Failover => {
+                sides.sort_by_key(|side| {
+                    (
+                        st.route_priorities.get(&(src, *side)).copied().unwrap_or(0),
+                        *side,
+                    )
+                });
+                sides.truncate(1);
+                sides
+            }
+        }
     }
 
     #[inline]
@@ -498,11 +558,12 @@ impl Relay {
         {
             let (eps, ty) = self.item_route_info(data)?;
             if discovery::is_discovery_type(ty) {
-                let st = self.state.lock();
-                return Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
-                    &st,
+                let mut st = self.state.lock();
+                let sides = self.eligible_side_ids_locked(&st, Some(exclude), false);
+                return Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
                     Some(exclude),
-                    false,
+                    sides,
                 )));
             }
 
@@ -510,17 +571,22 @@ impl Relay {
             let preferred_timesync_source = self.preferred_timesync_route_source(data, ty)?;
             #[cfg(not(feature = "timesync"))]
             let preferred_timesync_source: Option<String> = None;
-            let st = self.state.lock();
+            let mut st = self.state.lock();
             let restrict_link_local = Self::endpoints_are_link_local_only(&eps);
             if st.discovery_routes.is_empty() {
                 if restrict_link_local {
                     let targets = self.eligible_side_ids_locked(&st, Some(exclude), true);
-                    return Ok(RemoteSidePlan::Target(targets));
+                    return Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                        &mut st,
+                        Some(exclude),
+                        targets,
+                    )));
                 }
-                return Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
-                    &st,
+                let targets = self.eligible_side_ids_locked(&st, Some(exclude), false);
+                return Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
                     Some(exclude),
-                    false,
+                    targets,
                 )));
             }
             let now_ms = self.clock.now_ms();
@@ -562,28 +628,42 @@ impl Relay {
             }
 
             if had_exact {
-                Ok(RemoteSidePlan::Target(exact_targets))
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
+                    Some(exclude),
+                    exact_targets,
+                )))
             } else if had_known {
-                Ok(RemoteSidePlan::Target(generic_targets))
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
+                    Some(exclude),
+                    generic_targets,
+                )))
             } else if restrict_link_local {
                 let targets = self.eligible_side_ids_locked(&st, Some(exclude), true);
-                Ok(RemoteSidePlan::Target(targets))
-            } else {
-                Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
-                    &st,
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
                     Some(exclude),
-                    false,
+                    targets,
+                )))
+            } else {
+                let targets = self.eligible_side_ids_locked(&st, Some(exclude), false);
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
+                    Some(exclude),
+                    targets,
                 )))
             }
         }
         #[cfg(not(feature = "discovery"))]
         {
             let _ = data;
-            let st = self.state.lock();
-            Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
-                &st,
+            let mut st = self.state.lock();
+            let sides = self.eligible_side_ids_locked(&st, Some(exclude), false);
+            Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                &mut st,
                 Some(exclude),
-                false,
+                sides,
             )))
         }
     }
@@ -1027,6 +1107,12 @@ impl Relay {
         *slot = None;
         st.route_overrides
             .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+        st.route_weights
+            .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+        st.route_priorities
+            .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+        st.source_route_modes.remove(&Some(side));
+        st.route_selection_cursors.remove(&Some(side));
         st.rx_queue.retain(|queued| queued.src != side);
         st.tx_queue
             .retain(|queued| queued.dst != side && queued.src != Some(side));
@@ -1070,6 +1156,103 @@ impl Relay {
         if !enabled {
             st.tx_queue.retain(|queued| queued.dst != side);
         }
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_source_route_mode(
+        &self,
+        src: Option<RelaySideId>,
+        mode: RouteSelectionMode,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        if mode == RouteSelectionMode::Fanout {
+            st.source_route_modes.remove(&src);
+        } else {
+            st.source_route_modes.insert(src, mode);
+        }
+        st.route_selection_cursors.remove(&src);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_source_route_mode(&self, src: Option<RelaySideId>) -> TelemetryResult<()> {
+        self.set_source_route_mode(src, RouteSelectionMode::Fanout)
+    }
+
+    pub fn set_route_weight(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+        weight: u32,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_weights.insert((src, dst), weight);
+        st.route_selection_cursors.remove(&src);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_route_weight(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_weights.remove(&(src, dst));
+        st.route_selection_cursors.remove(&src);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_route_priority(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+        priority: u32,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_priorities.insert((src, dst), priority);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_route_priority(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_priorities.remove(&(src, dst));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
