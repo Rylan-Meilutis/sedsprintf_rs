@@ -1,6 +1,6 @@
 [package]
 name = "sedsprintf_rs"
-version = "3.6.0"
+version = "3.7.0"
 edition = "2024"
 build = "build.rs"
 authors = ["Rylan Meilutis <rylan@rylanswebsite.com>"]

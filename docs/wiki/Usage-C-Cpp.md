@@ -130,6 +130,23 @@ use the side-aware variants:
 - `seds_router_rx_serialized_packet_to_queue_from_side`
 - `seds_router_rx_packet_to_queue_from_side`
 
+Runtime side policy and routing controls are also available:
+
+- `seds_router_remove_side`
+- `seds_router_set_side_ingress_enabled`
+- `seds_router_set_side_egress_enabled`
+- `seds_router_set_route`
+- `seds_router_clear_route`
+- `seds_relay_remove_side`
+- `seds_relay_set_side_ingress_enabled`
+- `seds_relay_set_side_egress_enabled`
+- `seds_relay_set_route`
+- `seds_relay_clear_route`
+
+Pass `-1` as the source side to `seds_router_set_route` / `seds_router_clear_route` when you want
+to control locally-originated router TX rather than traffic received from a specific side. The
+relay route APIs use the same `-1` convention for locally-originated discovery TX.
+
 ## Payload layout expectations
 
 Payloads are little-endian. The schema defines element type and count. For dynamic payloads, sizes must be a multiple of

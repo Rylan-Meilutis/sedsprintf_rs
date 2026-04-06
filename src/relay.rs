@@ -35,10 +35,23 @@ pub enum RelayTxHandlerFn {
     Packet(Arc<PacketHandlerFn>),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct RelaySideOptions {
     pub reliable_enabled: bool,
     pub link_local_enabled: bool,
+    pub ingress_enabled: bool,
+    pub egress_enabled: bool,
+}
+
+impl Default for RelaySideOptions {
+    fn default() -> Self {
+        Self {
+            reliable_enabled: false,
+            link_local_enabled: false,
+            ingress_enabled: true,
+            egress_enabled: true,
+        }
+    }
 }
 
 /// One side of the relay – a name + TX handler.
@@ -75,6 +88,7 @@ impl ByteCost for RelayRxItem {
 /// Item that is ready to be transmitted out a destination side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RelayTxItem {
+    src: Option<RelaySideId>,
     dst: RelaySideId,
     data: RelayItem,
     priority: u8,
@@ -122,7 +136,8 @@ struct DiscoverySideState {
 
 /// Internal state, protected by RouterMutex so all public methods can take &self.
 struct RelayInner {
-    sides: Vec<RelaySide>,
+    sides: Vec<Option<RelaySide>>,
+    route_overrides: BTreeMap<(Option<RelaySideId>, RelaySideId), bool>,
     rx_queue: BoundedDeque<RelayRxItem>,
     tx_queue: BoundedDeque<RelayTxItem>,
     recent_rx: BoundedDeque<u64>,
@@ -144,7 +159,6 @@ pub struct Relay {
 }
 
 enum RemoteSidePlan {
-    Flood,
     Target(Vec<RelaySideId>),
 }
 
@@ -162,6 +176,7 @@ impl Relay {
         Self {
             state: RouterMutex::new(RelayInner {
                 sides: Vec::new(),
+                route_overrides: BTreeMap::new(),
                 rx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 tx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 recent_rx: BoundedDeque::new(
@@ -178,6 +193,74 @@ impl Relay {
             }),
             clock,
         }
+    }
+
+    #[inline]
+    fn side_ref(st: &RelayInner, side: RelaySideId) -> TelemetryResult<&RelaySide> {
+        st.sides
+            .get(side)
+            .and_then(|side| side.as_ref())
+            .ok_or(TelemetryError::HandlerError("relay: invalid side id"))
+    }
+
+    #[inline]
+    fn ensure_side_ingress_enabled(&self, side: RelaySideId) -> TelemetryResult<()> {
+        let st = self.state.lock();
+        let side_ref = Self::side_ref(&st, side)?;
+        if side_ref.opts.ingress_enabled {
+            Ok(())
+        } else {
+            Err(TelemetryError::HandlerError(
+                "relay: ingress disabled for side id",
+            ))
+        }
+    }
+
+    #[inline]
+    fn route_allowed_locked(
+        &self,
+        st: &RelayInner,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+    ) -> bool {
+        let Ok(dst_side) = Self::side_ref(st, dst) else {
+            return false;
+        };
+        if !dst_side.opts.egress_enabled {
+            return false;
+        }
+        if let Some(src_id) = src {
+            let Ok(src_side) = Self::side_ref(st, src_id) else {
+                return false;
+            };
+            if !src_side.opts.ingress_enabled || src_id == dst {
+                return false;
+            }
+        }
+        st.route_overrides.get(&(src, dst)).copied().unwrap_or(true)
+    }
+
+    fn eligible_side_ids_locked(
+        &self,
+        st: &RelayInner,
+        src: Option<RelaySideId>,
+        restrict_link_local: bool,
+    ) -> Vec<RelaySideId> {
+        st.sides
+            .iter()
+            .enumerate()
+            .filter_map(|(side_id, side)| {
+                let side = side.as_ref()?;
+                if restrict_link_local && !side.opts.link_local_enabled {
+                    return None;
+                }
+                if self.route_allowed_locked(st, src, side_id) {
+                    Some(side_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[inline]
@@ -234,10 +317,7 @@ impl Relay {
     ) -> TelemetryResult<()> {
         let (handler, opts) = {
             let st = self.state.lock();
-            let side_ref = st
-                .sides
-                .get(side)
-                .ok_or(TelemetryError::HandlerError("relay: invalid side id"))?;
+            let side_ref = Self::side_ref(&st, side)?;
             (side_ref.tx_handler.clone(), side_ref.opts)
         };
 
@@ -297,10 +377,7 @@ impl Relay {
     fn send_reliable_to_side(&self, side: RelaySideId, data: RelayItem) -> TelemetryResult<()> {
         let (handler, opts) = {
             let st = self.state.lock();
-            let side_ref = st
-                .sides
-                .get(side)
-                .ok_or(TelemetryError::HandlerError("relay: invalid side id"))?;
+            let side_ref = Self::side_ref(&st, side)?;
             (side_ref.tx_handler.clone(), side_ref.opts)
         };
 
@@ -421,7 +498,12 @@ impl Relay {
         {
             let (eps, ty) = self.item_route_info(data)?;
             if discovery::is_discovery_type(ty) {
-                return Ok(RemoteSidePlan::Flood);
+                let st = self.state.lock();
+                return Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
+                    &st,
+                    Some(exclude),
+                    false,
+                )));
             }
 
             #[cfg(feature = "timesync")]
@@ -432,21 +514,14 @@ impl Relay {
             let restrict_link_local = Self::endpoints_are_link_local_only(&eps);
             if st.discovery_routes.is_empty() {
                 if restrict_link_local {
-                    let targets = st
-                        .sides
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(side, side_info)| {
-                            if side == exclude || !side_info.opts.link_local_enabled {
-                                None
-                            } else {
-                                Some(side)
-                            }
-                        })
-                        .collect();
+                    let targets = self.eligible_side_ids_locked(&st, Some(exclude), true);
                     return Ok(RemoteSidePlan::Target(targets));
                 }
-                return Ok(RemoteSidePlan::Flood);
+                return Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
+                    &st,
+                    Some(exclude),
+                    false,
+                )));
             }
             let now_ms = self.clock.now_ms();
             let mut had_exact = false;
@@ -464,9 +539,13 @@ impl Relay {
                     && st
                         .sides
                         .get(side)
+                        .and_then(|side| side.as_ref())
                         .map(|s| !s.opts.link_local_enabled)
                         .unwrap_or(true)
                 {
+                    continue;
+                }
+                if !self.route_allowed_locked(&st, Some(exclude), side) {
                     continue;
                 }
                 if preferred_timesync_source.as_deref().is_some_and(|source| {
@@ -487,28 +566,25 @@ impl Relay {
             } else if had_known {
                 Ok(RemoteSidePlan::Target(generic_targets))
             } else if restrict_link_local {
-                let targets = st
-                    .sides
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(side, side_info)| {
-                        if side == exclude || !side_info.opts.link_local_enabled {
-                            None
-                        } else {
-                            Some(side)
-                        }
-                    })
-                    .collect();
+                let targets = self.eligible_side_ids_locked(&st, Some(exclude), true);
                 Ok(RemoteSidePlan::Target(targets))
             } else {
-                Ok(RemoteSidePlan::Flood)
+                Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
+                    &st,
+                    Some(exclude),
+                    false,
+                )))
             }
         }
         #[cfg(not(feature = "discovery"))]
         {
             let _ = data;
-            let _ = exclude;
-            Ok(RemoteSidePlan::Flood)
+            let st = self.state.lock();
+            Ok(RemoteSidePlan::Target(self.eligible_side_ids_locked(
+                &st,
+                Some(exclude),
+                false,
+            )))
         }
     }
 
@@ -597,14 +673,18 @@ impl Relay {
             if Self::prune_discovery_routes_locked(&mut st, now_ms) {
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
-            if st.sides.is_empty() {
+            if !st.sides.iter().any(|side| side.is_some()) {
                 return Ok(());
             }
             st.discovery_cadence.on_announce_sent(now_ms);
             st.sides
                 .iter()
                 .enumerate()
-                .map(|(side_id, side)| {
+                .filter_map(|(side_id, side)| {
+                    let side = side.as_ref()?;
+                    if !self.route_allowed_locked(&st, None, side_id) {
+                        return None;
+                    }
                     let endpoints = self.advertised_discovery_endpoints_for_link_locked(
                         &st,
                         now_ms,
@@ -612,7 +692,7 @@ impl Relay {
                     );
                     let timesync_sources =
                         self.advertised_discovery_timesync_sources_for_link_locked(&st, now_ms);
-                    (side_id, endpoints, timesync_sources)
+                    Some((side_id, endpoints, timesync_sources))
                 })
                 .collect::<Vec<_>>()
         };
@@ -625,6 +705,7 @@ impl Relay {
                 let priority = Self::relay_item_priority(&data)?;
                 st.tx_queue.push_back_prioritized(
                     RelayTxItem {
+                        src: None,
                         dst,
                         data,
                         priority,
@@ -642,6 +723,7 @@ impl Relay {
                 let priority = Self::relay_item_priority(&data)?;
                 st.tx_queue.push_back_prioritized(
                     RelayTxItem {
+                        src: None,
                         dst,
                         data,
                         priority,
@@ -662,7 +744,13 @@ impl Relay {
             if removed {
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
-            let has_any = st.sides.iter().any(|side| {
+            let has_any = st.sides.iter().enumerate().any(|(side_id, side)| {
+                let Some(side) = side.as_ref() else {
+                    return false;
+                };
+                if !self.route_allowed_locked(&st, None, side_id) {
+                    return false;
+                }
                 !self
                     .advertised_discovery_endpoints_for_link_locked(
                         &st,
@@ -674,7 +762,7 @@ impl Relay {
                         .advertised_discovery_timesync_sources_for_link_locked(&st, now_ms)
                         .is_empty()
             });
-            if st.sides.is_empty() || !has_any {
+            if !st.sides.iter().any(|side| side.is_some()) || !has_any {
                 return Ok(false);
             }
             st.discovery_cadence.due(now_ms)
@@ -764,10 +852,10 @@ impl Relay {
 
             // Snapshot the tx handlers so we don't need to immutably borrow `st.sides`
             // while mutably iterating `st.reliable_tx`.
-            let side_handlers: Vec<RelayTxHandlerFn> = st
+            let side_handlers: Vec<Option<RelayTxHandlerFn>> = st
                 .sides
                 .iter()
-                .map(|side| side.tx_handler.clone())
+                .map(|side| side.as_ref().map(|side| side.tx_handler.clone()))
                 .collect();
 
             for ((side, ty_u32), tx_state) in st.reliable_tx.iter_mut() {
@@ -783,7 +871,7 @@ impl Relay {
                     inflight.retries += 1;
                     inflight.last_send_ms = now;
 
-                    if let Some(handler) = side_handlers.get(*side) {
+                    if let Some(Some(handler)) = side_handlers.get(*side) {
                         resend.push((handler.clone(), inflight.bytes.clone()));
                     }
                 }
@@ -887,11 +975,11 @@ impl Relay {
     {
         let mut st = self.state.lock();
         let id = st.sides.len();
-        st.sides.push(RelaySide {
+        st.sides.push(Some(RelaySide {
             name,
             tx_handler: RelayTxHandlerFn::Serialized(Arc::new(tx)),
             opts,
-        });
+        }));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
         id
@@ -918,14 +1006,104 @@ impl Relay {
     {
         let mut st = self.state.lock();
         let id = st.sides.len();
-        st.sides.push(RelaySide {
+        st.sides.push(Some(RelaySide {
             name,
             tx_handler: RelayTxHandlerFn::Packet(Arc::new(tx)),
             opts,
-        });
+        }));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
         id
+    }
+
+    /// Remove a side while keeping existing side IDs stable.
+    pub fn remove_side(&self, side: RelaySideId) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let slot = st.sides.get_mut(side).ok_or(TelemetryError::BadArg)?;
+        if slot.is_none() {
+            return Err(TelemetryError::BadArg);
+        }
+        *slot = None;
+        st.route_overrides
+            .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+        st.rx_queue.retain(|queued| queued.src != side);
+        st.tx_queue
+            .retain(|queued| queued.dst != side && queued.src != Some(side));
+        st.reliable_tx.retain(|(side_id, _), _| *side_id != side);
+        st.reliable_rx.retain(|(side_id, _), _| *side_id != side);
+        #[cfg(feature = "discovery")]
+        {
+            st.discovery_routes.remove(&side);
+            Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        }
+        Ok(())
+    }
+
+    pub fn set_side_ingress_enabled(
+        &self,
+        side: RelaySideId,
+        enabled: bool,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let side_ref = st
+            .sides
+            .get_mut(side)
+            .and_then(|side| side.as_mut())
+            .ok_or(TelemetryError::BadArg)?;
+        side_ref.opts.ingress_enabled = enabled;
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_side_egress_enabled(&self, side: RelaySideId, enabled: bool) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let side_ref = st
+            .sides
+            .get_mut(side)
+            .and_then(|side| side.as_mut())
+            .ok_or(TelemetryError::BadArg)?;
+        side_ref.opts.egress_enabled = enabled;
+        if !enabled {
+            st.tx_queue.retain(|queued| queued.dst != side);
+        }
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_route(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+        enabled: bool,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_overrides.insert((src, dst), enabled);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_route(&self, src: Option<RelaySideId>, dst: RelaySideId) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_overrides.remove(&(src, dst));
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
     }
 
     #[cfg(feature = "discovery")]
@@ -952,7 +1130,7 @@ impl Relay {
             .discovery_routes
             .iter()
             .filter_map(|(&side_id, route)| {
-                let side = st.sides.get(side_id)?;
+                let side = st.sides.get(side_id).and_then(|side| side.as_ref())?;
                 Some(TopologySideRoute {
                     side_id,
                     side_name: side.name,
@@ -981,11 +1159,8 @@ impl Relay {
     /// Note: `Arc::from(bytes)` allocates and copies `len` bytes into a new `Arc<[u8]>`.
     /// This is still “fast enough” for many cases, but it is not allocation-free / ISR-safe.
     pub fn rx_serialized_from_side(&self, src: RelaySideId, bytes: &[u8]) -> TelemetryResult<()> {
+        self.ensure_side_ingress_enabled(src)?;
         let mut st = self.state.lock();
-
-        if src >= st.sides.len() {
-            return Err(TelemetryError::HandlerError("relay: invalid side id"));
-        }
 
         let data = RelayItem::Serialized(Arc::from(bytes));
         let priority = Self::relay_item_priority(&data)?;
@@ -1003,11 +1178,8 @@ impl Relay {
     ///
     /// The packet is wrapped in `Arc<Packet>` so fanout can clone the pointer cheaply.
     pub fn rx_from_side(&self, src: RelaySideId, packet: Packet) -> TelemetryResult<()> {
+        self.ensure_side_ingress_enabled(src)?;
         let mut st = self.state.lock();
-
-        if src >= st.sides.len() {
-            return Err(TelemetryError::HandlerError("relay: invalid side id"));
-        }
 
         let data = RelayItem::Packet(Arc::new(packet));
         let priority = Self::relay_item_priority(&data)?;
@@ -1044,13 +1216,11 @@ impl Relay {
     ///
     /// Fanout is cheap: the `RelayItem` is cloned (Arc bump) and reused across all destinations.
     fn process_rx_queue_item(&self, item: RelayRxItem) -> TelemetryResult<()> {
+        self.ensure_side_ingress_enabled(item.src)?;
         if let RelayItem::Serialized(bytes) = &item.data {
             let (opts, handler_is_serialized) = {
                 let st = self.state.lock();
-                let side_ref = st
-                    .sides
-                    .get(item.src)
-                    .ok_or(TelemetryError::HandlerError("relay: invalid side id"))?;
+                let side_ref = Self::side_ref(&st, item.src)?;
                 (
                     side_ref.opts,
                     matches!(side_ref.tx_handler, RelayTxHandlerFn::Serialized(_)),
@@ -1180,37 +1350,18 @@ impl Relay {
 
         let plan = self.remote_side_plan(&data, src)?;
         let mut st = self.state.lock();
-        match plan {
-            RemoteSidePlan::Flood => {
-                let num_sides = st.sides.len();
-                for dst in 0..num_sides {
-                    if dst == src {
-                        continue;
-                    }
-                    let priority = Self::relay_item_priority(&data)?;
-                    st.tx_queue.push_back_prioritized(
-                        RelayTxItem {
-                            dst,
-                            data: data.clone(),
-                            priority,
-                        },
-                        |queued| queued.priority,
-                    )?;
-                }
-            }
-            RemoteSidePlan::Target(sides) => {
-                for dst in sides {
-                    let priority = Self::relay_item_priority(&data)?;
-                    st.tx_queue.push_back_prioritized(
-                        RelayTxItem {
-                            dst,
-                            data: data.clone(),
-                            priority,
-                        },
-                        |queued| queued.priority,
-                    )?;
-                }
-            }
+        let RemoteSidePlan::Target(sides) = plan;
+        for dst in sides {
+            let priority = Self::relay_item_priority(&data)?;
+            st.tx_queue.push_back_prioritized(
+                RelayTxItem {
+                    src: Some(src),
+                    dst,
+                    data: data.clone(),
+                    priority,
+                },
+                |queued| queued.priority,
+            )?;
         }
         Ok(())
     }
@@ -1299,19 +1450,32 @@ impl Relay {
         let start = self.clock.now_ms();
         loop {
             self.process_reliable_timeouts()?;
-            let opt: Option<(RelaySideId, RelayTxHandlerFn, RelaySideOptions, RelayItem)> = {
+            let opt: Option<(
+                Option<RelaySideId>,
+                RelaySideId,
+                RelayTxHandlerFn,
+                RelaySideOptions,
+                RelayItem,
+            )> = {
                 let mut st = self.state.lock();
                 if let Some(item) = st.tx_queue.pop_front() {
-                    let side = st.sides.get(item.dst).cloned();
-                    side.map(|s| (item.dst, s.tx_handler, s.opts, item.data))
+                    let side = st.sides.get(item.dst).and_then(|side| side.clone());
+                    side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
                 } else {
                     None
                 }
             };
 
-            let Some((dst, handler, opts, data)) = opt else {
+            let Some((src, dst, handler, opts, data)) = opt else {
                 break;
             };
+            let allowed = {
+                let st = self.state.lock();
+                self.route_allowed_locked(&st, src, dst)
+            };
+            if !allowed {
+                continue;
+            }
             if opts.reliable_enabled && matches!(handler, RelayTxHandlerFn::Serialized(_)) {
                 self.send_reliable_to_side(dst, data)?;
             } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
@@ -1368,23 +1532,40 @@ impl Relay {
 
             // Then send out TX
             let sent_one = {
-                let opt: Option<(RelaySideId, RelayTxHandlerFn, RelaySideOptions, RelayItem)> = {
+                let opt: Option<(
+                    Option<RelaySideId>,
+                    RelaySideId,
+                    RelayTxHandlerFn,
+                    RelaySideOptions,
+                    RelayItem,
+                )> = {
                     let mut st = self.state.lock();
                     if let Some(item) = st.tx_queue.pop_front() {
-                        let side = st.sides.get(item.dst).cloned();
-                        side.map(|s| (item.dst, s.tx_handler, s.opts, item.data))
+                        let side = st.sides.get(item.dst).and_then(|side| side.clone());
+                        side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
                     } else {
                         None
                     }
                 };
 
-                if let Some((dst, handler, opts, data)) = opt {
-                    if opts.reliable_enabled && matches!(handler, RelayTxHandlerFn::Serialized(_)) {
+                if let Some((src, dst, handler, opts, data)) = opt {
+                    let allowed = {
+                        let st = self.state.lock();
+                        self.route_allowed_locked(&st, src, dst)
+                    };
+                    if !allowed {
+                        false
+                    } else if opts.reliable_enabled
+                        && matches!(handler, RelayTxHandlerFn::Serialized(_))
+                    {
                         self.send_reliable_to_side(dst, data)?;
+                        true
                     } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
                         self.call_tx_handler(&handler, &adjusted)?;
+                        true
+                    } else {
+                        false
                     }
-                    true
                 } else {
                     false
                 }

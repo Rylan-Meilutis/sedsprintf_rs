@@ -93,7 +93,11 @@ struct RouterRxItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RouterTxItem {
     Broadcast(RouterItem),
-    ToSide { dst: RouterSideId, data: RouterItem },
+    ToSide {
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+        data: RouterItem,
+    },
 }
 
 impl ByteCost for RouterRxItem {
@@ -242,10 +246,23 @@ impl Debug for RouterTxHandlerFn {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct RouterSideOptions {
     pub reliable_enabled: bool,
     pub link_local_enabled: bool,
+    pub ingress_enabled: bool,
+    pub egress_enabled: bool,
+}
+
+impl Default for RouterSideOptions {
+    fn default() -> Self {
+        Self {
+            reliable_enabled: false,
+            link_local_enabled: false,
+            ingress_enabled: true,
+            egress_enabled: true,
+        }
+    }
 }
 
 /// One side of the router – a name + TX handler.
@@ -539,6 +556,7 @@ fn fallback_stdout(msg: &str) {
 #[derive(Debug, Clone)]
 struct RouterInner {
     sides: Vec<Option<RouterSide>>,
+    route_overrides: BTreeMap<(Option<RouterSideId>, RouterSideId), bool>,
     received_queue: BoundedDeque<RouterRxItem>,
     transmit_queue: BoundedDeque<TxQueued>,
     recent_rx: BoundedDeque<u64>,
@@ -702,7 +720,6 @@ impl TimeSyncRuntime {
 }
 
 enum RemoteSidePlan {
-    Flood,
     Target(Vec<RouterSideId>),
 }
 
@@ -775,7 +792,7 @@ where
 /// Router implementation
 impl Router {
     #[inline]
-    fn side_ref<'a>(st: &'a RouterInner, side: RouterSideId) -> TelemetryResult<&'a RouterSide> {
+    fn side_ref(st: &RouterInner, side: RouterSideId) -> TelemetryResult<&RouterSide> {
         st.sides
             .get(side)
             .and_then(|side| side.as_ref())
@@ -783,10 +800,77 @@ impl Router {
     }
 
     #[inline]
-    fn ensure_side_exists(&self, side: RouterSideId) -> TelemetryResult<()> {
+    fn ensure_side_ingress_enabled(&self, side: RouterSideId) -> TelemetryResult<()> {
         let st = self.state.lock();
-        let _ = Self::side_ref(&st, side)?;
-        Ok(())
+        let side_ref = Self::side_ref(&st, side)?;
+        if side_ref.opts.ingress_enabled {
+            Ok(())
+        } else {
+            Err(TelemetryError::HandlerError(
+                "router: ingress disabled for side id",
+            ))
+        }
+    }
+
+    #[inline]
+    fn default_route_enabled(&self, src: Option<RouterSideId>, dst: RouterSideId) -> bool {
+        if src == Some(dst) {
+            return false;
+        }
+        match src {
+            None => true,
+            Some(_) => self.mode == RouterMode::Relay,
+        }
+    }
+
+    #[inline]
+    fn route_allowed_locked(
+        &self,
+        st: &RouterInner,
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+    ) -> bool {
+        let Some(dst_side) = st.sides.get(dst).and_then(|side| side.as_ref()) else {
+            return false;
+        };
+        if !dst_side.opts.egress_enabled {
+            return false;
+        }
+        if let Some(src_id) = src {
+            let Some(src_side) = st.sides.get(src_id).and_then(|side| side.as_ref()) else {
+                return false;
+            };
+            if !src_side.opts.ingress_enabled {
+                return false;
+            }
+        }
+        st.route_overrides
+            .get(&(src, dst))
+            .copied()
+            .unwrap_or_else(|| self.default_route_enabled(src, dst))
+    }
+
+    fn eligible_side_ids_locked(
+        &self,
+        st: &RouterInner,
+        src: Option<RouterSideId>,
+        restrict_link_local: bool,
+    ) -> Vec<RouterSideId> {
+        st.sides
+            .iter()
+            .enumerate()
+            .filter_map(|(side_id, side)| {
+                let side = side.as_ref()?;
+                if restrict_link_local && !side.opts.link_local_enabled {
+                    return None;
+                }
+                if self.route_allowed_locked(st, src, side_id) {
+                    Some(side_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn router_item_priority(data: &RouterItem) -> TelemetryResult<u8> {
@@ -839,49 +923,20 @@ impl Router {
         let mut st = self.state.lock();
         let priority = Self::router_item_priority(&data)?;
 
-        match plan {
-            RemoteSidePlan::Flood => {
-                let side_ids = st
-                    .sides
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, side)| {
-                        if exclude == Some(idx) || side.is_none() {
-                            None
-                        } else {
-                            Some(idx)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                for idx in side_ids {
-                    st.transmit_queue.push_back_prioritized(
-                        TxQueued {
-                            item: RouterTxItem::ToSide {
-                                dst: idx,
-                                data: data.clone(),
-                            },
-                            ignore_local,
-                            priority,
-                        },
-                        |queued| queued.priority,
-                    )?;
-                }
-            }
-            RemoteSidePlan::Target(sides) => {
-                for idx in sides {
-                    st.transmit_queue.push_back_prioritized(
-                        TxQueued {
-                            item: RouterTxItem::ToSide {
-                                dst: idx,
-                                data: data.clone(),
-                            },
-                            ignore_local,
-                            priority,
-                        },
-                        |queued| queued.priority,
-                    )?;
-                }
-            }
+        let RemoteSidePlan::Target(sides) = plan;
+        for idx in sides {
+            st.transmit_queue.push_back_prioritized(
+                TxQueued {
+                    item: RouterTxItem::ToSide {
+                        src: exclude,
+                        dst: idx,
+                        data: data.clone(),
+                    },
+                    ignore_local,
+                    priority,
+                },
+                |queued| queued.priority,
+            )?;
         }
 
         Ok(())
@@ -897,41 +952,16 @@ impl Router {
             return self.enqueue_to_sides(data, src, true);
         }
 
-        match self.remote_side_plan(&data, src)? {
-            RemoteSidePlan::Flood => {
-                let side_ids = {
-                    let st = self.state.lock();
-                    st.sides
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(side, info)| info.as_ref().map(|_| side))
-                        .collect::<Vec<_>>()
-                };
-
-                for side in side_ids {
-                    if src == Some(side) {
-                        continue;
-                    }
-                    self.tx_item_impl(
-                        RouterTxItem::ToSide {
-                            dst: side,
-                            data: data.clone(),
-                        },
-                        true,
-                    )?;
-                }
-            }
-            RemoteSidePlan::Target(sides) => {
-                for side in sides {
-                    self.tx_item_impl(
-                        RouterTxItem::ToSide {
-                            dst: side,
-                            data: data.clone(),
-                        },
-                        true,
-                    )?;
-                }
-            }
+        let RemoteSidePlan::Target(sides) = self.remote_side_plan(&data, src)?;
+        for side in sides {
+            self.tx_item_impl(
+                RouterTxItem::ToSide {
+                    src,
+                    dst: side,
+                    data: data.clone(),
+                },
+                true,
+            )?;
         }
 
         Ok(())
@@ -967,24 +997,20 @@ impl Router {
     ) -> TelemetryResult<bool> {
         #[cfg(feature = "discovery")]
         {
-            match self.remote_side_plan(data, exclude)? {
-                RemoteSidePlan::Target(sides) => Ok(!sides.is_empty()),
-                RemoteSidePlan::Flood => {
-                    let st = self.state.lock();
-                    Ok(st
-                        .sides
-                        .iter()
-                        .enumerate()
-                        .any(|(side, _)| exclude != Some(side)))
-                }
-            }
+            let RemoteSidePlan::Target(sides) = self.remote_side_plan(data, exclude)?;
+            Ok(!sides.is_empty())
         }
 
         #[cfg(not(feature = "discovery"))]
         {
-            let _ = exclude;
             let (eps, ty) = self.item_route_info(data)?;
-            Ok(has_nonlocal_endpoint(&eps, &self.cfg) || force_remote_for_type(ty))
+            if !(has_nonlocal_endpoint(&eps, &self.cfg) || force_remote_for_type(ty)) {
+                return Ok(false);
+            }
+            let st = self.state.lock();
+            Ok(!self
+                .eligible_side_ids_locked(&st, exclude, Self::endpoints_are_link_local_only(&eps))
+                .is_empty())
         }
     }
 
@@ -997,7 +1023,10 @@ impl Router {
         {
             let (eps, ty) = self.item_route_info(data)?;
             if discovery::is_discovery_type(ty) {
-                return Ok(RemoteSidePlan::Flood);
+                let st = self.state.lock();
+                return Ok(RemoteSidePlan::Target(
+                    self.eligible_side_ids_locked(&st, exclude, false),
+                ));
             }
 
             #[cfg(feature = "timesync")]
@@ -1018,23 +1047,13 @@ impl Router {
             let restrict_link_local = Self::endpoints_are_link_local_only(&eps);
             if st.discovery_routes.is_empty() {
                 if restrict_link_local {
-                    let targets = st
-                        .sides
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(side, side_info)| {
-                            let side_info = side_info.as_ref()?;
-                            if exclude == Some(side) || !side_info.opts.link_local_enabled {
-                                None
-                            } else {
-                                Some(side)
-                            }
-                        })
-                        .collect();
+                    let targets = self.eligible_side_ids_locked(&st, exclude, true);
                     return Ok(RemoteSidePlan::Target(targets));
                 }
                 return if has_nonlocal || bootstrap_timesync {
-                    Ok(RemoteSidePlan::Flood)
+                    Ok(RemoteSidePlan::Target(
+                        self.eligible_side_ids_locked(&st, exclude, false),
+                    ))
                 } else {
                     Ok(RemoteSidePlan::Target(Vec::new()))
                 };
@@ -1061,6 +1080,9 @@ impl Router {
                 {
                     continue;
                 }
+                if !self.route_allowed_locked(&st, exclude, side) {
+                    continue;
+                }
                 if preferred_timesync_source.as_deref().is_some_and(|source| {
                     route.reachable_timesync_sources.iter().any(|s| s == source)
                 }) {
@@ -1079,22 +1101,12 @@ impl Router {
             } else if had_known {
                 Ok(RemoteSidePlan::Target(generic_targets))
             } else if restrict_link_local {
-                let targets = st
-                    .sides
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(side, side_info)| {
-                        let side_info = side_info.as_ref()?;
-                        if exclude == Some(side) || !side_info.opts.link_local_enabled {
-                            None
-                        } else {
-                            Some(side)
-                        }
-                    })
-                    .collect();
+                let targets = self.eligible_side_ids_locked(&st, exclude, true);
                 Ok(RemoteSidePlan::Target(targets))
             } else if has_nonlocal || bootstrap_timesync {
-                Ok(RemoteSidePlan::Flood)
+                Ok(RemoteSidePlan::Target(
+                    self.eligible_side_ids_locked(&st, exclude, false),
+                ))
             } else {
                 Ok(RemoteSidePlan::Target(Vec::new()))
             }
@@ -1103,7 +1115,10 @@ impl Router {
         {
             let _ = data;
             let _ = exclude;
-            Ok(RemoteSidePlan::Flood)
+            let st = self.state.lock();
+            Ok(RemoteSidePlan::Target(
+                self.eligible_side_ids_locked(&st, exclude, false),
+            ))
         }
     }
 
@@ -1244,6 +1259,9 @@ impl Router {
                 .enumerate()
                 .filter_map(|(side_id, side)| {
                     let side = side.as_ref()?;
+                    if !self.route_allowed_locked(&st, None, side_id) {
+                        return None;
+                    }
                     let endpoints = self.advertised_discovery_endpoints_for_link_locked(
                         &st,
                         now_ms,
@@ -1261,6 +1279,7 @@ impl Router {
                     discovery::build_discovery_announce(self.sender, now_ms, endpoints.as_slice())?;
                 self.tx_queue_item_with_flags(
                     RouterTxItem::ToSide {
+                        src: None,
                         dst: side_id,
                         data: RouterItem::Packet(pkt),
                     },
@@ -1275,6 +1294,7 @@ impl Router {
                 )?;
                 self.tx_queue_item_with_flags(
                     RouterTxItem::ToSide {
+                        src: None,
                         dst: side_id,
                         data: RouterItem::Packet(pkt),
                     },
@@ -1294,10 +1314,13 @@ impl Router {
             if removed {
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
-            let has_any = st.sides.iter().any(|side| {
+            let has_any = st.sides.iter().enumerate().any(|(side_id, side)| {
                 let Some(side) = side.as_ref() else {
                     return false;
                 };
+                if !self.route_allowed_locked(&st, None, side_id) {
+                    return false;
+                }
                 !self
                     .advertised_discovery_endpoints_for_link_locked(
                         &st,
@@ -2093,6 +2116,7 @@ impl Router {
         match dst {
             Some(dst) => self.tx_queue_item_with_flags(
                 RouterTxItem::ToSide {
+                    src: None,
                     dst,
                     data: RouterItem::Packet(pkt),
                 },
@@ -2189,7 +2213,9 @@ impl Router {
         called_from_queue: bool,
     ) -> TelemetryResult<bool> {
         let Some(cfg) = self.cfg.timesync_config() else {
-            if self.mode == RouterMode::Relay {
+            if !(src.is_none() && self.mode == RouterMode::Sink)
+                && self.should_route_remote(&RouterItem::Packet(pkt.clone()), src)?
+            {
                 self.relay_send(RouterItem::Packet(pkt.clone()), src, called_from_queue)?;
             }
             return Ok(true);
@@ -2316,7 +2342,9 @@ impl Router {
             let _ = self.poll_timesync()?;
         }
 
-        if self.mode == RouterMode::Relay {
+        if !(src.is_none() && self.mode == RouterMode::Sink)
+            && self.should_route_remote(&RouterItem::Packet(pkt.clone()), src)?
+        {
             self.relay_send(RouterItem::Packet(pkt.clone()), src, called_from_queue)?;
         }
 
@@ -2343,6 +2371,7 @@ impl Router {
             cfg,
             state: RouterMutex::new(RouterInner {
                 sides: Vec::new(),
+                route_overrides: BTreeMap::new(),
                 received_queue: BoundedDeque::new(
                     MAX_QUEUE_SIZE,
                     STARTING_QUEUE_SIZE,
@@ -2442,6 +2471,8 @@ impl Router {
                 return Err(TelemetryError::BadArg);
             }
             *slot = None;
+            st.route_overrides
+                .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
             st.transmit_queue.retain(
                 |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
             );
@@ -2456,6 +2487,78 @@ impl Router {
         }
         let mut isr_rx = self.isr_rx_queue.try_lock()?;
         isr_rx.retain(|queued| queued.src != Some(side));
+        Ok(())
+    }
+
+    pub fn set_side_ingress_enabled(
+        &self,
+        side: RouterSideId,
+        enabled: bool,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let side_ref = st
+            .sides
+            .get_mut(side)
+            .and_then(|side| side.as_mut())
+            .ok_or(TelemetryError::BadArg)?;
+        side_ref.opts.ingress_enabled = enabled;
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_side_egress_enabled(
+        &self,
+        side: RouterSideId,
+        enabled: bool,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let side_ref = st
+            .sides
+            .get_mut(side)
+            .and_then(|side| side.as_mut())
+            .ok_or(TelemetryError::BadArg)?;
+        side_ref.opts.egress_enabled = enabled;
+        if !enabled {
+            st.transmit_queue.retain(
+                |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
+            );
+        }
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_route(
+        &self,
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+        enabled: bool,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_overrides.insert((src, dst), enabled);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_route(&self, src: Option<RouterSideId>, dst: RouterSideId) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_overrides.remove(&(src, dst));
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
     }
 
@@ -2895,7 +2998,7 @@ impl Router {
     /// Enqueue a packet for RX processing with explicit source side.
     #[inline]
     pub fn rx_queue_from_side(&self, pkt: Packet, side: RouterSideId) -> TelemetryResult<()> {
-        self.ensure_side_exists(side)?;
+        self.ensure_side_ingress_enabled(side)?;
         pkt.validate()?;
         let data = RouterItem::Packet(pkt);
         let priority = Self::router_item_priority(&data)?;
@@ -2917,7 +3020,7 @@ impl Router {
     /// currently mutating the ISR RX queue.
     #[inline]
     pub fn rx_queue_from_side_isr(&self, pkt: Packet, side: RouterSideId) -> TelemetryResult<()> {
-        self.ensure_side_exists(side)?;
+        self.ensure_side_ingress_enabled(side)?;
         pkt.validate()?;
         let data = RouterItem::Packet(pkt);
         let priority = Self::router_item_priority(&data)?;
@@ -2935,7 +3038,7 @@ impl Router {
         bytes: &[u8],
         side: RouterSideId,
     ) -> TelemetryResult<()> {
-        self.ensure_side_exists(side)?;
+        self.ensure_side_ingress_enabled(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let priority = Self::router_item_priority(&data)?;
         let mut st = self.state.lock();
@@ -2960,7 +3063,7 @@ impl Router {
         bytes: &[u8],
         side: RouterSideId,
     ) -> TelemetryResult<()> {
-        self.ensure_side_exists(side)?;
+        self.ensure_side_ingress_enabled(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let priority = Self::router_item_priority(&data)?;
         self.isr_rx_queue.push_back_prioritized(RouterRxItem {
@@ -3113,7 +3216,7 @@ impl Router {
     /// the ingress side.
     fn rx_item(&self, item: &RouterRxItem, called_from_queue: bool) -> TelemetryResult<()> {
         if let Some(src) = item.src {
-            self.ensure_side_exists(src)?;
+            self.ensure_side_ingress_enabled(src)?;
         }
         let mut skip_dedupe = false;
 
@@ -3266,7 +3369,9 @@ impl Router {
                 }
 
                 if self.learn_discovery_packet(pkt, item.src)? {
-                    if self.mode == RouterMode::Relay {
+                    if !(item.src.is_none() && self.mode == RouterMode::Sink)
+                        && self.should_route_remote(&item.data, item.src)?
+                    {
                         self.relay_send(
                             RouterItem::Packet(pkt.to_owned()),
                             item.src,
@@ -3280,10 +3385,10 @@ impl Router {
                 eps.sort_unstable();
                 eps.dedup();
 
-                let has_remote = if self.mode == RouterMode::Relay {
-                    self.should_route_remote(&item.data, item.src)?
-                } else {
+                let has_remote = if item.src.is_none() && self.mode == RouterMode::Sink {
                     false
+                } else {
+                    self.should_route_remote(&item.data, item.src)?
                 };
 
                 let has_serialized_local = eps
@@ -3331,7 +3436,7 @@ impl Router {
                     let _ = any_matched;
                 }
 
-                if self.mode == RouterMode::Relay && has_remote {
+                if has_remote {
                     let relay_item = RouterItem::Packet(pkt.to_owned());
                     self.relay_send(relay_item, item.src, called_from_queue)?;
                 }
@@ -3360,7 +3465,9 @@ impl Router {
                     let pkt = serialize::deserialize_packet(bytes.as_ref())?;
                     pkt.validate()?;
                     let _ = self.learn_discovery_packet(&pkt, item.src)?;
-                    if self.mode == RouterMode::Relay {
+                    if !(item.src.is_none() && self.mode == RouterMode::Sink)
+                        && self.should_route_remote(&item.data, item.src)?
+                    {
                         self.relay_send(RouterItem::Packet(pkt), item.src, called_from_queue)?;
                     }
                     return Ok(());
@@ -3384,10 +3491,10 @@ impl Router {
                 eps.sort_unstable();
                 eps.dedup();
 
-                let has_remote = if self.mode == RouterMode::Relay {
-                    self.should_route_remote(&item.data, item.src)?
-                } else {
+                let has_remote = if item.src.is_none() && self.mode == RouterMode::Sink {
                     false
+                } else {
+                    self.should_route_remote(&item.data, item.src)?
                 };
 
                 for dest in eps {
@@ -3426,7 +3533,7 @@ impl Router {
                     let _ = any_matched;
                 }
 
-                if self.mode == RouterMode::Relay && has_remote {
+                if has_remote {
                     let relay_item = match pkt_opt {
                         Some(ref p) => RouterItem::Packet(p.clone()),
                         None => RouterItem::Serialized(bytes.clone()),
@@ -3603,55 +3710,24 @@ impl Router {
                 if !send_remote {
                     return Ok(());
                 }
-                match self.remote_side_plan(&data, None)? {
-                    RemoteSidePlan::Flood => {
-                        let side_ids = {
-                            let st = self.state.lock();
-                            st.sides
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(side, info)| info.as_ref().map(|_| side))
-                                .collect::<Vec<_>>()
-                        };
-
-                        for side in side_ids {
-                            if let Err(e) = self.send_reliable_to_side(side, data.clone()) {
-                                match &data {
-                                    RouterItem::Packet(pkt) => {
-                                        let _ = self.handle_callback_error(pkt, None, e);
-                                    }
-                                    RouterItem::Serialized(bytes) => {
-                                        if let Ok(env) = serialize::peek_envelope(bytes.as_ref()) {
-                                            let _ =
-                                                self.handle_callback_error_from_env(&env, None, e);
-                                        }
-                                    }
+                let RemoteSidePlan::Target(sides) = self.remote_side_plan(&data, None)?;
+                for side in sides {
+                    if let Err(e) = self.send_reliable_to_side(side, data.clone()) {
+                        match &data {
+                            RouterItem::Packet(pkt) => {
+                                let _ = self.handle_callback_error(pkt, None, e);
+                            }
+                            RouterItem::Serialized(bytes) => {
+                                if let Ok(env) = serialize::peek_envelope(bytes.as_ref()) {
+                                    let _ = self.handle_callback_error_from_env(&env, None, e);
                                 }
-                                return Err(TelemetryError::HandlerError("tx handler failed"));
                             }
                         }
-                    }
-                    RemoteSidePlan::Target(sides) => {
-                        for side in sides {
-                            if let Err(e) = self.send_reliable_to_side(side, data.clone()) {
-                                match &data {
-                                    RouterItem::Packet(pkt) => {
-                                        let _ = self.handle_callback_error(pkt, None, e);
-                                    }
-                                    RouterItem::Serialized(bytes) => {
-                                        if let Ok(env) = serialize::peek_envelope(bytes.as_ref()) {
-                                            let _ =
-                                                self.handle_callback_error_from_env(&env, None, e);
-                                        }
-                                    }
-                                }
-                                return Err(TelemetryError::HandlerError("tx handler failed"));
-                            }
-                        }
+                        return Err(TelemetryError::HandlerError("tx handler failed"));
                     }
                 }
             }
-            RouterTxItem::ToSide { dst, data } => {
+            RouterTxItem::ToSide { src, dst, data } => {
                 if !ignore_local {
                     if self.is_duplicate_pkt(&data)? {
                         return Ok(());
@@ -3664,6 +3740,13 @@ impl Router {
                     if !suppress_local {
                         self.dispatch_local_for_item(&data)?;
                     }
+                }
+                let allowed = {
+                    let st = self.state.lock();
+                    self.route_allowed_locked(&st, src, dst)
+                };
+                if !allowed {
+                    return Ok(());
                 }
                 if let Err(e) = self.send_reliable_to_side(dst, data.clone()) {
                     match &data {
@@ -3719,7 +3802,7 @@ impl Router {
     /// Receive a packet with explicit ingress side.
     #[inline]
     pub fn rx_from_side(&self, pkt: &Packet, side: RouterSideId) -> TelemetryResult<()> {
-        self.ensure_side_exists(side)?;
+        self.ensure_side_ingress_enabled(side)?;
         let data = RouterItem::Packet(pkt.clone());
         let item = RouterRxItem {
             src: Some(side),
@@ -3732,7 +3815,7 @@ impl Router {
     /// Receive serialized bytes with explicit ingress side.
     #[inline]
     pub fn rx_serialized_from_side(&self, bytes: &[u8], side: RouterSideId) -> TelemetryResult<()> {
-        self.ensure_side_exists(side)?;
+        self.ensure_side_ingress_enabled(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let item = RouterRxItem {
             src: Some(side),

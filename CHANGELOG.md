@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.7.0
+
+- Added runtime side routing controls for both `Router` and `Relay` across Rust, C, and Python.
+- `Relay` now also supports `remove_side(...)`, bringing side lifecycle parity with `Router`
+  across Rust, C, and Python while preserving stable side IDs.
+- Routers and relays now support per-side `ingress_enabled` and `egress_enabled` policy, so a
+  deployment can use many RX sides while limiting TX to one or a selected subset of sides.
+- Added runtime route overrides for `(local TX or source side) -> destination side`, enabling
+  one-way relay paths such as `A -> B` while blocking `B -> A`, plus selective exclusion of
+  specific sides from locally-originated traffic on both routers and relays.
+- Default routing behavior still matches the existing model seeded by `RouterMode`: `Relay`
+  initializes as a full side-to-side mesh, while `Sink` keeps RX-side forwarding disabled unless
+  routing is explicitly enabled.
+- Discovery announcements now respect the active per-side egress policy and local route overrides,
+  so advertised topology follows the currently allowed output links for both routers and relays.
+- Added regression coverage for asymmetric routing, ingress-disabled sides, and the new C ABI
+  runtime routing controls, including relay coverage.
+
 ## 3.6.0
 
 - Added router-side removal APIs across Rust, C, and Python with stable side IDs preserved for

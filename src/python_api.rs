@@ -572,6 +572,7 @@ impl PyRouter {
         let opts = RouterSideOptions {
             reliable_enabled,
             link_local_enabled: false,
+            ..RouterSideOptions::default()
         };
 
         let id = rtr.add_side_serialized_with_options(
@@ -591,7 +592,6 @@ impl PyRouter {
             opts,
         );
 
-        let id = id as usize;
         if self._side_cbs.len() <= id {
             self._side_cbs.resize_with(id + 1, || None);
         }
@@ -621,6 +621,7 @@ impl PyRouter {
         let opts = RouterSideOptions {
             reliable_enabled,
             link_local_enabled: false,
+            ..RouterSideOptions::default()
         };
 
         let id = rtr.add_side_packet_with_options(
@@ -642,7 +643,6 @@ impl PyRouter {
             opts,
         );
 
-        let id = id as usize;
         if self._side_cbs.len() <= id {
             self._side_cbs.resize_with(id + 1, || None);
         }
@@ -661,6 +661,46 @@ impl PyRouter {
             *slot = None;
         }
         Ok(())
+    }
+
+    fn set_side_ingress_enabled(&self, side_id: u32, enabled: bool) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_side_ingress_enabled(side_id as usize, enabled)
+            .map_err(py_err_from)
+    }
+
+    fn set_side_egress_enabled(&self, side_id: u32, enabled: bool) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_side_egress_enabled(side_id as usize, enabled)
+            .map_err(py_err_from)
+    }
+
+    fn set_route(&self, src_side_id: Option<u32>, dst_side_id: u32, enabled: bool) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_route(
+            src_side_id.map(|id| id as usize),
+            dst_side_id as usize,
+            enabled,
+        )
+        .map_err(py_err_from)
+    }
+
+    fn clear_route(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.clear_route(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
     }
 
     // ------------------------------------------------------------------------
@@ -1357,7 +1397,7 @@ impl PyRouter {
 pub struct PyRelay {
     inner: SArc<Relay>,
     _now_cb: Option<Py<PyAny>>,
-    _tx_cbs: Vec<Py<PyAny>>,
+    _tx_cbs: Vec<Option<Py<PyAny>>>,
 }
 
 #[pymethods]
@@ -1390,13 +1430,13 @@ impl PyRelay {
     ) -> PyResult<u32> {
         let cb_keep = tx.clone_ref(py);
         let cb_for_closure = cb_keep.clone_ref(py);
-        self._tx_cbs.push(cb_keep);
 
         let name_static: &'static str = Box::leak(name.to_owned().into_boxed_str());
 
         let opts = RelaySideOptions {
             reliable_enabled,
             link_local_enabled: false,
+            ..RelaySideOptions::default()
         };
 
         let id = self.inner.add_side_serialized_with_options(
@@ -1416,6 +1456,11 @@ impl PyRelay {
             opts,
         );
 
+        if self._tx_cbs.len() <= id {
+            self._tx_cbs.resize_with(id + 1, || None);
+        }
+        self._tx_cbs[id] = Some(cb_keep);
+
         Ok(id as u32)
     }
 
@@ -1429,13 +1474,13 @@ impl PyRelay {
     ) -> PyResult<u32> {
         let cb_keep = tx.clone_ref(py);
         let cb_for_closure = cb_keep.clone_ref(py);
-        self._tx_cbs.push(cb_keep);
 
         let name_static: &'static str = Box::leak(name.to_owned().into_boxed_str());
 
         let opts = RelaySideOptions {
             reliable_enabled,
             link_local_enabled: false,
+            ..RelaySideOptions::default()
         };
 
         let id = self.inner.add_side_packet_with_options(
@@ -1457,7 +1502,50 @@ impl PyRelay {
             opts,
         );
 
+        if self._tx_cbs.len() <= id {
+            self._tx_cbs.resize_with(id + 1, || None);
+        }
+        self._tx_cbs[id] = Some(cb_keep);
+
         Ok(id as u32)
+    }
+
+    fn remove_side(&mut self, side_id: u32) -> PyResult<()> {
+        self.inner
+            .remove_side(side_id as usize)
+            .map_err(py_err_from)?;
+        if let Some(slot) = self._tx_cbs.get_mut(side_id as usize) {
+            *slot = None;
+        }
+        Ok(())
+    }
+
+    fn set_side_ingress_enabled(&self, side_id: u32, enabled: bool) -> PyResult<()> {
+        self.inner
+            .set_side_ingress_enabled(side_id as usize, enabled)
+            .map_err(py_err_from)
+    }
+
+    fn set_side_egress_enabled(&self, side_id: u32, enabled: bool) -> PyResult<()> {
+        self.inner
+            .set_side_egress_enabled(side_id as usize, enabled)
+            .map_err(py_err_from)
+    }
+
+    fn set_route(&self, src_side_id: Option<u32>, dst_side_id: u32, enabled: bool) -> PyResult<()> {
+        self.inner
+            .set_route(
+                src_side_id.map(|id| id as usize),
+                dst_side_id as usize,
+                enabled,
+            )
+            .map_err(py_err_from)
+    }
+
+    fn clear_route(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
+        self.inner
+            .clear_route(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
     }
 
     fn rx_serialized_from_side(

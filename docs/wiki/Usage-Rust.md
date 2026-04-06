@@ -62,6 +62,46 @@ fn main() -> TelemetryResult<()> {
 On `std` builds, `Router::new(...)` uses an internal monotonic clock. If you need a custom
 monotonic source for tests, simulation, or `no_std`, use `Router::new_with_clock(...)`.
 
+`RouterMode` now seeds the default forwarding policy:
+
+- `Sink`: local TX still uses registered sides, but packets received through RX APIs do not relay
+  to other sides unless you add route overrides explicitly.
+- `Relay`: newly added sides default to a full mesh, so received packets can relay to all other
+  eligible sides.
+
+You can then override routing at runtime:
+
+```rust
+let router = Router::new(RouterMode::Relay, cfg);
+let side_a = router.add_side_serialized("A", tx_a);
+let side_b = router.add_side_serialized("B", tx_b);
+let side_c = router.add_side_serialized("C", tx_c);
+
+router.set_route(None, side_b, false)?;          // local TX does not go to B
+router.set_route(Some(side_a), side_b, true)?;   // allow A -> B
+router.set_route(Some(side_b), side_a, false)?;  // block B -> A
+router.set_side_egress_enabled(side_c, false)?;  // C is ingress-only
+```
+
+`Relay` exposes the same runtime side-policy and route-override controls. It starts as a full
+mesh between sides, and you can then selectively block directions or disable ingress/egress on a
+per-side basis:
+
+```rust
+use sedsprintf_rs::relay::Relay;
+
+let relay = Relay::new(Box::new(MyClock));
+let side_a = relay.add_side_packet("A", tx_a);
+let side_b = relay.add_side_packet("B", tx_b);
+let side_c = relay.add_side_packet("C", tx_c);
+
+relay.set_route(Some(side_b), side_a, false)?;  // block B -> A
+relay.set_side_egress_enabled(side_c, false)?;  // C only ingresses
+```
+
+Both `Router` and `Relay` also support `remove_side(side_id)` while preserving the remaining side
+IDs.
+
 ## Reliable delivery (opt-in)
 
 If a `DataType` is marked `reliable: true` in
@@ -78,6 +118,7 @@ tx,
 RouterSideOptions {
 reliable_enabled: true,
 link_local_enabled: false,
+..RouterSideOptions::default()
 },
 );
 ```
@@ -91,6 +132,7 @@ tx,
 RouterSideOptions {
 reliable_enabled: false,
 link_local_enabled: true,
+..RouterSideOptions::default()
 },
 );
 ```

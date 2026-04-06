@@ -1,5 +1,28 @@
 # Changelogs
 
+## Version 3.7.0 highlights
+
+- Runtime router and relay routing tables:
+    - `Relay` now supports `remove_side(...)` too, so router and relay side lifecycle controls
+      match across Rust, C ABI, and Python.
+    - Added per-side ingress and egress controls so routers and relays can accept traffic from
+      many links while transmitting only on the links you allow.
+    - Added runtime route overrides for both local TX (`None` / `-1`) and side-to-side relay
+      paths, enabling asymmetric policies like `A -> B` but not `B -> A`.
+- Default behavior stays familiar:
+    - `RouterMode::Relay` still seeds a full mesh between sides by default.
+    - `RouterMode::Sink` still disables side-to-side forwarding by default, but routing can now be
+      enabled selectively at runtime without rebuilding the router.
+- Topology and ABI updates:
+    - Discovery announcements now follow the active egress and local-route policy for both routers
+      and relays.
+    - Added matching Rust, C ABI, and Python APIs for runtime side policy and routing changes.
+- Regression coverage:
+    - Added tests for asymmetric router and relay paths, ingress-disabled sides, and C ABI
+      local-route overrides.
+- Full
+  changelog: [v3.6.0...v3.7.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.6.0...v3.7.0)
+
 ## Version 3.6.0 highlights
 
 - Router side lifecycle management:

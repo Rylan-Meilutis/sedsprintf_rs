@@ -927,6 +927,7 @@ pub extern "C" fn seds_router_add_side_serialized(
     let opts = RouterSideOptions {
         reliable_enabled,
         link_local_enabled: false,
+        ..RouterSideOptions::default()
     };
 
     let side_id = router.add_side_serialized_with_options(side_name, tx_fn, opts);
@@ -1009,6 +1010,7 @@ pub extern "C" fn seds_router_add_side_packet(
     let opts = RouterSideOptions {
         reliable_enabled,
         link_local_enabled: false,
+        ..RouterSideOptions::default()
     };
 
     let side_id = router.add_side_packet_with_options(side_name, tx_closure, opts);
@@ -1023,6 +1025,69 @@ pub extern "C" fn seds_router_remove_side(r: *mut SedsRouter, side_id: i32) -> i
 
     let router = unsafe { &(*r).inner };
     ok_or_status(router.remove_side(side_id as usize))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_side_ingress_enabled(
+    r: *mut SedsRouter,
+    side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || side_id < 0 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    ok_or_status(router.set_side_ingress_enabled(side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_side_egress_enabled(
+    r: *mut SedsRouter,
+    side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || side_id < 0 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    ok_or_status(router.set_side_egress_enabled(side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_route(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    dst_side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.set_route(src, dst_side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_clear_route(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.clear_route(src, dst_side_id as usize))
 }
 
 // ============================================================================
@@ -1157,6 +1222,7 @@ pub extern "C" fn seds_relay_add_side_serialized(
     let opts = RelaySideOptions {
         reliable_enabled,
         link_local_enabled: false,
+        ..RelaySideOptions::default()
     };
     let side_id: RelaySideId = relay.add_side_serialized_with_options(side_name, tx_fn, opts);
     side_id as i32
@@ -1238,9 +1304,82 @@ pub extern "C" fn seds_relay_add_side_packet(
     let opts = RelaySideOptions {
         reliable_enabled,
         link_local_enabled: false,
+        ..RelaySideOptions::default()
     };
     let side_id: RelaySideId = relay.add_side_packet_with_options(side_name, tx_closure, opts);
     side_id as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_remove_side(r: *mut SedsRelay, side_id: i32) -> i32 {
+    if r.is_null() || side_id < 0 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    ok_or_status(relay.remove_side(side_id as usize))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_side_ingress_enabled(
+    r: *mut SedsRelay,
+    side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || side_id < 0 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    ok_or_status(relay.set_side_ingress_enabled(side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_side_egress_enabled(
+    r: *mut SedsRelay,
+    side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || side_id < 0 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    ok_or_status(relay.set_side_egress_enabled(side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_route(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    dst_side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.set_route(src, dst_side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_clear_route(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.clear_route(src, dst_side_id as usize))
 }
 
 // ============================================================================
@@ -2636,6 +2775,108 @@ mod tests {
     }
 
     #[test]
+    fn relay_c_abi_remove_side_stops_discovery_tx() {
+        let hits = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+
+        let relay = Relay::new(Box::new(TestClock {
+            now_ms: Arc::new(AtomicU64::new(0)),
+        }));
+        let relay = Box::into_raw(Box::new(SedsRelay {
+            inner: Arc::new(relay),
+        }));
+
+        let side_a = seds_relay_add_side_packet(
+            relay,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_relay_add_side_packet(
+            relay,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        assert!(side_a >= 0);
+        assert!(side_b >= 0);
+        assert_eq!(seds_relay_remove_side(relay, side_a), 0);
+        assert_eq!(
+            seds_relay_remove_side(relay, side_a),
+            status_from_err(TelemetryError::BadArg)
+        );
+
+        let discovery_pkt =
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        unsafe {
+            (*relay)
+                .inner
+                .rx_from_side(side_b as RelaySideId, discovery_pkt)
+                .unwrap();
+        }
+        assert_eq!(seds_relay_process_rx_queue(relay), 0);
+        hits.store(0, Ordering::SeqCst);
+
+        assert_eq!(seds_relay_announce_discovery(relay), 0);
+        assert_eq!(seds_relay_process_tx_queue(relay), 0);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        seds_relay_free(relay);
+    }
+
+    #[test]
+    fn router_c_abi_runtime_routes_can_limit_local_tx_to_one_side() {
+        let hits = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+
+        let router = Router::new_with_clock(
+            RouterMode::Relay,
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                |_pkt| Ok(()),
+            )]),
+            Box::new(TestClock {
+                now_ms: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let router = Box::into_raw(Box::new(SedsRouter {
+            inner: Arc::from(router),
+        }));
+
+        let side_a = seds_router_add_side_packet(
+            router,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_router_add_side_packet(
+            router,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        assert!(side_a >= 0);
+        assert!(side_b >= 0);
+        assert_eq!(seds_router_set_route(router, -1, side_b, false), 0);
+
+        assert_eq!(seds_router_announce_discovery(router), 0);
+        assert_eq!(seds_router_process_tx_queue(router), 0);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        seds_router_free(router);
+    }
+
+    #[test]
     fn router_c_abi_periodic_runs_discovery_and_queue_processing() {
         let hits = AtomicUsize::new(0);
         let side_name = b"NET";
@@ -2703,6 +2944,7 @@ mod tests {
         );
         assert!(side_a >= 0);
         assert!(side_b >= 0);
+        assert_eq!(seds_relay_set_route(relay, side_a, side_b, false), 0);
 
         let discovery_pkt =
             build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
@@ -2774,6 +3016,61 @@ mod tests {
         let hits_after_learning = hits.load(Ordering::SeqCst);
         assert_eq!(seds_relay_periodic(relay, 0), 0);
         assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 2);
+
+        seds_relay_free(relay);
+    }
+
+    #[test]
+    fn relay_c_abi_runtime_routes_can_limit_discovery_to_one_side() {
+        let hits_a = AtomicUsize::new(0);
+        let hits_b = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+
+        let relay = Relay::new(Box::new(TestClock {
+            now_ms: Arc::new(AtomicU64::new(0)),
+        }));
+        let relay = Box::into_raw(Box::new(SedsRelay {
+            inner: Arc::new(relay),
+        }));
+
+        let side_a = seds_relay_add_side_packet(
+            relay,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits_a as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_relay_add_side_packet(
+            relay,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits_b as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        assert!(side_a >= 0);
+        assert!(side_b >= 0);
+
+        let discovery_pkt =
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        unsafe {
+            (*relay)
+                .inner
+                .rx_from_side(side_a as RelaySideId, discovery_pkt)
+                .unwrap();
+        }
+        assert_eq!(seds_relay_process_rx_queue(relay), 0);
+        assert_eq!(seds_relay_process_tx_queue(relay), 0);
+        hits_a.store(0, Ordering::SeqCst);
+        hits_b.store(0, Ordering::SeqCst);
+
+        assert_eq!(seds_relay_set_route(relay, -1, side_b, false), 0);
+        assert_eq!(seds_relay_announce_discovery(relay), 0);
+        assert_eq!(seds_relay_process_tx_queue(relay), 0);
+        assert!(hits_a.load(Ordering::SeqCst) > 0);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 0);
 
         seds_relay_free(relay);
     }
