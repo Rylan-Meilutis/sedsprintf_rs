@@ -69,6 +69,7 @@ mod reliable_drop_tests {
             RouterSideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RouterSideOptions::default()
             },
         );
 
@@ -85,6 +86,7 @@ mod reliable_drop_tests {
             RouterSideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RouterSideOptions::default()
             },
         );
 
@@ -193,6 +195,7 @@ mod reliable_drop_tests {
             RouterSideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RouterSideOptions::default()
             },
         );
 

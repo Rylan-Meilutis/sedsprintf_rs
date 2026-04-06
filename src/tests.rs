@@ -3256,6 +3256,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3278,6 +3279,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3328,6 +3330,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3355,6 +3358,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3368,6 +3372,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3398,6 +3403,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
         *relay2_dst_id.lock().unwrap() = Some(relay2_dst);
@@ -3449,6 +3455,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3472,6 +3479,7 @@ mod relay_reliable_tests {
             RelaySideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RelaySideOptions::default()
             },
         );
 
@@ -3577,6 +3585,7 @@ mod reliable_tests {
             RouterSideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RouterSideOptions::default()
             },
         );
         *receiver_side_id.lock().unwrap() = Some(receiver_side);
@@ -3601,6 +3610,7 @@ mod reliable_tests {
             RouterSideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RouterSideOptions::default()
             },
         );
         *sender_side_id.lock().unwrap() = Some(sender_side);
@@ -3651,6 +3661,7 @@ mod reliable_tests {
             RouterSideOptions {
                 reliable_enabled: true,
                 link_local_enabled: false,
+                ..RouterSideOptions::default()
             },
         );
 
@@ -3989,7 +4000,7 @@ mod router_tests {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
             });
-            relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+            let _side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_b_c.lock().unwrap().push(pkt.clone());
                 Ok(())
             });
@@ -4018,6 +4029,179 @@ mod router_tests {
             assert_eq!(got_a.len(), 1);
             assert!(got_b.is_empty());
             assert_eq!(got_a[0].data_type(), DataType::GpsData);
+        }
+
+        #[test]
+        fn relay_runtime_routes_support_asymmetric_and_ingress_only_links() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_c: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let seen_c_c = seen_c.clone();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c = relay.add_side_packet("C", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_c_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            relay.set_route(Some(side_b), side_a, false).unwrap();
+            relay.set_side_egress_enabled(side_c, false).unwrap();
+
+            let pkt_a = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            relay.rx_from_side(side_a, pkt_a).unwrap();
+            relay.process_all_queues().unwrap();
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
+            assert!(seen_c.lock().unwrap().is_empty());
+
+            let pkt_b = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[4.0, 5.0, 6.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            relay.rx_from_side(side_b, pkt_b).unwrap();
+            relay.process_all_queues().unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 0);
+
+            let pkt_c = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[7.0, 8.0, 9.0],
+                &[DataEndpoint::Radio],
+                3,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt_c).unwrap();
+            relay.process_all_queues().unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 2);
+            assert!(seen_c.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn relay_can_disable_ingress_for_a_side() {
+            let relay = Relay::new(zero_clock());
+            let side =
+                relay.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+            relay.set_side_ingress_enabled(side, false).unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                4,
+            )
+            .unwrap();
+
+            match relay.rx_from_side(side, pkt) {
+                Err(TelemetryError::HandlerError(msg)) => {
+                    assert!(msg.contains("ingress disabled"));
+                }
+                other => panic!("expected ingress-disabled error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn relay_remove_side_stops_transmit_and_rejects_removed_ingress() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_c: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let seen_c_c = seen_c.clone();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            relay.add_side_packet("C", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_c_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            relay.remove_side(side_a).unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                5,
+            )
+            .unwrap();
+            relay.rx_from_side(side_b, pkt.clone()).unwrap();
+            relay.process_all_queues().unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            assert!(seen_b.lock().unwrap().is_empty());
+            assert_eq!(seen_c.lock().unwrap().len(), 1);
+            match relay.rx_from_side(side_a, pkt) {
+                Err(TelemetryError::HandlerError(msg)) => {
+                    assert!(msg.contains("invalid side id"));
+                }
+                other => panic!("expected invalid removed side error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn relay_remove_side_updates_discovery_routes_and_announces_remaining_topology() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let discovery_pkt =
+                build_discovery_announce("REMOTE_B", 0, &[DataEndpoint::SdCard]).unwrap();
+            relay.rx_from_side(side_b, discovery_pkt).unwrap();
+            relay.process_rx_queue().unwrap();
+            assert_eq!(relay.export_topology().routes.len(), 1);
+
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+            relay.remove_side(side_a).unwrap();
+
+            let snap = relay.export_topology();
+            assert_eq!(snap.routes.len(), 1);
+            assert_eq!(snap.advertised_endpoints, vec![DataEndpoint::SdCard]);
+            assert!(relay.poll_discovery().unwrap());
+            relay.process_tx_queue().unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            let b_pkts = seen_b.lock().unwrap().clone();
+            assert_eq!(b_pkts.len(), 1);
+            assert_eq!(b_pkts[0].data_type(), DataType::DiscoveryAnnounce);
+            let eps = crate::discovery::decode_discovery_announce(&b_pkts[0]).unwrap();
+            assert_eq!(eps, vec![DataEndpoint::SdCard]);
         }
 
         #[test]
@@ -4140,6 +4324,105 @@ mod router_tests {
             assert_eq!(b_pkts[0].data_type(), DataType::DiscoveryAnnounce);
             let eps = crate::discovery::decode_discovery_announce(&b_pkts[0]).unwrap();
             assert_eq!(eps, vec![DataEndpoint::Radio]);
+        }
+
+        #[test]
+        fn router_runtime_routes_support_asymmetric_and_ingress_only_links() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_c: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let seen_c_c = seen_c.clone();
+
+            let router =
+                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c = router.add_side_packet("C", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_c_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            router.set_route(None, side_b, false).unwrap();
+            router.set_route(None, side_c, false).unwrap();
+            router.set_route(Some(side_b), side_a, false).unwrap();
+            router.set_side_egress_enabled(side_c, false).unwrap();
+
+            let local_tx = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            router.tx(local_tx).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert!(seen_b.lock().unwrap().is_empty());
+            assert!(seen_c.lock().unwrap().is_empty());
+
+            let from_a = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[4.0, 5.0, 6.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            router.rx_from_side(&from_a, side_a).unwrap();
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
+            assert!(seen_c.lock().unwrap().is_empty());
+
+            let from_b = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[7.0, 8.0, 9.0],
+                &[DataEndpoint::Radio],
+                3,
+            )
+            .unwrap();
+            router.rx_from_side(&from_b, side_b).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+
+            let from_c = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[10.0, 11.0, 12.0],
+                &[DataEndpoint::Radio],
+                4,
+            )
+            .unwrap();
+            router.rx_from_side(&from_c, side_c).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 2);
+            assert_eq!(seen_b.lock().unwrap().len(), 2);
+            assert!(seen_c.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn router_can_disable_ingress_for_a_side() {
+            let router =
+                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let side =
+                router.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+            router.set_side_ingress_enabled(side, false).unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                5,
+            )
+            .unwrap();
+
+            match router.rx_from_side(&pkt, side) {
+                Err(TelemetryError::HandlerError(msg)) => {
+                    assert!(msg.contains("ingress disabled"));
+                }
+                other => panic!("expected ingress-disabled error, got {other:?}"),
+            }
         }
 
         #[cfg(feature = "timesync")]
@@ -4393,6 +4676,7 @@ mod router_tests {
                 crate::router::RouterSideOptions {
                     reliable_enabled: false,
                     link_local_enabled: true,
+                    ..crate::router::RouterSideOptions::default()
                 },
             );
 
@@ -4439,6 +4723,7 @@ mod router_tests {
                 crate::router::RouterSideOptions {
                     reliable_enabled: false,
                     link_local_enabled: true,
+                    ..crate::router::RouterSideOptions::default()
                 },
             );
 
@@ -4489,6 +4774,7 @@ mod router_tests {
                 crate::relay::RelaySideOptions {
                     reliable_enabled: false,
                     link_local_enabled: true,
+                    ..crate::relay::RelaySideOptions::default()
                 },
             );
             let side_src =
@@ -4548,6 +4834,7 @@ mod router_tests {
                 crate::router::RouterSideOptions {
                     reliable_enabled: false,
                     link_local_enabled: true,
+                    ..crate::router::RouterSideOptions::default()
                 },
             );
 

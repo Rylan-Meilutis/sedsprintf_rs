@@ -23,12 +23,17 @@ Handlers are typed:
 The router uses **named sides** (UART/CAN/RADIO/etc.) instead of LinkId.
 
 - You register sides with `add_side_serialized(...)` or `add_side_packet(...)`.
+- Side IDs remain stable after registration; removed sides become inactive tombstones.
 - As of v3.0.0, side tracking is internal. Most apps use `rx_serialized` / `rx` without
   threading side IDs through their handlers.
 - Side-aware RX functions can still tag an ingress side when you must override it:
   `rx_serialized_from_side` / `rx_from_side`.
-- In `RouterMode::Relay`, packets are forwarded once. Without discovery, this means all other sides except ingress.
-  With discovery enabled and a known route, forwarding is limited to matching candidate sides.
+- `RouterMode` now seeds the default forwarding graph:
+  `Sink` disables RX-side relay by default, while `Relay` starts as a full mesh.
+- Runtime controls can then override that default with per-side ingress/egress policy and
+  per-path route overrides for `(local TX or source side) -> destination side`.
+- With discovery enabled and a known route, forwarding is still limited to matching candidate
+  sides after applying the active route policy.
 
 Side TX handlers are either:
 
@@ -153,7 +158,14 @@ application-level acknowledgement on top of the transport-level reliable mode.
 
 ## Router modes
 
-- `RouterMode::Sink`: local handlers only.
-- `RouterMode::Relay`: local handlers plus forwarding for remote endpoints.
+- `RouterMode::Sink`: seeds local-only RX behavior, while still allowing local TX to registered
+  sides.
+- `RouterMode::Relay`: seeds a full side-to-side forwarding mesh.
 
-Switching mode changes forwarding behavior but does not affect validation or dedupe.
+Mode is now the starting policy. Runtime calls such as `remove_side`, `set_side_ingress_enabled`,
+`set_side_egress_enabled`, `set_route`, and `clear_route` can override it without rebuilding the
+router.
+
+`Relay` now uses the same runtime side lifecycle and route-override model, but without
+`RouterMode`; relay defaults to a full mesh and runtime calls can remove sides or selectively
+remove and restore paths.
