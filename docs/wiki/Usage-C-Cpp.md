@@ -137,15 +137,27 @@ Runtime side policy and routing controls are also available:
 - `seds_router_set_side_egress_enabled`
 - `seds_router_set_route`
 - `seds_router_clear_route`
+- `seds_router_set_source_route_mode`
+- `seds_router_set_route_weight`
+- `seds_router_set_route_priority`
 - `seds_relay_remove_side`
 - `seds_relay_set_side_ingress_enabled`
 - `seds_relay_set_side_egress_enabled`
 - `seds_relay_set_route`
 - `seds_relay_clear_route`
+- `seds_relay_set_source_route_mode`
+- `seds_relay_set_route_weight`
+- `seds_relay_set_route_priority`
 
 Pass `-1` as the source side to `seds_router_set_route` / `seds_router_clear_route` when you want
 to control locally-originated router TX rather than traffic received from a specific side. The
 relay route APIs use the same `-1` convention for locally-originated discovery TX.
+
+`SedsRouteSelectionMode` controls multi-path behavior:
+
+- `Seds_RSM_Fanout`: send to all eligible paths.
+- `Seds_RSM_Weighted`: send one packet on one eligible path using weighted round-robin.
+- `Seds_RSM_Failover`: send only on the lowest-priority eligible path.
 
 ## Payload layout expectations
 

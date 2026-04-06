@@ -191,11 +191,28 @@ pub const MAX_VALUE_DATA_ENDPOINT: u32 = (DataEndpoint::COUNT - 1) as u32;
 /// Maximum enum value for `DataType` (inclusive), derived from the schema.
 pub const MAX_VALUE_DATA_TYPE: u32 = (DataType::COUNT - 1) as u32;
 
+/// Maximum enum value for `RouteSelectionMode` (inclusive).
+pub const MAX_VALUE_ROUTE_SELECTION_MODE: i32 = 2;
+
 /// Implement `ReprU32Enum` helpers for `DataType`.
 impl_repr_u32_enum!(DataType, MAX_VALUE_DATA_TYPE);
 
 /// Implement `ReprU32Enum` helpers for `DataEndpoint`.
 impl_repr_u32_enum!(DataEndpoint, MAX_VALUE_DATA_ENDPOINT);
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum RouteSelectionMode {
+    Fanout = 0,
+    Weighted = 1,
+    Failover = 2,
+}
+
+impl_repr_i32_enum!(
+    RouteSelectionMode,
+    RouteSelectionMode::Fanout as i32,
+    RouteSelectionMode::Failover as i32
+);
 
 #[inline]
 const fn parse_usize(s: &str) -> usize {

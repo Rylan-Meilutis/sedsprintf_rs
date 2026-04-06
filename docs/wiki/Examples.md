@@ -11,6 +11,8 @@ For protocol details and role behavior, see [Time-Sync](Time-Sync).
 c-example-code/ ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/tree/main/c-example-code))
 -
 c-example-code/src/timesync_example.c ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/c-example-code/src/timesync_example.c))
+-
+c-example-code/src/load_balancing_example.c ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/c-example-code/src/load_balancing_example.c))
 
 What it demonstrates:
 
@@ -34,6 +36,8 @@ Suggested first steps:
 python-example/ ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/tree/main/python-example))
 -
 python-example/timesync_example.py ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/python-example/timesync_example.py))
+-
+python-example/load_balancing_example.py ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/python-example/load_balancing_example.py))
 
 What it demonstrates:
 
@@ -65,6 +69,8 @@ rust-example-code/reliable_example.rs ([source](https://github.com/Rylan-Meiluti
 rust-example-code/queue_timeout_example.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/rust-example-code/queue_timeout_example.rs))
 -
 rust-example-code/multinode_sim_example.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/rust-example-code/multinode_sim_example.rs))
+-
+rust-example-code/load_balancing_example.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/rust-example-code/load_balancing_example.rs))
 
 ## RTOS time sync examples
 

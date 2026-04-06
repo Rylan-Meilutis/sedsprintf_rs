@@ -31,12 +31,12 @@ use crate::{
     config::{
         DataEndpoint, DataType, DEVICE_IDENTIFIER, MAX_HANDLER_RETRIES, RELIABLE_MAX_PENDING,
         RELIABLE_MAX_RETRIES, RELIABLE_RETRANSMIT_MS,
-    }, get_needed_message_size, impl_letype_num,
-    is_reliable_type,
-    lock::RouterMutex, message_meta, message_priority,
-    packet::Packet,
-    reliable_mode, serialize,
-    MessageElement,
+    }, get_needed_message_size, impl_letype_num, is_reliable_type,
+    lock::RouterMutex,
+    message_meta, message_priority, packet::Packet,
+    reliable_mode,
+    serialize, MessageElement,
+    RouteSelectionMode,
     TelemetryError, TelemetryResult,
 };
 use alloc::string::String;
@@ -557,6 +557,10 @@ fn fallback_stdout(msg: &str) {
 struct RouterInner {
     sides: Vec<Option<RouterSide>>,
     route_overrides: BTreeMap<(Option<RouterSideId>, RouterSideId), bool>,
+    route_weights: BTreeMap<(Option<RouterSideId>, RouterSideId), u32>,
+    route_priorities: BTreeMap<(Option<RouterSideId>, RouterSideId), u32>,
+    source_route_modes: BTreeMap<Option<RouterSideId>, RouteSelectionMode>,
+    route_selection_cursors: BTreeMap<Option<RouterSideId>, u64>,
     received_queue: BoundedDeque<RouterRxItem>,
     transmit_queue: BoundedDeque<TxQueued>,
     recent_rx: BoundedDeque<u64>,
@@ -873,6 +877,58 @@ impl Router {
             .collect()
     }
 
+    fn apply_route_selection_locked(
+        &self,
+        st: &mut RouterInner,
+        src: Option<RouterSideId>,
+        mut sides: Vec<RouterSideId>,
+    ) -> Vec<RouterSideId> {
+        if sides.len() <= 1 {
+            return sides;
+        }
+
+        match st
+            .source_route_modes
+            .get(&src)
+            .copied()
+            .unwrap_or(RouteSelectionMode::Fanout)
+        {
+            RouteSelectionMode::Fanout => sides,
+            RouteSelectionMode::Weighted => {
+                sides.sort_unstable();
+                let total_weight = sides.iter().fold(0_u64, |acc, side| {
+                    acc + u64::from(st.route_weights.get(&(src, *side)).copied().unwrap_or(1))
+                });
+                if total_weight == 0 {
+                    return Vec::new();
+                }
+                let cursor = st.route_selection_cursors.entry(src).or_insert(0);
+                let pick = *cursor % total_weight;
+                *cursor = cursor.wrapping_add(1);
+                let mut remaining = pick;
+                for side in sides {
+                    let weight =
+                        u64::from(st.route_weights.get(&(src, side)).copied().unwrap_or(1));
+                    if remaining < weight {
+                        return vec![side];
+                    }
+                    remaining -= weight;
+                }
+                Vec::new()
+            }
+            RouteSelectionMode::Failover => {
+                sides.sort_by_key(|side| {
+                    (
+                        st.route_priorities.get(&(src, *side)).copied().unwrap_or(0),
+                        *side,
+                    )
+                });
+                sides.truncate(1);
+                sides
+            }
+        }
+    }
+
     fn router_item_priority(data: &RouterItem) -> TelemetryResult<u8> {
         let ty = match data {
             RouterItem::Packet(pkt) => pkt.data_type(),
@@ -1023,9 +1079,10 @@ impl Router {
         {
             let (eps, ty) = self.item_route_info(data)?;
             if discovery::is_discovery_type(ty) {
-                let st = self.state.lock();
+                let mut st = self.state.lock();
+                let sides = self.eligible_side_ids_locked(&st, exclude, false);
                 return Ok(RemoteSidePlan::Target(
-                    self.eligible_side_ids_locked(&st, exclude, false),
+                    self.apply_route_selection_locked(&mut st, exclude, sides),
                 ));
             }
 
@@ -1042,17 +1099,20 @@ impl Router {
             #[cfg(not(feature = "timesync"))]
             let preferred_timesync_source: Option<String> = None;
 
-            let st = self.state.lock();
+            let mut st = self.state.lock();
             let has_nonlocal = has_nonlocal_endpoint(&eps, &self.cfg);
             let restrict_link_local = Self::endpoints_are_link_local_only(&eps);
             if st.discovery_routes.is_empty() {
                 if restrict_link_local {
                     let targets = self.eligible_side_ids_locked(&st, exclude, true);
-                    return Ok(RemoteSidePlan::Target(targets));
+                    return Ok(RemoteSidePlan::Target(
+                        self.apply_route_selection_locked(&mut st, exclude, targets),
+                    ));
                 }
                 return if has_nonlocal || bootstrap_timesync {
+                    let targets = self.eligible_side_ids_locked(&st, exclude, false);
                     Ok(RemoteSidePlan::Target(
-                        self.eligible_side_ids_locked(&st, exclude, false),
+                        self.apply_route_selection_locked(&mut st, exclude, targets),
                     ))
                 } else {
                     Ok(RemoteSidePlan::Target(Vec::new()))
@@ -1097,15 +1157,26 @@ impl Router {
             }
 
             if had_exact {
-                Ok(RemoteSidePlan::Target(exact_targets))
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
+                    exclude,
+                    exact_targets,
+                )))
             } else if had_known {
-                Ok(RemoteSidePlan::Target(generic_targets))
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
+                    exclude,
+                    generic_targets,
+                )))
             } else if restrict_link_local {
                 let targets = self.eligible_side_ids_locked(&st, exclude, true);
-                Ok(RemoteSidePlan::Target(targets))
-            } else if has_nonlocal || bootstrap_timesync {
                 Ok(RemoteSidePlan::Target(
-                    self.eligible_side_ids_locked(&st, exclude, false),
+                    self.apply_route_selection_locked(&mut st, exclude, targets),
+                ))
+            } else if has_nonlocal || bootstrap_timesync {
+                let targets = self.eligible_side_ids_locked(&st, exclude, false);
+                Ok(RemoteSidePlan::Target(
+                    self.apply_route_selection_locked(&mut st, exclude, targets),
                 ))
             } else {
                 Ok(RemoteSidePlan::Target(Vec::new()))
@@ -1114,10 +1185,10 @@ impl Router {
         #[cfg(not(feature = "discovery"))]
         {
             let _ = data;
-            let _ = exclude;
-            let st = self.state.lock();
+            let mut st = self.state.lock();
+            let sides = self.eligible_side_ids_locked(&st, exclude, false);
             Ok(RemoteSidePlan::Target(
-                self.eligible_side_ids_locked(&st, exclude, false),
+                self.apply_route_selection_locked(&mut st, exclude, sides),
             ))
         }
     }
@@ -2372,6 +2443,10 @@ impl Router {
             state: RouterMutex::new(RouterInner {
                 sides: Vec::new(),
                 route_overrides: BTreeMap::new(),
+                route_weights: BTreeMap::new(),
+                route_priorities: BTreeMap::new(),
+                source_route_modes: BTreeMap::new(),
+                route_selection_cursors: BTreeMap::new(),
                 received_queue: BoundedDeque::new(
                     MAX_QUEUE_SIZE,
                     STARTING_QUEUE_SIZE,
@@ -2473,6 +2548,12 @@ impl Router {
             *slot = None;
             st.route_overrides
                 .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+            st.route_weights
+                .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+            st.route_priorities
+                .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+            st.source_route_modes.remove(&Some(side));
+            st.route_selection_cursors.remove(&Some(side));
             st.transmit_queue.retain(
                 |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
             );
@@ -2526,6 +2607,103 @@ impl Router {
                 |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
             );
         }
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_source_route_mode(
+        &self,
+        src: Option<RouterSideId>,
+        mode: RouteSelectionMode,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        if mode == RouteSelectionMode::Fanout {
+            st.source_route_modes.remove(&src);
+        } else {
+            st.source_route_modes.insert(src, mode);
+        }
+        st.route_selection_cursors.remove(&src);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_source_route_mode(&self, src: Option<RouterSideId>) -> TelemetryResult<()> {
+        self.set_source_route_mode(src, RouteSelectionMode::Fanout)
+    }
+
+    pub fn set_route_weight(
+        &self,
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+        weight: u32,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_weights.insert((src, dst), weight);
+        st.route_selection_cursors.remove(&src);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_route_weight(
+        &self,
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_weights.remove(&(src, dst));
+        st.route_selection_cursors.remove(&src);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_route_priority(
+        &self,
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+        priority: u32,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_priorities.insert((src, dst), priority);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_route_priority(
+        &self,
+        src: Option<RouterSideId>,
+        dst: RouterSideId,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.route_priorities.remove(&(src, dst));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())

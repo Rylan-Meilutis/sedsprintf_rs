@@ -306,6 +306,134 @@ mod tests2 {
         assert_eq!(seen_vals, data);
     }
 
+    #[test]
+    fn router_load_balancing_smoke_exercises_public_runtime_controls() {
+        use crate::RouteSelectionMode;
+        use crate::discovery::build_discovery_announce;
+        use crate::router::{Router, RouterConfig};
+
+        let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_a_c = seen_a.clone();
+        let seen_b_c = seen_b.clone();
+
+        let router = Router::new_with_clock(
+            RouterMode::Sink,
+            RouterConfig::default(),
+            StepClock::new_default_box(),
+        );
+        let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_a_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+        let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_b_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+
+        let discovery_a = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_b = build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+        router.rx_from_side(&discovery_a, side_a).unwrap();
+        router.rx_from_side(&discovery_b, side_b).unwrap();
+        seen_a.lock().unwrap().clear();
+        seen_b.lock().unwrap().clear();
+
+        router
+            .set_source_route_mode(None, RouteSelectionMode::Weighted)
+            .unwrap();
+        router.set_route_weight(None, side_a, 1).unwrap();
+        router.set_route_weight(None, side_b, 1).unwrap();
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 2.0, 3.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        let pkt_failover = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[4.0, 5.0, 6.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+        router.tx(pkt.clone()).unwrap();
+
+        router
+            .set_source_route_mode(None, RouteSelectionMode::Failover)
+            .unwrap();
+        router.set_route_priority(None, side_a, 0).unwrap();
+        router.set_route_priority(None, side_b, 1).unwrap();
+        router.tx(pkt_failover).unwrap();
+
+        router.clear_route_weight(None, side_a).unwrap();
+        router.clear_route_priority(None, side_b).unwrap();
+        router.clear_source_route_mode(None).unwrap();
+
+        let total = seen_a.lock().unwrap().len() + seen_b.lock().unwrap().len();
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn relay_load_balancing_smoke_exercises_public_runtime_controls() {
+        use crate::RouteSelectionMode;
+        use crate::discovery::build_discovery_announce;
+        use crate::relay::Relay;
+
+        let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_a_c = seen_a.clone();
+        let seen_b_c = seen_b.clone();
+
+        let relay = Relay::new(StepClock::new_default_box());
+        let ingress = relay.add_side_packet("INGRESS", |_pkt: &Packet| Ok(()));
+        let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_a_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+        let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+            seen_b_c.lock().unwrap().push(pkt.clone());
+            Ok(())
+        });
+
+        let discovery_a = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_b = build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+        relay.rx_from_side(side_a, discovery_a).unwrap();
+        relay.rx_from_side(side_b, discovery_b).unwrap();
+        relay.process_all_queues().unwrap();
+        seen_a.lock().unwrap().clear();
+        seen_b.lock().unwrap().clear();
+
+        relay
+            .set_source_route_mode(Some(ingress), RouteSelectionMode::Weighted)
+            .unwrap();
+        relay.set_route_weight(Some(ingress), side_a, 2).unwrap();
+        relay.set_route_weight(Some(ingress), side_b, 1).unwrap();
+        relay
+            .set_source_route_mode(Some(ingress), RouteSelectionMode::Failover)
+            .unwrap();
+        relay.set_route_priority(Some(ingress), side_a, 0).unwrap();
+        relay.set_route_priority(Some(ingress), side_b, 1).unwrap();
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 2.0, 3.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+        relay.rx_from_side(ingress, pkt).unwrap();
+        relay.process_all_queues().unwrap();
+
+        relay.clear_route_weight(Some(ingress), side_a).unwrap();
+        relay.clear_route_priority(Some(ingress), side_b).unwrap();
+        relay.clear_source_route_mode(Some(ingress)).unwrap();
+
+        let total = seen_a.lock().unwrap().len() + seen_b.lock().unwrap().len();
+        assert_eq!(total, 1);
+    }
+
     /// A small “bus” that records transmitted frames for TX/RX queue tests.
     struct TestBus {
         frames: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -3913,6 +4041,7 @@ mod router_tests {
     mod discovery_tests {
         use crate::discovery::{
             build_discovery_announce, build_discovery_timesync_sources, DISCOVERY_FAST_INTERVAL_MS,
+            DISCOVERY_ROUTE_TTL_MS,
         };
         use crate::relay::Relay;
         use crate::router::{Clock, EndpointHandler, RouterConfig};
@@ -3921,11 +4050,23 @@ mod router_tests {
             packet::Packet,
             router::{Router, RouterMode},
         };
-        use crate::{DataEndpoint, DataType, TelemetryError, TelemetryResult};
+        use crate::{DataEndpoint, DataType, RouteSelectionMode, TelemetryError, TelemetryResult};
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::{Arc, Mutex};
 
         fn zero_clock() -> Box<dyn Clock + Send + Sync> {
             StepClock::new_box(0, 0)
+        }
+
+        #[derive(Clone)]
+        struct SharedClock {
+            now_ms: Arc<AtomicU64>,
+        }
+
+        impl Clock for SharedClock {
+            fn now_ms(&self) -> u64 {
+                self.now_ms.load(Ordering::SeqCst)
+            }
         }
 
         fn endpoint_by_name(name: &str) -> Option<DataEndpoint> {
@@ -4399,6 +4540,514 @@ mod router_tests {
             assert_eq!(seen_a.lock().unwrap().len(), 2);
             assert_eq!(seen_b.lock().unwrap().len(), 2);
             assert!(seen_c.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn router_weighted_route_mode_splits_discovered_paths_by_weight() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router =
+                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+            router.rx_from_side(&discovery_a, side_a).unwrap();
+            router.rx_from_side(&discovery_b, side_b).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            router
+                .set_source_route_mode(None, RouteSelectionMode::Weighted)
+                .unwrap();
+            router.set_route_weight(None, side_a, 2).unwrap();
+            router.set_route_weight(None, side_b, 1).unwrap();
+
+            for seq in 0..6 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    &[DataEndpoint::Radio],
+                    seq as u64,
+                )
+                .unwrap();
+                router.tx(pkt).unwrap();
+            }
+
+            assert_eq!(seen_a.lock().unwrap().len(), 4);
+            assert_eq!(seen_b.lock().unwrap().len(), 2);
+        }
+
+        #[test]
+        fn router_failover_route_mode_switches_when_preferred_path_expires() {
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router = Router::new_with_clock(
+                RouterMode::Sink,
+                RouterConfig::default(),
+                Box::new(SharedClock {
+                    now_ms: now_ms.clone(),
+                }),
+            );
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            router.rx_from_side(&discovery_a, side_a).unwrap();
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS / 2, Ordering::SeqCst);
+            let discovery_b = build_discovery_announce(
+                "REMOTE_B",
+                DISCOVERY_ROUTE_TTL_MS / 2,
+                &[DataEndpoint::Radio],
+            )
+            .unwrap();
+            router.rx_from_side(&discovery_b, side_b).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            router
+                .set_source_route_mode(None, RouteSelectionMode::Failover)
+                .unwrap();
+            router.set_route_priority(None, side_a, 0).unwrap();
+            router.set_route_priority(None, side_b, 1).unwrap();
+
+            let pkt1 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            router.tx(pkt1).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 0);
+
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+            let pkt2 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[2.0, 3.0, 4.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            router.tx(pkt2).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn router_weighted_route_mode_falls_back_to_remaining_path_when_other_path_expires() {
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router = Router::new_with_clock(
+                RouterMode::Sink,
+                RouterConfig::default(),
+                Box::new(SharedClock {
+                    now_ms: now_ms.clone(),
+                }),
+            );
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            router.rx_from_side(&discovery_a, side_a).unwrap();
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS / 2, Ordering::SeqCst);
+            let discovery_b = build_discovery_announce(
+                "REMOTE_B",
+                DISCOVERY_ROUTE_TTL_MS / 2,
+                &[DataEndpoint::Radio],
+            )
+            .unwrap();
+            router.rx_from_side(&discovery_b, side_b).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            router
+                .set_source_route_mode(None, RouteSelectionMode::Weighted)
+                .unwrap();
+            router.set_route_weight(None, side_a, 1).unwrap();
+            router.set_route_weight(None, side_b, 1).unwrap();
+
+            for seq in 0..2 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    &[DataEndpoint::Radio],
+                    seq as u64,
+                )
+                .unwrap();
+                router.tx(pkt).unwrap();
+            }
+            let before_a = seen_a.lock().unwrap().len();
+            let before_b = seen_b.lock().unwrap().len();
+            assert_eq!(before_a + before_b, 2);
+
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+            let pkt3 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[9.0, 10.0, 11.0],
+                &[DataEndpoint::Radio],
+                3,
+            )
+            .unwrap();
+            router.tx(pkt3).unwrap();
+
+            assert_eq!(seen_a.lock().unwrap().len(), before_a);
+            assert_eq!(seen_b.lock().unwrap().len(), before_b + 1);
+        }
+
+        #[test]
+        fn router_failover_route_mode_switches_when_preferred_side_is_removed() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router =
+                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+            router.rx_from_side(&discovery_a, side_a).unwrap();
+            router.rx_from_side(&discovery_b, side_b).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            router
+                .set_source_route_mode(None, RouteSelectionMode::Failover)
+                .unwrap();
+            router.set_route_priority(None, side_a, 0).unwrap();
+            router.set_route_priority(None, side_b, 1).unwrap();
+
+            let pkt1 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            router.tx(pkt1).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 0);
+
+            router.remove_side(side_a).unwrap();
+            let pkt2 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[4.0, 5.0, 6.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            router.tx(pkt2).unwrap();
+
+            let before_a = seen_a.lock().unwrap().len();
+            let before_b = seen_b.lock().unwrap().len();
+            assert_eq!(before_a + before_b, 2);
+        }
+
+        #[test]
+        fn relay_weighted_route_mode_splits_discovered_paths_by_weight() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c =
+                relay.add_side_packet("C", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+            relay.rx_from_side(side_a, discovery_a).unwrap();
+            relay.rx_from_side(side_b, discovery_b).unwrap();
+            relay.process_rx_queue().unwrap();
+            relay.process_tx_queue().unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            relay
+                .set_source_route_mode(Some(side_c), RouteSelectionMode::Weighted)
+                .unwrap();
+            relay.set_route_weight(Some(side_c), side_a, 2).unwrap();
+            relay.set_route_weight(Some(side_c), side_b, 1).unwrap();
+
+            for seq in 0..6 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    &[DataEndpoint::Radio],
+                    seq as u64,
+                )
+                .unwrap();
+                relay.rx_from_side(side_c, pkt).unwrap();
+            }
+            relay.process_all_queues().unwrap();
+
+            assert_eq!(seen_a.lock().unwrap().len(), 4);
+            assert_eq!(seen_b.lock().unwrap().len(), 2);
+        }
+
+        #[test]
+        fn relay_failover_route_mode_switches_when_preferred_path_expires() {
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let relay = Relay::new(Box::new(SharedClock {
+                now_ms: now_ms.clone(),
+            }));
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c =
+                relay.add_side_packet("C", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            relay.rx_from_side(side_a, discovery_a).unwrap();
+            relay.process_rx_queue().unwrap();
+            relay.process_tx_queue().unwrap();
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS / 2, Ordering::SeqCst);
+            let discovery_b = build_discovery_announce(
+                "REMOTE_B",
+                DISCOVERY_ROUTE_TTL_MS / 2,
+                &[DataEndpoint::Radio],
+            )
+            .unwrap();
+            relay.rx_from_side(side_b, discovery_b).unwrap();
+            relay.process_rx_queue().unwrap();
+            relay.process_tx_queue().unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            relay
+                .set_source_route_mode(Some(side_c), RouteSelectionMode::Failover)
+                .unwrap();
+            relay.set_route_priority(Some(side_c), side_a, 0).unwrap();
+            relay.set_route_priority(Some(side_c), side_b, 1).unwrap();
+
+            let pkt1 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt1).unwrap();
+            relay.process_all_queues().unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 0);
+
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+            let pkt2 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[2.0, 3.0, 4.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt2).unwrap();
+            relay.process_all_queues().unwrap();
+            let before_a = seen_a.lock().unwrap().len();
+            let before_b = seen_b.lock().unwrap().len();
+            assert_eq!(before_a + before_b, 2);
+        }
+
+        #[test]
+        fn relay_weighted_route_mode_falls_back_to_remaining_path_when_other_path_expires() {
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let relay = Relay::new(Box::new(SharedClock {
+                now_ms: now_ms.clone(),
+            }));
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c =
+                relay.add_side_packet("C", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            relay.rx_from_side(side_a, discovery_a).unwrap();
+            relay.process_all_queues().unwrap();
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS / 2, Ordering::SeqCst);
+            let discovery_b = build_discovery_announce(
+                "REMOTE_B",
+                DISCOVERY_ROUTE_TTL_MS / 2,
+                &[DataEndpoint::Radio],
+            )
+            .unwrap();
+            relay.rx_from_side(side_b, discovery_b).unwrap();
+            relay.process_all_queues().unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            relay
+                .set_source_route_mode(Some(side_c), RouteSelectionMode::Weighted)
+                .unwrap();
+            relay.set_route_weight(Some(side_c), side_a, 1).unwrap();
+            relay.set_route_weight(Some(side_c), side_b, 1).unwrap();
+
+            for seq in 0..2 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    &[DataEndpoint::Radio],
+                    seq as u64,
+                )
+                .unwrap();
+                relay.rx_from_side(side_c, pkt).unwrap();
+            }
+            relay.process_all_queues().unwrap();
+            let before_a = seen_a.lock().unwrap().len();
+            let before_b = seen_b.lock().unwrap().len();
+            assert_eq!(before_a + before_b, 2);
+
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+            let pkt3 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[9.0, 10.0, 11.0],
+                &[DataEndpoint::Radio],
+                3,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt3).unwrap();
+            relay.process_all_queues().unwrap();
+
+            assert_eq!(seen_a.lock().unwrap().len(), before_a);
+            assert_eq!(seen_b.lock().unwrap().len(), before_b + 1);
+        }
+
+        #[test]
+        fn relay_failover_route_mode_switches_when_preferred_side_is_removed() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c =
+                relay.add_side_packet("C", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+            relay.rx_from_side(side_a, discovery_a).unwrap();
+            relay.rx_from_side(side_b, discovery_b).unwrap();
+            relay.process_all_queues().unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+
+            relay
+                .set_source_route_mode(Some(side_c), RouteSelectionMode::Failover)
+                .unwrap();
+            relay.set_route_priority(Some(side_c), side_a, 0).unwrap();
+            relay.set_route_priority(Some(side_c), side_b, 1).unwrap();
+
+            let pkt1 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt1).unwrap();
+            relay.process_all_queues().unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 0);
+
+            relay.remove_side(side_a).unwrap();
+            let pkt2 = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[4.0, 5.0, 6.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt2).unwrap();
+            relay.process_all_queues().unwrap();
+
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
         }
 
         #[test]

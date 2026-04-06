@@ -7,3 +7,9 @@ Build with the features you need, for example:
 
 These examples are standalone source files; wire them into your own binary target
 or copy the snippets as needed.
+
+Additional example files in this folder:
+
+- `load_balancing_example.rs`: weighted split and failover route selection.
+- `relay_example.rs`: basic relay side wiring.
+- `multinode_sim_example.rs`: multi-node simulation.

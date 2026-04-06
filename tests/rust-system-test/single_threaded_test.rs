@@ -1,15 +1,22 @@
 // tests/rust-system-test/single_threaded_test.rs
 #[cfg(test)]
 mod single_threaded_test {
-    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
+    use sedsprintf_rs::TelemetryResult;
 
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, TryRecvError};
+    use std::sync::Arc;
+
+    fn env_usize(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(default)
+    }
 
     /// Clock that always returns 0
     fn zero_clock() -> Box<dyn Clock + Send + Sync> {
@@ -224,7 +231,8 @@ mod single_threaded_test {
         //   C: BATTERY + MESSAGE
         // → 5 packets / iteration, all with [SD_CARD, Radio] endpoints.
         //
-        const ITERS: usize = 10_000; // increase this for more profiling
+        let repeats = env_usize("SEDSPRINTF_SINGLE_THREADED_REPEATS", 1);
+        let iters = env_usize("SEDSPRINTF_SINGLE_THREADED_ITERS", 10_000);
         const PACKETS_PER_ITER: usize = 5;
 
         let mut gps_buf = [0.0_f32; 8];
@@ -233,66 +241,58 @@ mod single_threaded_test {
         let mut batt_buf = [0.0_f32; 8];
         let msg = "hello world!";
 
-        for i in 0..ITERS {
-            // --- Sender A (radio board, node 0 on bus1) ---
-            {
-                let node = &mut nodes[0];
-                make_series(&mut gps_buf[..3], 10.0);
-                let pkt = make_packet(DataType::GpsData, &gps_buf[..3], i as u64);
-                node.router.tx(pkt).unwrap();
-            }
+        for repeat_idx in 0..repeats {
+            for i in 0..iters {
+                let seq_base = (repeat_idx * iters + i) as u64;
+                {
+                    let node = &mut nodes[0];
+                    make_series(&mut gps_buf[..3], 10.0);
+                    let pkt = make_packet(DataType::GpsData, &gps_buf[..3], seq_base);
+                    node.router.tx(pkt).unwrap();
+                }
 
-            // --- Sender B (flight controller, node 1 on bus1) ---
-            {
-                let node = &mut nodes[1];
+                {
+                    let node = &mut nodes[1];
+                    make_series(&mut gyro_buf[..3], 0.5);
+                    let pkt1 = make_packet(DataType::GpsData, &gyro_buf[..3], seq_base + 10_000);
+                    node.router.tx(pkt1).unwrap();
 
-                // "gyro"
-                make_series(&mut gyro_buf[..3], 0.5);
-                let pkt1 = make_packet(DataType::GpsData, &gyro_buf[..3], (i + 10_000) as u64);
-                node.router.tx(pkt1).unwrap();
+                    make_series(&mut baro_buf[..3], 101.3);
+                    let pkt2 = make_packet(DataType::GpsData, &baro_buf[..3], seq_base + 20_000);
+                    node.router.tx(pkt2).unwrap();
+                }
 
-                // "barometer"
-                make_series(&mut baro_buf[..3], 101.3);
-                let pkt2 = make_packet(DataType::GpsData, &baro_buf[..3], (i + 20_000) as u64);
-                node.router.tx(pkt2).unwrap();
-            }
+                {
+                    let node = &mut nodes[2];
+                    make_series(&mut batt_buf[..2], 3.7);
+                    let pkt1 =
+                        make_packet(DataType::BatteryStatus, &batt_buf[..2], seq_base + 30_000);
+                    node.router.tx(pkt1).unwrap();
 
-            // --- Sender C (power board, node 2 on bus2) ---
-            {
-                let node = &mut nodes[2];
+                    let pkt2 = Packet::from_str_slice(
+                        DataType::TelemetryError,
+                        msg,
+                        &[DataEndpoint::SdCard, DataEndpoint::Radio],
+                        seq_base + 40_000,
+                    )
+                    .unwrap();
+                    node.router.tx(pkt2).unwrap();
+                }
 
-                // battery
-                make_series(&mut batt_buf[..2], 3.7);
-                let pkt1 =
-                    make_packet(DataType::BatteryStatus, &batt_buf[..2], (i + 30_000) as u64);
-                node.router.tx(pkt1).unwrap();
+                drain_buses_and_relay_once(
+                    &mut nodes,
+                    &bus1_rx,
+                    &bus2_rx,
+                    &relay,
+                    bus1_side_id,
+                    bus2_side_id,
+                );
 
-                // message as string (TelemetryError)
-                let pkt2 = Packet::from_str_slice(
-                    DataType::TelemetryError,
-                    msg,
-                    &[DataEndpoint::SdCard, DataEndpoint::Radio],
-                    (i + 40_000) as u64,
-                )
-                .unwrap();
-                node.router.tx(pkt2).unwrap();
-            }
-
-            // --- Deliver all bus frames + relay for this iteration (one pass) ---
-            drain_buses_and_relay_once(
-                &mut nodes,
-                &bus1_rx,
-                &bus2_rx,
-                &relay,
-                bus1_side_id,
-                bus2_side_id,
-            );
-
-            // --- Process all routers to completion (timeout = 0) ---
-            for node in nodes.iter_mut() {
-                node.router
-                    .process_all_queues_with_timeout(0)
-                    .expect("process_all_queues_with_timeout failed");
+                for node in nodes.iter_mut() {
+                    node.router
+                        .process_all_queues_with_timeout(0)
+                        .expect("process_all_queues_with_timeout failed");
+                }
             }
         }
 
@@ -315,7 +315,7 @@ mod single_threaded_test {
         }
 
         // ---------- 5) Assertions (scaled by ITERS) ----------
-        let expected_total = ITERS * PACKETS_PER_ITER;
+        let expected_total = repeats * iters * PACKETS_PER_ITER;
 
         let radio_board = &nodes[0];
         let flight_board = &nodes[1];
@@ -327,8 +327,8 @@ mod single_threaded_test {
         let c_sd = power_board.sd_hits.load(Ordering::SeqCst);
 
         println!(
-            "single-threaded (with relay): A.radio_hits={}, B.sd_hits={}, C.radio_hits={}, C.sd_hits={}",
-            a_radio, b_sd, c_radio, c_sd
+            "single-threaded (with relay): repeats={}, iters={}, A.radio_hits={}, B.sd_hits={}, C.radio_hits={}, C.sd_hits={}",
+            repeats, iters, a_radio, b_sd, c_radio, c_sd
         );
 
         assert_eq!(a_radio, expected_total, "Radio Board hit count");
