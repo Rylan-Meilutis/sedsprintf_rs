@@ -1015,6 +1015,16 @@ pub extern "C" fn seds_router_add_side_packet(
     side_id as i32
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_remove_side(r: *mut SedsRouter, side_id: i32) -> i32 {
+    if r.is_null() || side_id < 0 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+
+    let router = unsafe { &(*r).inner };
+    ok_or_status(router.remove_side(side_id as usize))
+}
+
 // ============================================================================
 //  FFI: Schema helper (fixed payload size)
 // ============================================================================
@@ -2570,6 +2580,57 @@ mod tests {
         assert!(did_queue);
         assert_eq!(seds_router_process_tx_queue(router), 0);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        seds_router_free(router);
+    }
+
+    #[test]
+    fn router_c_abi_remove_side_stops_discovery_tx() {
+        let hits = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+
+        let router = Router::new_with_clock(
+            RouterMode::Sink,
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                |_pkt| Ok(()),
+            )]),
+            Box::new(TestClock {
+                now_ms: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let router = Box::into_raw(Box::new(SedsRouter {
+            inner: Arc::from(router),
+        }));
+
+        let side_a = seds_router_add_side_packet(
+            router,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_router_add_side_packet(
+            router,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        assert!(side_a >= 0);
+        assert!(side_b >= 0);
+        assert_eq!(seds_router_remove_side(router, side_a), 0);
+        assert_eq!(
+            seds_router_remove_side(router, side_a),
+            status_from_err(TelemetryError::BadArg)
+        );
+
+        assert_eq!(seds_router_announce_discovery(router), 0);
+        assert_eq!(seds_router_process_tx_queue(router), 0);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         seds_router_free(router);
     }

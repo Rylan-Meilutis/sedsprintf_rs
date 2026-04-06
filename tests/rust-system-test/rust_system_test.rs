@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod threaded_system_tests {
+    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
-    use sedsprintf_rs::TelemetryResult;
 
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -329,7 +329,7 @@ mod threaded_system_tests {
                     &[DataEndpoint::SdCard, DataEndpoint::Radio],
                     i + 300,
                 )
-                    .unwrap();
+                .unwrap();
                 power_router.tx(pkt2).unwrap();
                 thread::sleep(Duration::from_millis(5));
             }

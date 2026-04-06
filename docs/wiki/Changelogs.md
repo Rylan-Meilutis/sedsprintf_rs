@@ -1,5 +1,25 @@
 # Changelogs
 
+## Version 3.6.0 highlights
+
+- Router side lifecycle management:
+    - Added `remove_side(...)` for routers in Rust, C, and Python so TCP-style peer-per-side
+      topologies can drop disconnected peers without rebuilding the router.
+    - Removed sides keep existing side IDs stable for the rest of the router and are no longer
+      eligible for transmit, ingress, reliable state, or topology export.
+- Discovery convergence after topology changes:
+    - Router side add/remove continues to trigger the adaptive discovery fast path, and removal now
+      also clears learned reachability for that side before announcing the remaining topology.
+    - Discovery exports and announces now omit removed sides while continuing to advertise the
+      local plus still-reachable endpoint set on the surviving links.
+- Regression coverage:
+    - Added Rust tests for router side removal, discovery topology shrinkage, and invalid ingress
+      rejection for removed side IDs.
+    - Added C ABI coverage for removing a router side and verifying discovery only transmits on
+      the remaining side.
+- Full
+  changelog: [v3.5.2...v3.6.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.5.2...v3.6.0)
+
 ## Version 3.5.2 highlights
 
 - Time sync failover recovery:
