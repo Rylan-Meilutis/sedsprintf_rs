@@ -336,6 +336,24 @@ int32_t seds_router_add_side_packet(
 /** @brief Remove a router side by its previously returned side id. */
 SedsResult seds_router_remove_side(SedsRouter * r, int32_t side_id);
 
+/** @brief Enable or disable packet ingress from a router side. */
+SedsResult seds_router_set_side_ingress_enabled(SedsRouter * r, int32_t side_id, bool enabled);
+
+/** @brief Enable or disable packet egress toward a router side. */
+SedsResult seds_router_set_side_egress_enabled(SedsRouter * r, int32_t side_id, bool enabled);
+
+/**
+ * @brief Override whether traffic from @p src_side_id may be routed to @p dst_side_id.
+ * Pass -1 for @p src_side_id to target locally-originated router TX traffic.
+ */
+SedsResult seds_router_set_route(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id, bool enabled);
+
+/**
+ * @brief Clear a route override so the router falls back to its default routing behavior.
+ * Pass -1 for @p src_side_id to target locally-originated router TX traffic.
+ */
+SedsResult seds_router_clear_route(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
+
 /* ==============================
    NEW: schema helper
    ============================== */
@@ -651,6 +669,12 @@ int32_t seds_relay_add_side_packet(SedsRelay *r,
                                    SedsEndpointHandlerFn tx,
                                    void *tx_user,
                                    bool reliable_enabled);
+
+SedsResult seds_relay_remove_side(SedsRelay * r, int32_t side_id);
+SedsResult seds_relay_set_side_ingress_enabled(SedsRelay * r, int32_t side_id, bool enabled);
+SedsResult seds_relay_set_side_egress_enabled(SedsRelay * r, int32_t side_id, bool enabled);
+SedsResult seds_relay_set_route(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, bool enabled);
+SedsResult seds_relay_clear_route(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
 
 
 /**

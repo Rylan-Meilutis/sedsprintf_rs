@@ -128,6 +128,18 @@ Side-aware ingress:
 - `receive_serialized_from_side(side_id, bytes)`
 - `receive_packet_from_side(side_id, packet)`
 
+Runtime side policy and routing controls:
+
+- `remove_side(side_id)`
+- `set_side_ingress_enabled(side_id, enabled)`
+- `set_side_egress_enabled(side_id, enabled)`
+- `set_route(src_side_id, dst_side_id, enabled)`
+- `clear_route(src_side_id, dst_side_id)`
+
+Use `None` for `src_side_id` when you want to control locally-originated router TX rather than
+traffic received from a specific side. `Relay` exposes the same side lifecycle, side-policy, and
+route-override methods, with the same `None` convention for locally-originated discovery TX.
+
 ## Debugging tips
 
 - `print(pkt)` uses the packet's string formatter.
