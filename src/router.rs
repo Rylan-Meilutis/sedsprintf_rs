@@ -538,7 +538,7 @@ fn fallback_stdout(msg: &str) {
 /// Holds the RX/TX queues and the recent-RX de-duplication set.
 #[derive(Debug, Clone)]
 struct RouterInner {
-    sides: Vec<RouterSide>,
+    sides: Vec<Option<RouterSide>>,
     received_queue: BoundedDeque<RouterRxItem>,
     transmit_queue: BoundedDeque<TxQueued>,
     recent_rx: BoundedDeque<u64>,
@@ -774,6 +774,21 @@ where
 }
 /// Router implementation
 impl Router {
+    #[inline]
+    fn side_ref<'a>(st: &'a RouterInner, side: RouterSideId) -> TelemetryResult<&'a RouterSide> {
+        st.sides
+            .get(side)
+            .and_then(|side| side.as_ref())
+            .ok_or(TelemetryError::HandlerError("router: invalid side id"))
+    }
+
+    #[inline]
+    fn ensure_side_exists(&self, side: RouterSideId) -> TelemetryResult<()> {
+        let st = self.state.lock();
+        let _ = Self::side_ref(&st, side)?;
+        Ok(())
+    }
+
     fn router_item_priority(data: &RouterItem) -> TelemetryResult<u8> {
         let ty = match data {
             RouterItem::Packet(pkt) => pkt.data_type(),
@@ -826,11 +841,19 @@ impl Router {
 
         match plan {
             RemoteSidePlan::Flood => {
-                let side_count = st.sides.len();
-                for idx in 0..side_count {
-                    if exclude == Some(idx) {
-                        continue;
-                    }
+                let side_ids = st
+                    .sides
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, side)| {
+                        if exclude == Some(idx) || side.is_none() {
+                            None
+                        } else {
+                            Some(idx)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for idx in side_ids {
                     st.transmit_queue.push_back_prioritized(
                         TxQueued {
                             item: RouterTxItem::ToSide {
@@ -876,12 +899,16 @@ impl Router {
 
         match self.remote_side_plan(&data, src)? {
             RemoteSidePlan::Flood => {
-                let num_sides = {
+                let side_ids = {
                     let st = self.state.lock();
-                    st.sides.len()
+                    st.sides
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(side, info)| info.as_ref().map(|_| side))
+                        .collect::<Vec<_>>()
                 };
 
-                for side in 0..num_sides {
+                for side in side_ids {
                     if src == Some(side) {
                         continue;
                     }
@@ -996,6 +1023,7 @@ impl Router {
                         .iter()
                         .enumerate()
                         .filter_map(|(side, side_info)| {
+                            let side_info = side_info.as_ref()?;
                             if exclude == Some(side) || !side_info.opts.link_local_enabled {
                                 None
                             } else {
@@ -1027,6 +1055,7 @@ impl Router {
                     && st
                         .sides
                         .get(side)
+                        .and_then(|s| s.as_ref())
                         .map(|s| !s.opts.link_local_enabled)
                         .unwrap_or(true)
                 {
@@ -1055,6 +1084,7 @@ impl Router {
                     .iter()
                     .enumerate()
                     .filter_map(|(side, side_info)| {
+                        let side_info = side_info.as_ref()?;
                         if exclude == Some(side) || !side_info.opts.link_local_enabled {
                             None
                         } else {
@@ -1205,14 +1235,15 @@ impl Router {
             if Self::prune_discovery_routes_locked(&mut st, now_ms) {
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
-            if st.sides.is_empty() {
+            if st.sides.iter().all(|side| side.is_none()) {
                 return Ok(());
             }
             st.discovery_cadence.on_announce_sent(now_ms);
             st.sides
                 .iter()
                 .enumerate()
-                .map(|(side_id, side)| {
+                .filter_map(|(side_id, side)| {
+                    let side = side.as_ref()?;
                     let endpoints = self.advertised_discovery_endpoints_for_link_locked(
                         &st,
                         now_ms,
@@ -1220,7 +1251,7 @@ impl Router {
                     );
                     let timesync_sources =
                         self.advertised_discovery_timesync_sources_for_link_locked(&st, now_ms);
-                    (side_id, endpoints, timesync_sources)
+                    Some((side_id, endpoints, timesync_sources))
                 })
                 .collect::<Vec<_>>()
         };
@@ -1264,6 +1295,9 @@ impl Router {
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
             let has_any = st.sides.iter().any(|side| {
+                let Some(side) = side.as_ref() else {
+                    return false;
+                };
                 !self
                     .advertised_discovery_endpoints_for_link_locked(
                         &st,
@@ -1391,10 +1425,7 @@ impl Router {
     fn send_reliable_ack(&self, side: RouterSideId, ty: DataType, ack: u32) -> TelemetryResult<()> {
         let (handler, opts) = {
             let st = self.state.lock();
-            let side_ref = st
-                .sides
-                .get(side)
-                .ok_or(TelemetryError::HandlerError("router: invalid side id"))?;
+            let side_ref = Self::side_ref(&st, side)?;
             (side_ref.tx_handler.clone(), side_ref.opts)
         };
 
@@ -1458,10 +1489,7 @@ impl Router {
     fn send_reliable_to_side(&self, side: RouterSideId, data: RouterItem) -> TelemetryResult<()> {
         let (handler, opts) = {
             let st = self.state.lock();
-            let side_ref = st
-                .sides
-                .get(side)
-                .ok_or(TelemetryError::HandlerError("router: invalid side id"))?;
+            let side_ref = Self::side_ref(&st, side)?;
             (side_ref.tx_handler.clone(), side_ref.opts)
         };
 
@@ -1616,10 +1644,10 @@ impl Router {
             let mut st = self.state.lock();
 
             // Snapshot handlers so we don't borrow st immutably while iterating reliable_tx mutably.
-            let handlers: Vec<RouterTxHandlerFn> = st
+            let handlers: Vec<Option<RouterTxHandlerFn>> = st
                 .sides
                 .iter()
-                .map(|side_ref| side_ref.tx_handler.clone())
+                .map(|side_ref| side_ref.as_ref().map(|side| side.tx_handler.clone()))
                 .collect();
 
             for ((side, ty_u32), tx_state) in st.reliable_tx.iter_mut() {
@@ -1635,7 +1663,7 @@ impl Router {
                     inflight.retries += 1;
                     inflight.last_send_ms = now;
 
-                    if let Some(handler) = handlers.get(*side) {
+                    if let Some(Some(handler)) = handlers.get(*side) {
                         resend.push((handler.clone(), inflight.bytes.clone()));
                     }
                 }
@@ -2364,11 +2392,11 @@ impl Router {
     {
         let mut st = self.state.lock();
         let id = st.sides.len();
-        st.sides.push(RouterSide {
+        st.sides.push(Some(RouterSide {
             name,
             tx_handler: RouterTxHandlerFn::Serialized(Arc::new(tx)),
             opts,
-        });
+        }));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
         id
@@ -2394,14 +2422,41 @@ impl Router {
     {
         let mut st = self.state.lock();
         let id = st.sides.len();
-        st.sides.push(RouterSide {
+        st.sides.push(Some(RouterSide {
             name,
             tx_handler: RouterTxHandlerFn::Packet(Arc::new(tx)),
             opts,
-        });
+        }));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
         id
+    }
+
+    /// Remove a side while keeping existing side IDs stable.
+    pub fn remove_side(&self, side: RouterSideId) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        {
+            let mut st = self.state.lock();
+            let slot = st.sides.get_mut(side).ok_or(TelemetryError::BadArg)?;
+            if slot.is_none() {
+                return Err(TelemetryError::BadArg);
+            }
+            *slot = None;
+            st.transmit_queue.retain(
+                |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
+            );
+            st.received_queue.retain(|queued| queued.src != Some(side));
+            st.reliable_tx.retain(|(side_id, _), _| *side_id != side);
+            st.reliable_rx.retain(|(side_id, _), _| *side_id != side);
+            #[cfg(feature = "discovery")]
+            {
+                st.discovery_routes.remove(&side);
+                Self::note_discovery_topology_change_locked(&mut st, now_ms);
+            }
+        }
+        let mut isr_rx = self.isr_rx_queue.try_lock()?;
+        isr_rx.retain(|queued| queued.src != Some(side));
+        Ok(())
     }
 
     /// Queue a built-in discovery advertisement describing this router's local endpoints.
@@ -2428,7 +2483,7 @@ impl Router {
             .discovery_routes
             .iter()
             .filter_map(|(&side_id, route)| {
-                let side = st.sides.get(side_id)?;
+                let side = st.sides.get(side_id)?.as_ref()?;
                 Some(TopologySideRoute {
                     side_id,
                     side_name: side.name,
@@ -2840,6 +2895,7 @@ impl Router {
     /// Enqueue a packet for RX processing with explicit source side.
     #[inline]
     pub fn rx_queue_from_side(&self, pkt: Packet, side: RouterSideId) -> TelemetryResult<()> {
+        self.ensure_side_exists(side)?;
         pkt.validate()?;
         let data = RouterItem::Packet(pkt);
         let priority = Self::router_item_priority(&data)?;
@@ -2861,6 +2917,7 @@ impl Router {
     /// currently mutating the ISR RX queue.
     #[inline]
     pub fn rx_queue_from_side_isr(&self, pkt: Packet, side: RouterSideId) -> TelemetryResult<()> {
+        self.ensure_side_exists(side)?;
         pkt.validate()?;
         let data = RouterItem::Packet(pkt);
         let priority = Self::router_item_priority(&data)?;
@@ -2878,6 +2935,7 @@ impl Router {
         bytes: &[u8],
         side: RouterSideId,
     ) -> TelemetryResult<()> {
+        self.ensure_side_exists(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let priority = Self::router_item_priority(&data)?;
         let mut st = self.state.lock();
@@ -2902,6 +2960,7 @@ impl Router {
         bytes: &[u8],
         side: RouterSideId,
     ) -> TelemetryResult<()> {
+        self.ensure_side_exists(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let priority = Self::router_item_priority(&data)?;
         self.isr_rx_queue.push_back_prioritized(RouterRxItem {
@@ -3053,15 +3112,15 @@ impl Router {
     /// any remotely-forwardable endpoints, the router will rebroadcast the packet ONCE, excluding
     /// the ingress side.
     fn rx_item(&self, item: &RouterRxItem, called_from_queue: bool) -> TelemetryResult<()> {
+        if let Some(src) = item.src {
+            self.ensure_side_exists(src)?;
+        }
         let mut skip_dedupe = false;
 
         if let (Some(src), RouterItem::Serialized(bytes)) = (item.src, &item.data) {
             let (opts, handler_is_serialized) = {
                 let st = self.state.lock();
-                let side_ref = st
-                    .sides
-                    .get(src)
-                    .ok_or(TelemetryError::HandlerError("router: invalid side id"))?;
+                let side_ref = Self::side_ref(&st, src)?;
                 (
                     side_ref.opts,
                     matches!(side_ref.tx_handler, RouterTxHandlerFn::Serialized(_)),
@@ -3546,12 +3605,16 @@ impl Router {
                 }
                 match self.remote_side_plan(&data, None)? {
                     RemoteSidePlan::Flood => {
-                        let num_sides = {
+                        let side_ids = {
                             let st = self.state.lock();
-                            st.sides.len()
+                            st.sides
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(side, info)| info.as_ref().map(|_| side))
+                                .collect::<Vec<_>>()
                         };
 
-                        for side in 0..num_sides {
+                        for side in side_ids {
                             if let Err(e) = self.send_reliable_to_side(side, data.clone()) {
                                 match &data {
                                     RouterItem::Packet(pkt) => {
@@ -3656,6 +3719,7 @@ impl Router {
     /// Receive a packet with explicit ingress side.
     #[inline]
     pub fn rx_from_side(&self, pkt: &Packet, side: RouterSideId) -> TelemetryResult<()> {
+        self.ensure_side_exists(side)?;
         let data = RouterItem::Packet(pkt.clone());
         let item = RouterRxItem {
             src: Some(side),
@@ -3668,6 +3732,7 @@ impl Router {
     /// Receive serialized bytes with explicit ingress side.
     #[inline]
     pub fn rx_serialized_from_side(&self, bytes: &[u8], side: RouterSideId) -> TelemetryResult<()> {
+        self.ensure_side_exists(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let item = RouterRxItem {
             src: Some(side),

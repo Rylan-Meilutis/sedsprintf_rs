@@ -266,7 +266,7 @@ pub struct PyRouter {
     inner: SArc<Mutex<Router>>,
     _pkt_cbs: Vec<Py<PyAny>>,
     _ser_cbs: Vec<Py<PyAny>>,
-    _side_cbs: Vec<Py<PyAny>>,
+    _side_cbs: Vec<Option<Py<PyAny>>>,
 }
 
 #[pymethods]
@@ -561,7 +561,6 @@ impl PyRouter {
     ) -> PyResult<u32> {
         let cb_keep = tx.clone_ref(py);
         let cb_for_closure = cb_keep.clone_ref(py);
-        self._side_cbs.push(cb_keep);
 
         let name_static: &'static str = Box::leak(name.to_owned().into_boxed_str());
 
@@ -592,6 +591,12 @@ impl PyRouter {
             opts,
         );
 
+        let id = id as usize;
+        if self._side_cbs.len() <= id {
+            self._side_cbs.resize_with(id + 1, || None);
+        }
+        self._side_cbs[id] = Some(cb_keep);
+
         Ok(id as u32)
     }
 
@@ -605,7 +610,6 @@ impl PyRouter {
     ) -> PyResult<u32> {
         let cb_keep = tx.clone_ref(py);
         let cb_for_closure = cb_keep.clone_ref(py);
-        self._side_cbs.push(cb_keep);
 
         let name_static: &'static str = Box::leak(name.to_owned().into_boxed_str());
 
@@ -638,7 +642,25 @@ impl PyRouter {
             opts,
         );
 
+        let id = id as usize;
+        if self._side_cbs.len() <= id {
+            self._side_cbs.resize_with(id + 1, || None);
+        }
+        self._side_cbs[id] = Some(cb_keep);
+
         Ok(id as u32)
+    }
+
+    fn remove_side(&mut self, side_id: u32) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.remove_side(side_id as usize).map_err(py_err_from)?;
+        if let Some(slot) = self._side_cbs.get_mut(side_id as usize) {
+            *slot = None;
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------------

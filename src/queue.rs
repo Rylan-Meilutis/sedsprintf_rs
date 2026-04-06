@@ -198,6 +198,22 @@ impl<T: ByteCost> BoundedDeque<T> {
         }
     }
 
+    /// Retain only the elements specified by the predicate, updating byte count.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut idx = 0;
+        while idx < self.q.len() {
+            let keep_item = self.q.get(idx).is_some_and(&mut keep);
+            if keep_item {
+                idx += 1;
+            } else {
+                let _ = self.remove_pos(idx);
+            }
+        }
+    }
+
     /// Ensure there is room for one more element *without* `push_back` triggering growth.
     ///
     /// Multiplicative growth: new_cap = ceil(cap * grow_num / grow_den), capped at max_elems.

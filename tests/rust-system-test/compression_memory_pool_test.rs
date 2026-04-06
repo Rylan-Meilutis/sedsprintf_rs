@@ -6,8 +6,8 @@ mod compression_memory_pool_test {
 
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::ptr::null_mut;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const HDR_WORDS: usize = 4;
     const HDR_RAW_OFF: usize = 0;
@@ -152,7 +152,7 @@ mod compression_memory_pool_test {
             ts,
             Arc::<[u8]>::from(payload),
         )
-            .expect("packet build failed")
+        .expect("packet build failed")
     }
 
     #[test]

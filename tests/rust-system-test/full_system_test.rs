@@ -1,15 +1,15 @@
 #[cfg(test)]
 mod mega_library_system_tests {
+    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
-    use sedsprintf_rs::TelemetryResult;
 
     use sedsprintf_rs::serialize::serialize_packet;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -322,7 +322,7 @@ mod mega_library_system_tests {
                         &[DataEndpoint::SdCard, DataEndpoint::Radio],
                         200 + i as u64,
                     )
-                        .unwrap();
+                    .unwrap();
 
                     let wire = serialize_packet(&pkt);
                     r.tx_serialized_queue(wire).unwrap();
@@ -355,7 +355,7 @@ mod mega_library_system_tests {
                         &[DataEndpoint::SdCard, DataEndpoint::Radio],
                         3000 + i,
                     )
-                        .unwrap();
+                    .unwrap();
                     let wire_c = serialize_packet(&pkt_c);
                     hub.tx_serialized_queue(wire_c).unwrap();
 

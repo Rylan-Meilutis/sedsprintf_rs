@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::serialize::{deserialize_packet, peek_frame_info, serialize_packet};
@@ -29,7 +29,7 @@ fn benchmark_packet_paths(c: &mut Criterion) {
                     black_box(ENDPOINTS),
                     black_box(TIMESTAMP_MS),
                 )
-                    .unwrap(),
+                .unwrap(),
             )
         });
     });

@@ -3910,7 +3910,7 @@ mod router_tests {
             packet::Packet,
             router::{Router, RouterMode},
         };
-        use crate::{DataEndpoint, DataType, TelemetryResult};
+        use crate::{DataEndpoint, DataType, TelemetryError, TelemetryResult};
         use std::sync::{Arc, Mutex};
 
         fn zero_clock() -> Box<dyn Clock + Send + Sync> {
@@ -4054,6 +4054,92 @@ mod router_tests {
             let snap_after = router.export_topology();
             assert_eq!(snap_after.next_announce_ms, DISCOVERY_FAST_INTERVAL_MS);
             assert!(snap_after.current_announce_interval_ms >= DISCOVERY_FAST_INTERVAL_MS);
+        }
+
+        #[test]
+        fn router_remove_side_stops_transmit_and_rejects_removed_ingress() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router =
+                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            router.remove_side(side_a).unwrap();
+
+            let msg = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            router.tx(msg.clone()).unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
+            match router.rx_from_side(&msg, side_a) {
+                Err(TelemetryError::HandlerError(msg)) => {
+                    assert!(msg.contains("invalid side id"));
+                }
+                other => panic!("expected invalid removed side error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn router_remove_side_updates_discovery_routes_and_announces_remaining_topology() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router = Router::new_with_clock(
+                RouterMode::Sink,
+                RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                    DataEndpoint::Radio,
+                    |_pkt| Ok(()),
+                )]),
+                zero_clock(),
+            );
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let discovery_pkt =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::SdCard]).unwrap();
+            router.rx_from_side(&discovery_pkt, side_a).unwrap();
+            assert_eq!(router.export_topology().routes.len(), 1);
+
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
+            router.remove_side(side_a).unwrap();
+
+            let snap = router.export_topology();
+            assert!(snap.routes.is_empty());
+            assert_eq!(snap.advertised_endpoints, vec![DataEndpoint::Radio]);
+            assert!(router.poll_discovery().unwrap());
+            router.process_tx_queue().unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            let b_pkts = seen_b.lock().unwrap().clone();
+            assert_eq!(b_pkts.len(), 1);
+            assert_eq!(b_pkts[0].data_type(), DataType::DiscoveryAnnounce);
+            let eps = crate::discovery::decode_discovery_announce(&b_pkts[0]).unwrap();
+            assert_eq!(eps, vec![DataEndpoint::Radio]);
         }
 
         #[cfg(feature = "timesync")]

@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.6.0
+
+- Added router-side removal APIs across Rust, C, and Python with stable side IDs preserved for
+  surviving sides.
+- Removed router sides are now tombstoned internally so stale side IDs stop routing traffic
+  without forcing side ID renumbering.
+- Removing a side now purges queued ingress/egress work plus reliable/discovery state associated
+  with that side.
+- Discovery topology changes caused by router side add/remove now immediately reschedule discovery
+  announcements so peers learn newly available or remaining endpoint mappings faster.
+- Added regression coverage for router-side removal, discovery topology export after removal, and
+  the C ABI side-removal path.
+
 ## 3.5.2
 
 - Fixed router-managed time sync failover so a consumer clears stale pending sync requests when

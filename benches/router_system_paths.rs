@@ -1,9 +1,9 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use sedsprintf_rs::TelemetryResult;
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
 use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
-use sedsprintf_rs::TelemetryResult;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 

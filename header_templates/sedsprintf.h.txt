@@ -333,6 +333,9 @@ int32_t seds_router_add_side_packet(
     bool reliable_enabled
 );
 
+/** @brief Remove a router side by its previously returned side id. */
+SedsResult seds_router_remove_side(SedsRouter * r, int32_t side_id);
+
 /* ==============================
    NEW: schema helper
    ============================== */
