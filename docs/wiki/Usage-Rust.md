@@ -80,6 +80,7 @@ let side_c = router.add_side_serialized("C", tx_c);
 router.set_route(None, side_b, false)?;          // local TX does not go to B
 router.set_route(Some(side_a), side_b, true)?;   // allow A -> B
 router.set_route(Some(side_b), side_a, false)?;  // block B -> A
+router.set_typed_route(None, DataType::GpsData, side_c, true)?; // GPS data only goes to C
 router.set_side_egress_enabled(side_c, false)?;  // C is ingress-only
 ```
 
@@ -96,11 +97,50 @@ let side_b = relay.add_side_packet("B", tx_b);
 let side_c = relay.add_side_packet("C", tx_c);
 
 relay.set_route(Some(side_b), side_a, false)?;  // block B -> A
+relay.set_typed_route(Some(side_a), DataType::GpsData, side_c, true)?; // A's GPS data only goes to C
 relay.set_side_egress_enabled(side_c, false)?;  // C only ingresses
 ```
 
 Both `Router` and `Relay` also support `remove_side(side_id)` while preserving the remaining side
 IDs.
+
+One common pattern is a dedicated command network where two links both reach the same remote
+destination, but you do not want weighted or failover selection. In that case, keep the default
+`Fanout` mode and use typed routes as a manual allowlist:
+
+```rust
+use sedsprintf_rs::config::{DataEndpoint, DataType};
+use sedsprintf_rs::telemetry_packet::Packet;
+
+let telemetry = router.add_side_packet("TELEMETRY", tx_telemetry);
+let command_a = router.add_side_packet("COMMAND_A", tx_command_a);
+let command_b = router.add_side_packet("COMMAND_B", tx_command_b);
+
+router.set_route(None, command_a, false)?; // ordinary traffic stays off command links
+router.set_route(None, command_b, false)?;
+
+router.set_typed_route(None, DataType::MessageData, command_a, true)?;
+router.set_typed_route(None, DataType::MessageData, command_b, true)?;
+
+router.tx(Packet::from_f32_slice(
+    DataType::GpsData,
+    &[1.0, 2.0, 3.0],
+    &[DataEndpoint::Radio],
+    1,
+)?)?; // goes to TELEMETRY only
+
+router.tx(Packet::from_str_slice(
+    DataType::MessageData,
+    &["ARM PAYLOAD"],
+    &[DataEndpoint::Radio],
+    2,
+)?)?; // goes to COMMAND_A and COMMAND_B
+
+let _ = telemetry;
+```
+
+`MessageData` is just a placeholder here. Replace it with whichever `DataType` your schema uses
+for commands or abort messages.
 
 For multi-path routing, both also support:
 

@@ -557,6 +557,7 @@ fn fallback_stdout(msg: &str) {
 struct RouterInner {
     sides: Vec<Option<RouterSide>>,
     route_overrides: BTreeMap<(Option<RouterSideId>, RouterSideId), bool>,
+    typed_route_overrides: BTreeMap<(Option<RouterSideId>, u32, RouterSideId), bool>,
     route_weights: BTreeMap<(Option<RouterSideId>, RouterSideId), u32>,
     route_priorities: BTreeMap<(Option<RouterSideId>, RouterSideId), u32>,
     source_route_modes: BTreeMap<Option<RouterSideId>, RouteSelectionMode>,
@@ -832,6 +833,7 @@ impl Router {
         &self,
         st: &RouterInner,
         src: Option<RouterSideId>,
+        ty: Option<DataType>,
         dst: RouterSideId,
     ) -> bool {
         let Some(dst_side) = st.sides.get(dst).and_then(|side| side.as_ref()) else {
@@ -848,16 +850,37 @@ impl Router {
                 return false;
             }
         }
-        st.route_overrides
+        let base_allowed = st
+            .route_overrides
             .get(&(src, dst))
             .copied()
-            .unwrap_or_else(|| self.default_route_enabled(src, dst))
+            .unwrap_or_else(|| self.default_route_enabled(src, dst));
+        if !base_allowed {
+            return false;
+        }
+
+        let Some(ty) = ty else {
+            return true;
+        };
+        if st
+            .typed_route_overrides
+            .keys()
+            .any(|(typed_src, typed_ty, _)| *typed_src == src && *typed_ty == ty as u32)
+        {
+            return st
+                .typed_route_overrides
+                .get(&(src, ty as u32, dst))
+                .copied()
+                .unwrap_or(false);
+        }
+        true
     }
 
     fn eligible_side_ids_locked(
         &self,
         st: &RouterInner,
         src: Option<RouterSideId>,
+        ty: Option<DataType>,
         restrict_link_local: bool,
     ) -> Vec<RouterSideId> {
         st.sides
@@ -868,7 +891,7 @@ impl Router {
                 if restrict_link_local && !side.opts.link_local_enabled {
                     return None;
                 }
-                if self.route_allowed_locked(st, src, side_id) {
+                if self.route_allowed_locked(st, src, ty, side_id) {
                     Some(side_id)
                 } else {
                     None
@@ -1065,7 +1088,12 @@ impl Router {
             }
             let st = self.state.lock();
             Ok(!self
-                .eligible_side_ids_locked(&st, exclude, Self::endpoints_are_link_local_only(&eps))
+                .eligible_side_ids_locked(
+                    &st,
+                    exclude,
+                    Some(ty),
+                    Self::endpoints_are_link_local_only(&eps),
+                )
                 .is_empty())
         }
     }
@@ -1080,7 +1108,7 @@ impl Router {
             let (eps, ty) = self.item_route_info(data)?;
             if discovery::is_discovery_type(ty) {
                 let mut st = self.state.lock();
-                let sides = self.eligible_side_ids_locked(&st, exclude, false);
+                let sides = self.eligible_side_ids_locked(&st, exclude, Some(ty), false);
                 return Ok(RemoteSidePlan::Target(
                     self.apply_route_selection_locked(&mut st, exclude, sides),
                 ));
@@ -1104,13 +1132,13 @@ impl Router {
             let restrict_link_local = Self::endpoints_are_link_local_only(&eps);
             if st.discovery_routes.is_empty() {
                 if restrict_link_local {
-                    let targets = self.eligible_side_ids_locked(&st, exclude, true);
+                    let targets = self.eligible_side_ids_locked(&st, exclude, Some(ty), true);
                     return Ok(RemoteSidePlan::Target(
                         self.apply_route_selection_locked(&mut st, exclude, targets),
                     ));
                 }
                 return if has_nonlocal || bootstrap_timesync {
-                    let targets = self.eligible_side_ids_locked(&st, exclude, false);
+                    let targets = self.eligible_side_ids_locked(&st, exclude, Some(ty), false);
                     Ok(RemoteSidePlan::Target(
                         self.apply_route_selection_locked(&mut st, exclude, targets),
                     ))
@@ -1140,7 +1168,7 @@ impl Router {
                 {
                     continue;
                 }
-                if !self.route_allowed_locked(&st, exclude, side) {
+                if !self.route_allowed_locked(&st, exclude, Some(ty), side) {
                     continue;
                 }
                 if preferred_timesync_source.as_deref().is_some_and(|source| {
@@ -1169,12 +1197,12 @@ impl Router {
                     generic_targets,
                 )))
             } else if restrict_link_local {
-                let targets = self.eligible_side_ids_locked(&st, exclude, true);
+                let targets = self.eligible_side_ids_locked(&st, exclude, Some(ty), true);
                 Ok(RemoteSidePlan::Target(
                     self.apply_route_selection_locked(&mut st, exclude, targets),
                 ))
             } else if has_nonlocal || bootstrap_timesync {
-                let targets = self.eligible_side_ids_locked(&st, exclude, false);
+                let targets = self.eligible_side_ids_locked(&st, exclude, Some(ty), false);
                 Ok(RemoteSidePlan::Target(
                     self.apply_route_selection_locked(&mut st, exclude, targets),
                 ))
@@ -1184,9 +1212,9 @@ impl Router {
         }
         #[cfg(not(feature = "discovery"))]
         {
-            let _ = data;
+            let (_, ty) = self.item_route_info(data)?;
             let mut st = self.state.lock();
-            let sides = self.eligible_side_ids_locked(&st, exclude, false);
+            let sides = self.eligible_side_ids_locked(&st, exclude, Some(ty), false);
             Ok(RemoteSidePlan::Target(
                 self.apply_route_selection_locked(&mut st, exclude, sides),
             ))
@@ -1330,7 +1358,12 @@ impl Router {
                 .enumerate()
                 .filter_map(|(side_id, side)| {
                     let side = side.as_ref()?;
-                    if !self.route_allowed_locked(&st, None, side_id) {
+                    if !self.route_allowed_locked(
+                        &st,
+                        None,
+                        Some(DataType::DiscoveryAnnounce),
+                        side_id,
+                    ) {
                         return None;
                     }
                     let endpoints = self.advertised_discovery_endpoints_for_link_locked(
@@ -1389,7 +1422,8 @@ impl Router {
                 let Some(side) = side.as_ref() else {
                     return false;
                 };
-                if !self.route_allowed_locked(&st, None, side_id) {
+                if !self.route_allowed_locked(&st, None, Some(DataType::DiscoveryAnnounce), side_id)
+                {
                     return false;
                 }
                 !self
@@ -2443,6 +2477,7 @@ impl Router {
             state: RouterMutex::new(RouterInner {
                 sides: Vec::new(),
                 route_overrides: BTreeMap::new(),
+                typed_route_overrides: BTreeMap::new(),
                 route_weights: BTreeMap::new(),
                 route_priorities: BTreeMap::new(),
                 source_route_modes: BTreeMap::new(),
@@ -2548,6 +2583,8 @@ impl Router {
             *slot = None;
             st.route_overrides
                 .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
+            st.typed_route_overrides
+                .retain(|(src_side, _, dst_side), _| *src_side != Some(side) && *dst_side != side);
             st.route_weights
                 .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
             st.route_priorities
@@ -2722,6 +2759,44 @@ impl Router {
             let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
         }
         st.route_overrides.insert((src, dst), enabled);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn set_typed_route(
+        &self,
+        src: Option<RouterSideId>,
+        ty: DataType,
+        dst: RouterSideId,
+        enabled: bool,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.typed_route_overrides
+            .insert((src, ty as u32, dst), enabled);
+        #[cfg(feature = "discovery")]
+        Self::note_discovery_topology_change_locked(&mut st, now_ms);
+        Ok(())
+    }
+
+    pub fn clear_typed_route(
+        &self,
+        src: Option<RouterSideId>,
+        ty: DataType,
+        dst: RouterSideId,
+    ) -> TelemetryResult<()> {
+        let now_ms = self.clock.now_ms();
+        let mut st = self.state.lock();
+        let _ = Self::side_ref(&st, dst).map_err(|_| TelemetryError::BadArg)?;
+        if let Some(src) = src {
+            let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
+        }
+        st.typed_route_overrides.remove(&(src, ty as u32, dst));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
@@ -3921,7 +3996,13 @@ impl Router {
                 }
                 let allowed = {
                     let st = self.state.lock();
-                    self.route_allowed_locked(&st, src, dst)
+                    let ty = match &data {
+                        RouterItem::Packet(pkt) => Some(pkt.data_type()),
+                        RouterItem::Serialized(bytes) => {
+                            Some(serialize::peek_envelope(bytes.as_ref())?.ty)
+                        }
+                    };
+                    self.route_allowed_locked(&st, src, ty, dst)
                 };
                 if !allowed {
                     return Ok(());

@@ -135,17 +135,45 @@ Runtime side policy and routing controls:
 - `set_side_egress_enabled(side_id, enabled)`
 - `set_route(src_side_id, dst_side_id, enabled)`
 - `clear_route(src_side_id, dst_side_id)`
+- `set_typed_route(src_side_id, ty, dst_side_id, enabled)`
+- `clear_typed_route(src_side_id, ty, dst_side_id)`
 - `set_source_route_mode(src_side_id, mode)`
 - `set_route_weight(src_side_id, dst_side_id, weight)`
 - `set_route_priority(src_side_id, dst_side_id, priority)`
 
 Use `None` for `src_side_id` when you want to control locally-originated router TX rather than
 traffic received from a specific side. `Relay` exposes the same side lifecycle, side-policy, and
-route-override methods, with the same `None` convention for locally-originated discovery TX.
+route-override methods, including type-specific route allowlists, with the same `None`
+convention for locally-originated discovery TX.
 
 Use `RouteSelectionMode.Fanout` to preserve current behavior, `RouteSelectionMode.Weighted` for
 weighted multi-path splitting, and `RouteSelectionMode.Failover` to prefer one path until
 discovery says it is gone.
+
+For a dedicated command network where two links both reach the same remote destination and you do
+not want load balancing, keep the default fanout mode and use typed routes as a manual allowlist:
+
+```python
+router = seds.Router(handlers=[(int(EP.RADIO), lambda pkt: None, None)], mode=RM.Sink)
+
+telemetry = router.add_side_packet("TELEMETRY", lambda pkt: print("[TELEMETRY]", pkt))
+command_a = router.add_side_packet("COMMAND_A", lambda pkt: print("[COMMAND_A]", pkt))
+command_b = router.add_side_packet("COMMAND_B", lambda pkt: print("[COMMAND_B]", pkt))
+
+router.set_route(None, command_a, False)
+router.set_route(None, command_b, False)
+
+router.set_typed_route(None, int(DT.MESSAGE_DATA), command_a, True)
+router.set_typed_route(None, int(DT.MESSAGE_DATA), command_b, True)
+
+router.log_f32(int(DT.GPS_DATA), [1.0, 2.0, 3.0])          # TELEMETRY only
+router.log_bytes(int(DT.MESSAGE_DATA), b"ARM PAYLOAD")     # COMMAND_A + COMMAND_B
+
+_ = telemetry
+```
+
+`MESSAGE_DATA` is just a stand-in for a command-type payload. Replace it with your schema's real
+command or abort `DataType`.
 
 ## Debugging tips
 

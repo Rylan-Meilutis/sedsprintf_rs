@@ -1102,6 +1102,53 @@ pub extern "C" fn seds_router_clear_route(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_typed_route(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    ty: u32,
+    dst_side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let ty = match dtype_from_u32(ty) {
+        Ok(ty) => ty,
+        Err(err) => return status_from_err(err),
+    };
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.set_typed_route(src, ty, dst_side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_clear_typed_route(
+    r: *mut SedsRouter,
+    src_side_id: i32,
+    ty: u32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let ty = match dtype_from_u32(ty) {
+        Ok(ty) => ty,
+        Err(err) => return status_from_err(err),
+    };
+    let router = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(router.clear_typed_route(src, ty, dst_side_id as usize))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn seds_router_set_source_route_mode(
     r: *mut SedsRouter,
     src_side_id: i32,
@@ -1501,6 +1548,53 @@ pub extern "C" fn seds_relay_clear_route(
         Some(src_side_id as usize)
     };
     ok_or_status(relay.clear_route(src, dst_side_id as usize))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_typed_route(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    ty: u32,
+    dst_side_id: i32,
+    enabled: bool,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let ty = match dtype_from_u32(ty) {
+        Ok(ty) => ty,
+        Err(err) => return status_from_err(err),
+    };
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.set_typed_route(src, ty, dst_side_id as usize, enabled))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_clear_typed_route(
+    r: *mut SedsRelay,
+    src_side_id: i32,
+    ty: u32,
+    dst_side_id: i32,
+) -> i32 {
+    if r.is_null() || dst_side_id < 0 || src_side_id < -1 {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let ty = match dtype_from_u32(ty) {
+        Ok(ty) => ty,
+        Err(err) => return status_from_err(err),
+    };
+    let relay = unsafe { &(*r).inner };
+    let src = if src_side_id < 0 {
+        None
+    } else {
+        Some(src_side_id as usize)
+    };
+    ok_or_status(relay.clear_typed_route(src, ty, dst_side_id as usize))
 }
 
 #[unsafe(no_mangle)]
@@ -3185,6 +3279,103 @@ mod tests {
     }
 
     #[test]
+    fn router_c_abi_typed_routes_can_target_selected_sides() {
+        let hits_a = AtomicUsize::new(0);
+        let hits_b = AtomicUsize::new(0);
+        let hits_c = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+        let side_name_c = b"C";
+
+        let router = Router::new_with_clock(
+            RouterMode::Relay,
+            RouterConfig::default(),
+            Box::new(TestClock {
+                now_ms: Arc::new(AtomicU64::new(0)),
+            }),
+        );
+        let router = Box::into_raw(Box::new(SedsRouter {
+            inner: Arc::from(router),
+        }));
+
+        let side_a = seds_router_add_side_packet(
+            router,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits_a as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_router_add_side_packet(
+            router,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits_b as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_c = seds_router_add_side_packet(
+            router,
+            side_name_c.as_ptr() as *const c_char,
+            side_name_c.len(),
+            Some(pkt_counter_cb),
+            (&hits_c as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        assert!(side_a >= 0);
+        assert!(side_b >= 0);
+        assert!(side_c >= 0);
+
+        assert_eq!(
+            seds_router_set_typed_route(router, -1, DataType::GpsData as u32, side_b, true),
+            0
+        );
+        assert_eq!(
+            seds_router_set_typed_route(router, -1, DataType::GpsData as u32, side_c, true),
+            0
+        );
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 2.0, 3.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(ok_or_status((*router).inner.tx(pkt)), 0);
+        }
+        assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_c.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            seds_router_clear_typed_route(router, -1, DataType::GpsData as u32, side_b),
+            0
+        );
+        assert_eq!(
+            seds_router_clear_typed_route(router, -1, DataType::GpsData as u32, side_c),
+            0
+        );
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[4.0, 5.0, 6.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+        unsafe {
+            assert_eq!(ok_or_status((*router).inner.tx(pkt)), 0);
+        }
+        assert_eq!(hits_a.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 2);
+        assert_eq!(hits_c.load(Ordering::SeqCst), 2);
+
+        seds_router_free(router);
+    }
+
+    #[test]
     fn router_c_abi_periodic_runs_discovery_and_queue_processing() {
         let hits = AtomicUsize::new(0);
         let side_name = b"NET";
@@ -3379,6 +3570,92 @@ mod tests {
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
         assert!(hits_a.load(Ordering::SeqCst) > 0);
         assert_eq!(hits_b.load(Ordering::SeqCst), 0);
+
+        seds_relay_free(relay);
+    }
+
+    #[test]
+    fn relay_c_abi_typed_routes_can_target_selected_sides() {
+        let hits_a = AtomicUsize::new(0);
+        let hits_b = AtomicUsize::new(0);
+        let hits_c = AtomicUsize::new(0);
+        let hits_d = AtomicUsize::new(0);
+        let side_name_a = b"A";
+        let side_name_b = b"B";
+        let side_name_c = b"C";
+        let side_name_d = b"D";
+
+        let relay = Relay::new(Box::new(TestClock {
+            now_ms: Arc::new(AtomicU64::new(0)),
+        }));
+        let relay = Box::into_raw(Box::new(SedsRelay {
+            inner: Arc::new(relay),
+        }));
+
+        let side_a = seds_relay_add_side_packet(
+            relay,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(pkt_counter_cb),
+            (&hits_a as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_b = seds_relay_add_side_packet(
+            relay,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(pkt_counter_cb),
+            (&hits_b as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_c = seds_relay_add_side_packet(
+            relay,
+            side_name_c.as_ptr() as *const c_char,
+            side_name_c.len(),
+            Some(pkt_counter_cb),
+            (&hits_c as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        let side_d = seds_relay_add_side_packet(
+            relay,
+            side_name_d.as_ptr() as *const c_char,
+            side_name_d.len(),
+            Some(pkt_counter_cb),
+            (&hits_d as *const AtomicUsize).cast_mut().cast(),
+            false,
+        );
+        assert!(side_a >= 0);
+        assert!(side_b >= 0);
+        assert!(side_c >= 0);
+        assert!(side_d >= 0);
+
+        assert_eq!(
+            seds_relay_set_typed_route(relay, side_a, DataType::GpsData as u32, side_b, true),
+            0
+        );
+        assert_eq!(
+            seds_relay_set_typed_route(relay, side_a, DataType::GpsData as u32, side_d, true),
+            0
+        );
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 2.0, 3.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        unsafe {
+            (*relay)
+                .inner
+                .rx_from_side(side_a as RelaySideId, pkt)
+                .unwrap();
+        }
+        assert_eq!(seds_relay_process_all_queues(relay), 0);
+        assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_c.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_d.load(Ordering::SeqCst), 1);
 
         seds_relay_free(relay);
     }

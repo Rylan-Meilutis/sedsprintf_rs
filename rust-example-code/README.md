@@ -11,5 +11,6 @@ or copy the snippets as needed.
 Additional example files in this folder:
 
 - `load_balancing_example.rs`: weighted split and failover route selection.
+- `typed_routing_example.rs`: route one packet type through two dedicated sides without load balancing.
 - `relay_example.rs`: basic relay side wiring.
 - `multinode_sim_example.rs`: multi-node simulation.

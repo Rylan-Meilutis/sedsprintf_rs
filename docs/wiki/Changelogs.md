@@ -1,5 +1,27 @@
 # Changelogs
 
+## Version 3.9.0 highlights
+
+- Manual typed-link routing:
+    - Added `set_typed_route(...)` / `clear_typed_route(...)` for both routers and relays.
+    - Typed route rules let one `DataType` use one or many explicitly selected sides for a given
+      local-TX or ingress-side source.
+    - This supports dedicated links for commands, aborts, or other special traffic classes
+      without rebuilding the router or relay.
+- Routing precedence and compatibility:
+    - Typed route rules act as allowlists layered on top of the existing side-level route policy,
+      ingress/egress policy, and discovery/path-selection logic.
+    - Existing routing behavior is unchanged for traffic that does not have a typed route rule.
+- ABI and binding parity:
+    - Added matching Rust, C ABI, and Python APIs for typed routing on both `Router` and `Relay`.
+- Regression coverage and docs:
+    - Added Rust and C ABI tests for typed-route selection, multi-side fanout, fallback after
+      clearing typed rules, and precedence against base route disables.
+    - Updated Rust, Python, C/C++, and technical router documentation to describe typed-route
+      behavior and precedence.
+- Full
+  changelog: [v3.8.0...v3.9.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.8.0...v3.9.0)
+
 ## Version 3.8.0 highlights
 
 - Multi-path traffic steering:

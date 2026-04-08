@@ -32,6 +32,8 @@ The router uses **named sides** (UART/CAN/RADIO/etc.) instead of LinkId.
   `Sink` disables RX-side relay by default, while `Relay` starts as a full mesh.
 - Runtime controls can then override that default with per-side ingress/egress policy and
   per-path route overrides for `(local TX or source side) -> destination side`.
+- Type-specific route overrides can further narrow a source-side path set for a specific
+  `DataType`, effectively creating a manual allowlist of destination sides for that packet type.
 - With discovery enabled and a known route, forwarding is still limited to matching candidate
   sides after applying the active route policy.
 
@@ -103,6 +105,8 @@ With discovery enabled, forwarding also consults the learned side map:
 - If candidate sides are known for one or more packet endpoints, the router forwards only to those sides.
 - If no side is known yet, the router falls back to flooding.
 - Link-local-only endpoints are only forwarded to sides marked `link_local_enabled: true`.
+- If typed route overrides exist for `(source side or local TX, packet type)`, only those enabled
+  destination sides remain eligible before path selection and discovery matching are applied.
 - Reliable packets are sent to all known candidate sides for their endpoints.
 - For time sync traffic, exact discovered source IDs win over generic `TIME_SYNC` endpoint matches
   when the router knows which source it currently wants to talk to.
