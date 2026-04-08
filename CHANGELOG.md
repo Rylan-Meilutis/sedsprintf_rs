@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.9.0
+
+- Added manual `DataType`-specific routing controls for both `Router` and `Relay` across Rust, C,
+  and Python.
+- Typed route rules now let a deployment restrict a given `(local TX or source side, data type)`
+  to one or many explicitly selected destination sides, enabling dedicated links for commands,
+  aborts, or other special traffic classes.
+- Typed route allowlists layer on top of the existing side-level route policy, ingress/egress
+  policy, and discovery/path-selection logic rather than bypassing them.
+- Added regression coverage for router and relay typed-route fanout, fallback after clearing typed
+  rules, precedence against base route disables, and matching C ABI coverage.
+- Updated Rust, Python, C/C++, and technical routing documentation to describe the new typed-route
+  APIs and routing precedence.
+
 ## 3.8.0
 
 - Added path-selection policies for both `Router` and `Relay` across Rust, C, and Python.

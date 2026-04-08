@@ -704,6 +704,44 @@ impl PyRouter {
             .map_err(py_err_from)
     }
 
+    fn set_typed_route(
+        &self,
+        src_side_id: Option<u32>,
+        ty: u32,
+        dst_side_id: u32,
+        enabled: bool,
+    ) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_typed_route(
+            src_side_id.map(|id| id as usize),
+            dtype_from_u32(ty).map_err(py_err_from)?,
+            dst_side_id as usize,
+            enabled,
+        )
+        .map_err(py_err_from)
+    }
+
+    fn clear_typed_route(
+        &self,
+        src_side_id: Option<u32>,
+        ty: u32,
+        dst_side_id: u32,
+    ) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.clear_typed_route(
+            src_side_id.map(|id| id as usize),
+            dtype_from_u32(ty).map_err(py_err_from)?,
+            dst_side_id as usize,
+        )
+        .map_err(py_err_from)
+    }
+
     fn set_source_route_mode(&self, src_side_id: Option<u32>, mode: i32) -> PyResult<()> {
         let mode = match mode {
             0 => RouteSelectionMode::Fanout,
@@ -1624,6 +1662,38 @@ impl PyRelay {
     fn clear_route(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
         self.inner
             .clear_route(src_side_id.map(|id| id as usize), dst_side_id as usize)
+            .map_err(py_err_from)
+    }
+
+    fn set_typed_route(
+        &self,
+        src_side_id: Option<u32>,
+        ty: u32,
+        dst_side_id: u32,
+        enabled: bool,
+    ) -> PyResult<()> {
+        self.inner
+            .set_typed_route(
+                src_side_id.map(|id| id as usize),
+                dtype_from_u32(ty).map_err(py_err_from)?,
+                dst_side_id as usize,
+                enabled,
+            )
+            .map_err(py_err_from)
+    }
+
+    fn clear_typed_route(
+        &self,
+        src_side_id: Option<u32>,
+        ty: u32,
+        dst_side_id: u32,
+    ) -> PyResult<()> {
+        self.inner
+            .clear_typed_route(
+                src_side_id.map(|id| id as usize),
+                dtype_from_u32(ty).map_err(py_err_from)?,
+                dst_side_id as usize,
+            )
             .map_err(py_err_from)
     }
 

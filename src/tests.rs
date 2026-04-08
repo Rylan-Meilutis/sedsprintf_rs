@@ -4259,6 +4259,79 @@ mod router_tests {
         }
 
         #[test]
+        fn relay_typed_routes_can_target_one_or_many_sides() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_c: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_d: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let seen_c_c = seen_c.clone();
+            let seen_d_c = seen_d.clone();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let _side_c = relay.add_side_packet("C", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_c_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_d = relay.add_side_packet("D", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_d_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            relay
+                .set_typed_route(Some(side_a), DataType::GpsData, side_b, true)
+                .unwrap();
+            relay
+                .set_typed_route(Some(side_a), DataType::GpsData, side_d, true)
+                .unwrap();
+
+            let gps_pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            relay.rx_from_side(side_a, gps_pkt).unwrap();
+            relay.process_all_queues().unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
+            assert!(seen_c.lock().unwrap().is_empty());
+            assert_eq!(seen_d.lock().unwrap().len(), 1);
+
+            relay
+                .clear_typed_route(Some(side_a), DataType::GpsData, side_b)
+                .unwrap();
+            relay
+                .clear_typed_route(Some(side_a), DataType::GpsData, side_d)
+                .unwrap();
+
+            let fallback_pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[9.0, 8.0, 7.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            relay.rx_from_side(side_a, fallback_pkt).unwrap();
+            relay.process_all_queues().unwrap();
+
+            assert_eq!(seen_b.lock().unwrap().len(), 2);
+            assert_eq!(seen_c.lock().unwrap().len(), 1);
+            assert_eq!(seen_d.lock().unwrap().len(), 2);
+        }
+
+        #[test]
         fn relay_remove_side_stops_transmit_and_rejects_removed_ingress() {
             let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
             let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4540,6 +4613,109 @@ mod router_tests {
             assert_eq!(seen_a.lock().unwrap().len(), 2);
             assert_eq!(seen_b.lock().unwrap().len(), 2);
             assert!(seen_c.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn router_typed_routes_can_target_one_or_many_sides() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_c: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let seen_c_c = seen_c.clone();
+
+            let router =
+                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_c = router.add_side_packet("C", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_c_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            router
+                .set_typed_route(None, DataType::GpsData, side_b, true)
+                .unwrap();
+            router
+                .set_typed_route(None, DataType::GpsData, side_c, true)
+                .unwrap();
+
+            let gps_pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            router.tx(gps_pkt).unwrap();
+            assert!(seen_a.lock().unwrap().is_empty());
+            assert_eq!(seen_b.lock().unwrap().len(), 1);
+            assert_eq!(seen_c.lock().unwrap().len(), 1);
+
+            router
+                .clear_typed_route(None, DataType::GpsData, side_b)
+                .unwrap();
+            router
+                .clear_typed_route(None, DataType::GpsData, side_c)
+                .unwrap();
+
+            let fallback_pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[7.0, 8.0, 9.0],
+                &[DataEndpoint::Radio],
+                2,
+            )
+            .unwrap();
+            router.tx(fallback_pkt).unwrap();
+            assert_eq!(seen_a.lock().unwrap().len(), 1);
+            assert_eq!(seen_b.lock().unwrap().len(), 2);
+            assert_eq!(seen_c.lock().unwrap().len(), 2);
+
+            let _ = side_a;
+        }
+
+        #[test]
+        fn router_typed_routes_still_respect_base_route_disables() {
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router =
+                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            router
+                .set_typed_route(None, DataType::GpsData, side_b, true)
+                .unwrap();
+            router.set_route(None, side_b, false).unwrap();
+
+            let gps_pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::Radio],
+                1,
+            )
+            .unwrap();
+            router.tx(gps_pkt).unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            assert!(seen_b.lock().unwrap().is_empty());
+
+            let _ = side_a;
         }
 
         #[test]

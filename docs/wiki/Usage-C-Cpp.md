@@ -137,6 +137,8 @@ Runtime side policy and routing controls are also available:
 - `seds_router_set_side_egress_enabled`
 - `seds_router_set_route`
 - `seds_router_clear_route`
+- `seds_router_set_typed_route`
+- `seds_router_clear_typed_route`
 - `seds_router_set_source_route_mode`
 - `seds_router_set_route_weight`
 - `seds_router_set_route_priority`
@@ -145,13 +147,22 @@ Runtime side policy and routing controls are also available:
 - `seds_relay_set_side_egress_enabled`
 - `seds_relay_set_route`
 - `seds_relay_clear_route`
+- `seds_relay_set_typed_route`
+- `seds_relay_clear_typed_route`
 - `seds_relay_set_source_route_mode`
 - `seds_relay_set_route_weight`
 - `seds_relay_set_route_priority`
 
 Pass `-1` as the source side to `seds_router_set_route` / `seds_router_clear_route` when you want
 to control locally-originated router TX rather than traffic received from a specific side. The
-relay route APIs use the same `-1` convention for locally-originated discovery TX.
+same `-1` convention also applies to `seds_router_set_typed_route` /
+`seds_router_clear_typed_route`. The relay route APIs use the same `-1` convention for
+locally-originated discovery TX.
+
+Typed route rules act as per-`DataType` allowlists for a given source side. If any typed rules
+exist for `(src_side, ty)`, only the enabled destination sides for that type remain eligible.
+That allows dedicated command, abort, or other special-purpose links while keeping ordinary
+traffic on the default routing policy.
 
 `SedsRouteSelectionMode` controls multi-path behavior:
 
