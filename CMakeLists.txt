@@ -37,6 +37,7 @@ set(SEDSPRINTF_RS_SCHEMA_PATH "" CACHE STRING
 # ============================================================
 option(SEDSPRINTF_EMBEDDED_BUILD "Build sedsprintf_rs for embedded" OFF)
 option(SEDSPRINTF_RS_PREFER_DYNAMIC "Prefer dynamic linking for host builds when supported" ON)
+option(SEDSPRINTF_RS_FORCE_RELEASE "Build sedsprintf_rs in release profile even when the parent CMake build is Debug" OFF)
 
 # Auto-detect embedded if user hasn't forced it
 if (NOT SEDSPRINTF_EMBEDDED_BUILD)
@@ -65,49 +66,34 @@ set(RUST_TRIPLE "${SEDSPRINTF_RS_TARGET}")
 # ============================================================
 # Compute Rust output paths
 # ============================================================
-set(RUST_PROFILE "$<IF:$<CONFIG:Debug>,debug,release>")
 set(RELEASE_PROFILE_DIR "release")
 if (SEDSPRINTF_EMBEDDED_BUILD)
     set(RELEASE_PROFILE_DIR "release-embedded")
 endif ()
 
-if (WIN32)
-    set(RS_SHARED_LIB_NAME "sedsprintf_rs.dll")
+if (SEDSPRINTF_RS_FORCE_RELEASE)
+    set(SEDSPRINTF_RS_ACTIVE_PROFILE "${RELEASE_PROFILE_DIR}")
 else ()
-    set(RS_SHARED_LIB_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}sedsprintf_rs${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    set(SEDSPRINTF_RS_ACTIVE_PROFILE "$<IF:$<CONFIG:Debug>,debug,${RELEASE_PROFILE_DIR}>")
 endif ()
 
 if (RUST_TRIPLE STREQUAL "")
     set(RS_STATIC_LIB_DBG "${RUST_DIR}/target/debug/libsedsprintf_rs.a")
     set(RS_STATIC_LIB_REL "${RUST_DIR}/target/release/libsedsprintf_rs.a")
-    set(RS_SHARED_LIB_DBG "${RUST_DIR}/target/debug/${RS_SHARED_LIB_NAME}")
-    set(RS_SHARED_LIB_REL "${RUST_DIR}/target/release/${RS_SHARED_LIB_NAME}")
 else ()
     set(RS_STATIC_LIB_DBG "${RUST_DIR}/target/${RUST_TRIPLE}/debug/libsedsprintf_rs.a")
     set(RS_STATIC_LIB_REL "${RUST_DIR}/target/${RUST_TRIPLE}/${RELEASE_PROFILE_DIR}/libsedsprintf_rs.a")
-    set(RS_SHARED_LIB_DBG "${RUST_DIR}/target/${RUST_TRIPLE}/debug/${RS_SHARED_LIB_NAME}")
-    set(RS_SHARED_LIB_REL "${RUST_DIR}/target/${RUST_TRIPLE}/${RELEASE_PROFILE_DIR}/${RS_SHARED_LIB_NAME}")
 endif ()
 
-set(SEDSPRINTF_RS_DYNAMIC_SUPPORTED ON)
-if (SEDSPRINTF_EMBEDDED_BUILD OR WIN32)
-    set(SEDSPRINTF_RS_DYNAMIC_SUPPORTED OFF)
+set(RS_LIB_DBG "${RS_STATIC_LIB_DBG}")
+set(RS_LIB_REL "${RS_STATIC_LIB_REL}")
+if (SEDSPRINTF_RS_FORCE_RELEASE)
+    set(RS_LIB_DBG "${RS_LIB_REL}")
 endif ()
-
+set(RS_IMPORTED_KIND STATIC)
 set(SEDSPRINTF_RS_LINK_DYNAMIC OFF)
-if (SEDSPRINTF_RS_PREFER_DYNAMIC AND SEDSPRINTF_RS_DYNAMIC_SUPPORTED)
-    set(SEDSPRINTF_RS_LINK_DYNAMIC ON)
-endif ()
-
-if (SEDSPRINTF_RS_LINK_DYNAMIC)
-    set(RS_LIB_DBG "${RS_SHARED_LIB_DBG}")
-    set(RS_LIB_REL "${RS_SHARED_LIB_REL}")
-    set(RS_IMPORTED_KIND SHARED)
-else ()
-    set(RS_LIB_DBG "${RS_STATIC_LIB_DBG}")
-    set(RS_LIB_REL "${RS_STATIC_LIB_REL}")
-    set(RS_IMPORTED_KIND STATIC)
-endif ()
+set(RS_SHARED_LIB_DBG "")
+set(RS_SHARED_LIB_REL "")
 
 set(RS_INCLUDE "${RUST_DIR}/C-Headers")
 set(RS_HEADER "${RS_INCLUDE}/sedsprintf.h")
@@ -132,9 +118,13 @@ if (NOT SEDSPRINTF_RS_SCHEMA_PATH STREQUAL "")
     set(RS_ARGS_STR "${RS_ARGS_STR} schema_path=${SEDSPRINTF_RS_SCHEMA_PATH}")
 endif ()
 
-# Show release in log string
-set(RS_ARG_REL " $<$<CONFIG:Release>:release>")
-set(RS_ARGS_STR "${RS_ARGS_STR} ${RS_ARG_REL}")
+if (SEDSPRINTF_RS_FORCE_RELEASE)
+    set(RS_ARGS_STR "${RS_ARGS_STR} release")
+else ()
+    # Show release in log string
+    set(RS_ARG_REL " $<$<CONFIG:Release>:release>")
+    set(RS_ARGS_STR "${RS_ARGS_STR} ${RS_ARG_REL}")
+endif ()
 
 # ============================================================
 # Configure-time args passed to build.py (list form)
@@ -151,7 +141,7 @@ endif ()
 
 # NOTE: When using multi-config generators (VS/Xcode), CMAKE_BUILD_TYPE is empty.
 # We rely on the build step to rebuild as needed anyway; default to Debug.
-if (CMAKE_BUILD_TYPE STREQUAL "Release")
+if (SEDSPRINTF_RS_FORCE_RELEASE OR CMAKE_BUILD_TYPE STREQUAL "Release")
     list(APPEND RS_ARGS_BOOTSTRAP "release")
 endif ()
 
@@ -216,21 +206,27 @@ file(GLOB_RECURSE RS_SRC CONFIGURE_DEPENDS
     "${RUST_DIR}/Cargo.lock"
 )
 
+if (SEDSPRINTF_RS_FORCE_RELEASE)
+    set(RS_BUILD_OUTPUTS "${RS_LIB_REL}" "${RS_HEADER}")
+else ()
+    set(RS_BUILD_OUTPUTS "${RS_LIB_DBG}" "${RS_LIB_REL}" "${RS_HEADER}")
+endif ()
+
 # ============================================================
 # Main build rule
 # ============================================================
 add_custom_command(
-    OUTPUT "${RS_LIB_DBG}" "${RS_LIB_REL}" "${RS_HEADER}"
+    OUTPUT ${RS_BUILD_OUTPUTS}
     COMMAND ${_RS_ENV_CMD} "${PYTHON_EXECUTABLE}" build.py ${RS_ARGS_BOOTSTRAP}
     WORKING_DIRECTORY "${RUST_DIR}"
     DEPENDS ${RS_SRC}
-    COMMENT "Building sedsprintf_rs (${RUST_PROFILE}) ${RS_ARGS_STR}"
+    COMMENT "Building sedsprintf_rs (${SEDSPRINTF_RS_ACTIVE_PROFILE}) ${RS_ARGS_STR}"
     USES_TERMINAL
     VERBATIM
 )
 
 add_custom_target(sedsprintf_rs_build
-    DEPENDS "${RS_LIB_DBG}" "${RS_LIB_REL}" "${RS_HEADER}"
+    DEPENDS ${RS_BUILD_OUTPUTS}
 )
 
 # ============================================================
