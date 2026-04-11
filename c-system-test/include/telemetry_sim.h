@@ -71,8 +71,6 @@ SedsResult node_log(
 SedsResult radio_handler_serial(const uint8_t * bytes, size_t len, void * user);
 
 SedsResult sdcard_handler(const SedsPacketView * pkt, void * user);
-SedsResult timesync_handler(const SedsPacketView * pkt, void * user);
-
 uint64_t host_now_ms(const void * user);
 
 uint64_t node_now_since_bus_ms(void * user);

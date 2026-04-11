@@ -193,57 +193,6 @@ static uint64_t read_u64_le(const uint8_t * bytes)
     return v;
 }
 
-SedsResult timesync_handler(const SedsPacketView * pkt, void * user)
-{
-    SimNode * self = user;
-    if (self) self->time_sync_hits++;
-
-    if (!pkt || !pkt->payload || pkt->payload_len == 0) return SEDS_ERR;
-
-    if (pkt->ty == SEDS_DT_TIME_SYNC_REQUEST && pkt->payload_len >= 16)
-    {
-        if (self) self->ts_request_hits++;
-        const uint64_t seq = read_u64_le(pkt->payload);
-        const uint64_t t1 = read_u64_le(pkt->payload + 8);
-        const uint64_t t2 = node_now_since_bus_ms(self);
-        const uint64_t t3 = node_now_since_bus_ms(self);
-
-        if (self && self->is_time_source)
-        {
-            const uint64_t resp[4] = {seq, t1, t2, t3};
-            seds_router_log_queue(self->r, SEDS_DT_TIME_SYNC_RESPONSE, resp, sizeof(resp));
-        }
-        return SEDS_OK;
-    }
-
-    if (pkt->ty == SEDS_DT_TIME_SYNC_ANNOUNCE && pkt->payload_len >= 16)
-    {
-        if (self) self->ts_announce_hits++;
-        const uint64_t priority = read_u64_le(pkt->payload);
-        const uint64_t t_ms = read_u64_le(pkt->payload + 8);
-        printf("[TIME_SYNC] announce priority=%llu time_ms=%llu\n",
-               (unsigned long long) priority, (unsigned long long) t_ms);
-        return SEDS_OK;
-    }
-
-    if (pkt->ty == SEDS_DT_TIME_SYNC_RESPONSE && pkt->payload_len >= 32)
-    {
-        if (self) self->ts_response_hits++;
-        const uint64_t seq = read_u64_le(pkt->payload);
-        const uint64_t t1 = read_u64_le(pkt->payload + 8);
-        const uint64_t t2 = read_u64_le(pkt->payload + 16);
-        const uint64_t t3 = read_u64_le(pkt->payload + 24);
-        printf("[TIME_SYNC] response seq=%llu t1=%llu t2=%llu t3=%llu\n",
-               (unsigned long long) seq,
-               (unsigned long long) t1,
-               (unsigned long long) t2,
-               (unsigned long long) t3);
-        return SEDS_OK;
-    }
-
-    return SEDS_OK;
-}
-
 uint64_t node_now_since_bus_ms(void * user)
 {
     const SimNode * self = (const SimNode *) user;
@@ -272,7 +221,7 @@ SedsResult node_init(SimNode * n, SimBus * bus, const char * name, int radio, in
     n->ts_request_hits = 0;
     n->ts_response_hits = 0;
 
-    SedsLocalEndpointDesc locals[3];
+    SedsLocalEndpointDesc locals[2];
     uint32_t num = 0;
 
     if (n->has_radio)
@@ -291,12 +240,6 @@ SedsResult node_init(SimNode * n, SimBus * bus, const char * name, int radio, in
             .user = (void *) n
         };
     }
-    locals[num++] = (SedsLocalEndpointDesc){
-        .endpoint = SEDS_EP_TIME_SYNC,
-        .packet_handler = timesync_handler,
-        .user = (void *) n
-    };
-
     n->r = seds_router_new(
         Seds_RM_Sink,
         node_now_since_bus_ms,

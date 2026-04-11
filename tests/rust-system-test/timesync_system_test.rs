@@ -200,15 +200,9 @@ mod timesync_system_test {
     #[test]
     fn router_internal_timesync_endpoint_updates_network_time() {
         let now = Arc::new(AtomicU64::new(1_000));
-        let called = Arc::new(AtomicU64::new(0));
-        let called_c = called.clone();
-        let handler = EndpointHandler::new_packet_handler(DataEndpoint::TimeSync, move |_pkt| {
-            called_c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        });
         let router = Router::new_with_clock(
             RouterMode::Sink,
-            RouterConfig::new(vec![handler]).with_timesync(TimeSyncConfig::default()),
+            RouterConfig::default().with_timesync(TimeSyncConfig::default()),
             shared_clock(now.clone()),
         );
 
@@ -216,12 +210,6 @@ mod timesync_system_test {
         router.rx(&announce).unwrap();
 
         let first = router.network_time_ms().expect("network time unavailable");
-        assert_eq!(
-            called.load(Ordering::SeqCst),
-            0,
-            "TIME_SYNC must stay internal"
-        );
-
         now.store(1_025, Ordering::SeqCst);
         let later = router.network_time_ms().expect("network time unavailable");
         assert!(
