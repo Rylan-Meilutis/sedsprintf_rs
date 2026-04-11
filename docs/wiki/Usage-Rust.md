@@ -62,6 +62,12 @@ fn main() -> TelemetryResult<()> {
 On `std` builds, `Router::new(...)` uses an internal monotonic clock. If you need a custom
 monotonic source for tests, simulation, or `no_std`, use `Router::new_with_clock(...)`.
 
+Reserved internal endpoints:
+
+- Do not register `EndpointHandler`s for `DataEndpoint::Discovery`.
+- Do not register `EndpointHandler`s for `DataEndpoint::TimeSync` when the `timesync` feature is enabled.
+- Those endpoints are reserved for the router's built-in discovery and time-sync control traffic.
+
 `RouterMode` now seeds the default forwarding policy:
 
 - `Sink`: local TX still uses registered sides, but packets received through RX APIs do not relay
@@ -231,6 +237,7 @@ Routers use **named sides** (UART/CAN/RADIO/etc.) instead of LinkId. Register si
 When the `timesync` feature is enabled, the schema adds time sync packets and the router maintains
 an internal network clock separate from its monotonic timing source.
 `TIME_SYNC` packets are handled internally and do not dispatch to normal local endpoint handlers.
+`DataEndpoint::TimeSync` is reserved and must not be registered as a user handler.
 See rust-example-code/timesync_example.rs
 ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/rust-example-code/timesync_example.rs))
 for a full example.

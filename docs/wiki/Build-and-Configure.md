@@ -126,6 +126,7 @@ and exposes variables for embedded builds.
 Common CMake variables:
 
 - `SEDSPRINTF_EMBEDDED_BUILD` (ON/OFF)
+- `SEDSPRINTF_RS_FORCE_RELEASE` (ON/OFF, forces Cargo release profile even under a Debug parent build)
 - `SEDSPRINTF_RS_TARGET` (Rust target triple)
 - `SEDSPRINTF_RS_DEVICE_IDENTIFIER`
 - `SEDSPRINTF_RS_MAX_STACK_PAYLOAD`

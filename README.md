@@ -58,7 +58,9 @@ With the optional `discovery` feature, routers and relays can exchange built-in 
 endpoints are reachable through which sides, adapt the announce rate as the topology changes, and export a live topology
 snapshot for inspection. When `timesync` is also enabled, discovery can advertise concrete time source sender IDs so
 `TIME_SYNC` requests prefer exact source paths instead of generic endpoint flooding. When a route is known, forwarding
-becomes more selective; when it is not known, the system falls back to ordinary flooding.
+becomes more selective; when it is not known, the system falls back to ordinary flooding. `DISCOVERY` and `TIME_SYNC`
+are reserved internal router endpoints: applications can use the discovery and time-sync APIs, but must not register
+local endpoint handlers for those endpoints or try to override their built-in handling.
 
 The size of the header in a serialized packet is around 20 bytes (the size will change based on the total number of
 endpoints in your system and the length of the sender string), plus a 4-byte CRC32 trailer. As a rough example, a packet
@@ -241,6 +243,11 @@ a short Criterion smoke pass, and the python plus embedded build validation step
 set(SEDSPRINTF_RS_TARGET "thumbv7m-none-eabi" CACHE STRING "" FORCE)
 set(SEDSPRINTF_EMBEDDED_BUILD ON CACHE BOOL "" FORCE)
 
+# Optional: always build the Rust crate in release mode, even if the parent CMake
+# configuration is Debug. Useful when your top-level project stays Debug but you
+# want an optimized telemetry library.
+# set(SEDSPRINTF_RS_FORCE_RELEASE ON CACHE BOOL "" FORCE)
+
 # set the sender name
 set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 
@@ -259,6 +266,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE sedsprintf_rs::sedsprintf_rs
 ```
 
 Host CMake builds now prefer the shared Rust library when supported. Embedded builds still use the static library.
+If you want the Rust crate to use the release profile regardless of the parent CMake config,
+set `SEDSPRINTF_RS_FORCE_RELEASE=ON` before `add_subdirectory(...)`. Otherwise the wrapper follows
+`CMAKE_BUILD_TYPE` for single-config generators and defaults to debug for Debug builds.
 
 - Configure telemetry schema via `telemetry_config.json` (endpoints + message types). The Rust enum metadata is
   generated
