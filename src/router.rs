@@ -284,6 +284,15 @@ impl Debug for EndpointHandler {
     }
 }
 
+#[inline]
+pub(crate) const fn endpoint_is_router_internal(endpoint: DataEndpoint) -> bool {
+    #[cfg(feature = "timesync")]
+    if matches!(endpoint, DataEndpoint::TimeSync) {
+        return true;
+    }
+    discovery::is_discovery_endpoint(endpoint)
+}
+
 impl EndpointHandler {
     /// Create a new endpoint handler for `Packet` callbacks.
     ///
@@ -293,6 +302,10 @@ impl EndpointHandler {
     where
         F: Fn(&Packet) -> TelemetryResult<()> + Send + Sync + 'static,
     {
+        assert!(
+            !endpoint_is_router_internal(endpoint),
+            "reserved internal endpoint handlers must not be user-registered"
+        );
         Self {
             endpoint,
             handler: EndpointHandlerFn::Packet(Arc::new(f)),
@@ -307,6 +320,10 @@ impl EndpointHandler {
     where
         F: Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static,
     {
+        assert!(
+            !endpoint_is_router_internal(endpoint),
+            "reserved internal endpoint handlers must not be user-registered"
+        );
         Self {
             endpoint,
             handler: EndpointHandlerFn::Serialized(Arc::new(f)),
@@ -387,8 +404,15 @@ impl RouterConfig {
     where
         H: Into<Arc<[EndpointHandler]>>,
     {
+        let handlers: Arc<[EndpointHandler]> = handlers.into();
+        assert!(
+            handlers
+                .iter()
+                .all(|handler| !endpoint_is_router_internal(handler.endpoint)),
+            "reserved internal endpoint handlers must not be user-registered"
+        );
         Self {
-            handlers: handlers.into(),
+            handlers,
             reliable_enabled: true,
             #[cfg(feature = "timesync")]
             timesync: None,
@@ -411,6 +435,9 @@ impl RouterConfig {
     #[inline]
     /// Check if the specified endpoint is local to this router.
     fn is_local_endpoint(&self, ep: DataEndpoint) -> bool {
+        if endpoint_is_router_internal(ep) {
+            return false;
+        }
         self.handlers.iter().any(|h| h.endpoint == ep)
     }
 
@@ -3068,39 +3095,60 @@ impl Router {
     /// Process both transmit and receive queues for up to `timeout_ms` milliseconds.
     /// If `timeout_ms == 0`, drains both queues fully.
     fn process_all_queues_with_timeout_impl(&self, timeout_ms: u32) -> TelemetryResult<()> {
-        let drain_fully = timeout_ms == 0;
-        let start = if drain_fully { 0 } else { self.clock.now_ms() };
+        if timeout_ms == 0 {
+            loop {
+                let mut did_any = false;
+                self.process_reliable_timeouts()?;
 
+                if let Some(pkt) = {
+                    let mut st = self.state.lock();
+                    st.transmit_queue.pop_front()
+                } {
+                    self.tx_item_impl(pkt.item, pkt.ignore_local)?;
+                    did_any = true;
+                }
+
+                if let Some(item) = self.isr_rx_queue.pop_front().unwrap_or(None).or_else(|| {
+                    let mut st = self.state.lock();
+                    st.received_queue.pop_front()
+                }) {
+                    self.process_rx_queue_item(item)?;
+                    did_any = true;
+                }
+
+                if !did_any {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+
+        let tx_budget_ms = u64::from(timeout_ms / 2);
+        let rx_budget_ms = u64::from(timeout_ms) - tx_budget_ms;
+
+        let tx_start = self.clock.now_ms();
         loop {
-            let mut did_any = false;
             self.process_reliable_timeouts()?;
-
-            // TX first
-            if let Some(pkt) = {
+            let pkt_opt = {
                 let mut st = self.state.lock();
                 st.transmit_queue.pop_front()
-            } {
-                self.tx_item_impl(pkt.item, pkt.ignore_local)?;
-                did_any = true;
-            }
-            if !drain_fully && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64 {
+            };
+            let Some(pkt) = pkt_opt else { break };
+            self.tx_item_impl(pkt.item, pkt.ignore_local)?;
+            if self.clock.now_ms().wrapping_sub(tx_start) >= tx_budget_ms {
                 break;
             }
+        }
 
-            // Then RX
-            if let Some(item) = self.isr_rx_queue.pop_front().unwrap_or(None).or_else(|| {
+        let rx_start = self.clock.now_ms();
+        loop {
+            let item_opt = self.isr_rx_queue.pop_front().unwrap_or(None).or_else(|| {
                 let mut st = self.state.lock();
                 st.received_queue.pop_front()
-            }) {
-                self.process_rx_queue_item(item)?;
-                did_any = true;
-            }
-
-            if !drain_fully && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64 {
-                break;
-            }
-
-            if !did_any {
+            });
+            let Some(item) = item_opt else { break };
+            self.process_rx_queue_item(item)?;
+            if self.clock.now_ms().wrapping_sub(rx_start) >= rx_budget_ms {
                 break;
             }
         }

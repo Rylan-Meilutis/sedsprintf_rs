@@ -11,6 +11,10 @@ and a static library built by Cargo.
 set(SEDSPRINTF_RS_TARGET "thumbv7em-none-eabihf" CACHE STRING "" FORCE)
 set(SEDSPRINTF_EMBEDDED_BUILD ON CACHE BOOL "" FORCE)
 
+# Optional: force the Rust crate into the release profile even when the parent
+# CMake build is Debug.
+# set(SEDSPRINTF_RS_FORCE_RELEASE ON CACHE BOOL "" FORCE)
+
 # set the sender name
 set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 
@@ -26,10 +30,15 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE sedsprintf_rs::sedsprintf_rs
 Important CMake variables:
 
 - `SEDSPRINTF_EMBEDDED_BUILD` (ON/OFF)
+- `SEDSPRINTF_RS_FORCE_RELEASE` (ON/OFF)
 - `SEDSPRINTF_RS_TARGET` (Rust target triple)
 - `SEDSPRINTF_RS_DEVICE_IDENTIFIER`
 - `SEDSPRINTF_RS_MAX_STACK_PAYLOAD`
 - `SEDSPRINTF_RS_ENV_<KEY>` for any config env var
+
+`SEDSPRINTF_RS_FORCE_RELEASE` is useful when your top-level CMake build remains `Debug` but you
+still want `sedsprintf_rs` built with Cargo's release profile. If it is left `OFF`, the wrapper
+follows the parent CMake configuration for single-config generators.
 
 ## Manual build (no CMake)
 
@@ -88,6 +97,13 @@ int main(void)
 On `std` builds, passing `NULL` for `now_ms_cb` makes the router use its own internal monotonic
 clock. On `no_std` builds, provide a monotonic clock callback.
 
+Reserved internal endpoints:
+
+- Do not register `SEDS_EP_DISCOVERY` in `SedsLocalEndpointDesc`.
+- Do not register `SEDS_EP_TIME_SYNC` in `SedsLocalEndpointDesc` when `timesync` is enabled.
+- Those endpoints are reserved for the router's built-in discovery and time-sync control traffic,
+  and `seds_router_new(...)` rejects them.
+
 See c-example-code/
 ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/tree/main/c-example-code))
 for a more complete example. Time sync is demonstrated in c-example-code/src/timesync_example.c
@@ -99,6 +115,8 @@ packets internally. Use `seds_router_get_network_time_ms` / `seds_router_get_net
 read the current synthesized network time. Source/master nodes can seed that clock directly with
 the `seds_router_set_local_network_*` functions for date-only, time-only, millisecond, or
 nanosecond precision inputs.
+`SEDS_EP_TIME_SYNC` remains reserved for that internal machinery and must not be registered as a
+local endpoint handler.
 For normal application loops, call `seds_router_periodic(...)` to run time sync, discovery, and
 queue draining together. If you need to skip time sync for a cycle while keeping the feature
 enabled, call `seds_router_periodic_no_timesync(...)` instead.

@@ -15,7 +15,7 @@
 use crate::timesync::{NetworkTimeReading, PartialNetworkTime, TimeSyncConfig};
 use crate::{
     config::DataEndpoint, do_vec_log_typed, get_needed_message_size, message_meta, packet::Packet,
-    router::{Clock, LeBytes, RouterSideOptions},
+    router::{endpoint_is_router_internal, Clock, LeBytes, RouterSideOptions},
     router::{EndpointHandler, Router, RouterConfig},
     serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet}, DataType, MessageElement,
     RouteSelectionMode,
@@ -457,6 +457,9 @@ pub extern "C" fn seds_router_new(
                 Ok(e) => e,
                 Err(_) => return ptr::null_mut(),
             };
+            if endpoint_is_router_internal(endpoint) {
+                return ptr::null_mut();
+            }
 
             // Common user ctx for either callback kind
             let user_addr = desc.user as usize;
@@ -3002,6 +3005,34 @@ mod tests {
         let hits = unsafe { &*(user as *const AtomicUsize) };
         hits.fetch_add(1, Ordering::SeqCst);
         status_from_result_code(SedsResult::SedsOk)
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn router_c_abi_rejects_reserved_discovery_endpoint_handler() {
+        let desc = SedsLocalEndpointDesc {
+            endpoint: DataEndpoint::Discovery as u32,
+            packet_handler: Some(pkt_counter_cb),
+            serialized_handler: None,
+            user: ptr::null_mut(),
+        };
+
+        let router = seds_router_new(0, None, ptr::null_mut(), &desc, 1);
+        assert!(router.is_null());
+    }
+
+    #[cfg(feature = "timesync")]
+    #[test]
+    fn router_c_abi_rejects_reserved_timesync_endpoint_handler() {
+        let desc = SedsLocalEndpointDesc {
+            endpoint: DataEndpoint::TimeSync as u32,
+            packet_handler: Some(pkt_counter_cb),
+            serialized_handler: None,
+            user: ptr::null_mut(),
+        };
+
+        let router = seds_router_new(0, None, ptr::null_mut(), &desc, 1);
+        assert!(router.is_null());
     }
 
     #[test]

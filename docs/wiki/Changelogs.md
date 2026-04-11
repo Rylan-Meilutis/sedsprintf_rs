@@ -1,5 +1,25 @@
 # Changelogs
 
+## Version 3.9.1 highlights
+
+- Router-internal control endpoints:
+    - Reserved `DISCOVERY` and `TIME_SYNC` for built-in router control traffic.
+    - `RouterConfig`, `EndpointHandler`, and `seds_router_new(...)` now reject attempts to
+      register user handlers on those endpoints.
+- Queue maintenance reliability:
+    - Nonzero `process_all_queues_with_timeout(...)` budgets are now split between TX and RX so
+      slow TX work cannot starve queued RX discovery processing.
+    - Zero-timeout queue processing still drains both queues completely.
+- Discovery regression coverage:
+    - Added tests proving queued discovery updates the exported route table, queued time-sync
+      discovery sources are learned correctly, and reserved-endpoint registration is rejected in
+      both Rust and the C ABI.
+- Documentation refresh:
+    - Updated Rust and C/C++ usage docs to state that discovery and time sync are router-owned
+      internals rather than user-registerable endpoints.
+- Full
+  changelog: [v3.9.0...v3.9.1](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.9.0...v3.9.1)
+
 ## Version 3.9.0 highlights
 
 - Manual typed-link routing:

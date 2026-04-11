@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.9.1
+
+- Reserved the built-in `DISCOVERY` and `TIME_SYNC` endpoints for router-owned control traffic so
+  user code can no longer register local handlers that shadow or distort internal discovery and
+  time-sync behavior.
+- `RouterConfig`, `EndpointHandler`, and the C router constructor now reject attempts to register
+  handlers on those internal endpoints.
+- Tightened combined queue processing so nonzero timeout budgets are split across TX and RX work,
+  while `timeout_ms == 0` still drains both queues fully.
+- Added regression coverage for queued discovery route learning, time-sync source learning, queue
+  starvation prevention, and reserved-endpoint rejection in both Rust and the C ABI.
+- Updated Rust and C/C++ docs to document that discovery and time sync are router-internal and
+  not user-overridable.
+
 ## 3.9.0
 
 - Added manual `DataType`-specific routing controls for both `Router` and `Relay` across Rust, C,
