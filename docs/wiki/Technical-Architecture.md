@@ -192,17 +192,20 @@ Key structures:
 Receive flow:
 
 1) RX bytes or packet are processed immediately or queued (`rx_*` vs `rx_*_queue`).
-2) Packet ID is computed. For serialized bytes, the router tries `packet_id_from_wire` and falls back to hashing raw
+2) Reliable side headers are handled first when the ingress side has reliable delivery enabled.
+3) Packet ID is computed. For serialized bytes, the router tries `packet_id_from_wire` and falls back to hashing raw
    bytes if needed.
-3) If the packet ID is already in the recent cache, it is dropped.
-4) Local endpoint handlers are invoked.
-5) In `RouterMode::Relay`, the router forwards the packet **once** if any endpoint requires remote forwarding.
+4) If the packet ID is already in the recent cache, it is dropped.
+5) Local endpoint handlers are invoked.
+6) The router forwards the packet according to the current route rules and discovery/path-selection state.
 
-Forwarding decision uses endpoint broadcast modes:
+Forwarding is driven by:
 
-- `Always`: always eligible for forward.
-- `Never`: never forwarded.
-- `Default`: forwarded only when there is no local handler for that endpoint.
+- the active side ingress/egress policy
+- route overrides and typed route overrides
+- discovery-learned endpoint reachability
+- link-local side scope
+- route-selection policy (`Fanout`, `Weighted`, `Failover`)
 
 Transmit flow:
 

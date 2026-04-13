@@ -1,13 +1,13 @@
 #[cfg(feature = "timesync")]
 mod timesync_system_test {
-    use sedsprintf_rs::config::{DataEndpoint, DataType, DEVICE_IDENTIFIER};
+    use sedsprintf_rs::config::{DEVICE_IDENTIFIER, DataEndpoint, DataType};
     use sedsprintf_rs::packet::Packet;
-    use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
+    use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
     use sedsprintf_rs::serialize;
     use sedsprintf_rs::timesync::{
-        build_timesync_announce_with_sender, build_timesync_request, build_timesync_response, compute_offset_delay,
-        PartialNetworkTime, TimeSyncConfig, TimeSyncRole,
-        TimeSyncTracker,
+        PartialNetworkTime, TimeSyncConfig, TimeSyncRole, TimeSyncTracker,
+        build_timesync_announce_with_sender, build_timesync_request, build_timesync_response,
+        compute_offset_delay,
     };
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,7 +50,6 @@ mod timesync_system_test {
         let captured = Arc::new(Mutex::new(None));
         let captured_c = captured.clone();
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::SdCard,
                 |_pkt| Ok(()),
@@ -201,7 +200,6 @@ mod timesync_system_test {
     fn router_internal_timesync_endpoint_updates_network_time() {
         let now = Arc::new(AtomicU64::new(1_000));
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::default().with_timesync(TimeSyncConfig::default()),
             shared_clock(now.clone()),
         );
@@ -222,7 +220,6 @@ mod timesync_system_test {
     fn router_failover_slews_without_jumping_backwards() {
         let now = Arc::new(AtomicU64::new(1_000));
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::default().with_timesync(TimeSyncConfig {
                 role: TimeSyncRole::Consumer,
                 priority: 50,
@@ -255,7 +252,6 @@ mod timesync_system_test {
         let request_seqs = Arc::new(Mutex::new(Vec::new()));
         let request_seqs_c = request_seqs.clone();
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::default().with_timesync(TimeSyncConfig {
                 role: TimeSyncRole::Consumer,
                 priority: 50,
@@ -314,7 +310,6 @@ mod timesync_system_test {
     fn router_merges_partial_network_time_sources() {
         let now = Arc::new(AtomicU64::new(2_000));
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::default().with_timesync(TimeSyncConfig::default()),
             shared_clock(now.clone()),
         );
@@ -363,7 +358,6 @@ mod timesync_system_test {
     #[test]
     fn local_master_setters_merge_partial_fields_and_anchor_at_commit_time() {
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::default().with_timesync(TimeSyncConfig {
                 role: TimeSyncRole::Source,
                 priority: 1,

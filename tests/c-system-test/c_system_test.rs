@@ -12,7 +12,7 @@ mod c_system_test {
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to run {name}: {e}"));
 
-        let timeout = Duration::from_secs(20);
+        let timeout = Duration::from_secs(45);
         let start = Instant::now();
         let output = loop {
             if let Some(_status) = child

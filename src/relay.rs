@@ -16,8 +16,8 @@ use crate::{
 };
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::string::String;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::string::{String, ToString};
 use alloc::{sync::Arc, vec, vec::Vec};
 
 /// Logical side index (CAN, UART, RADIO, etc.)
@@ -139,12 +139,91 @@ struct ReliableRxState {
     buffered: BTreeMap<u32, Arc<[u8]>>,
 }
 
+#[derive(Debug, Clone)]
+struct ReliableReturnRouteState {
+    side: RelaySideId,
+}
+
 #[cfg(feature = "discovery")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiscoverySenderState {
+    reachable: Vec<crate::DataEndpoint>,
+    reachable_timesync_sources: Vec<String>,
+    last_seen_ms: u64,
+}
+
+#[inline]
+fn is_internal_control_type(ty: crate::DataType) -> bool {
+    if matches!(
+        ty,
+        crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+    ) {
+        return true;
+    }
+
+    #[cfg(feature = "timesync")]
+    if matches!(
+        ty,
+        crate::DataType::TimeSyncAnnounce
+            | crate::DataType::TimeSyncRequest
+            | crate::DataType::TimeSyncResponse
+    ) {
+        return true;
+    }
+
+    #[cfg(feature = "discovery")]
+    if matches!(ty, crate::DataType::DiscoveryAnnounce) {
+        return true;
+    }
+
+    let _ = ty;
+    false
+}
+
+#[cfg(feature = "discovery")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DiscoverySideState {
     reachable: Vec<crate::DataEndpoint>,
     reachable_timesync_sources: Vec<String>,
     last_seen_ms: u64,
+    announcers: BTreeMap<String, DiscoverySenderState>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AdaptiveRouteStats {
+    estimated_bandwidth_bps: u64,
+    last_observed_ms: u64,
+}
+
+impl AdaptiveRouteStats {
+    #[inline]
+    fn observe(&mut self, sample_bps: u64, now_ms: u64) {
+        self.estimated_bandwidth_bps = if self.estimated_bandwidth_bps == 0 {
+            sample_bps
+        } else if sample_bps >= self.estimated_bandwidth_bps {
+            self.estimated_bandwidth_bps
+                .saturating_mul(3)
+                .saturating_add(sample_bps.saturating_mul(5))
+                / 8
+        } else {
+            self.estimated_bandwidth_bps
+                .saturating_mul(7)
+                .saturating_add(sample_bps)
+                / 8
+        };
+        self.last_observed_ms = now_ms;
+    }
+
+    #[inline]
+    fn weight(&self) -> u64 {
+        self.estimated_bandwidth_bps.max(1)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteSelectionOrigin {
+    Flood,
+    Discovered,
 }
 
 /// Internal state, protected by RouterMutex so all public methods can take &self.
@@ -156,12 +235,15 @@ struct RelayInner {
     route_priorities: BTreeMap<(Option<RelaySideId>, RelaySideId), u32>,
     source_route_modes: BTreeMap<Option<RelaySideId>, RouteSelectionMode>,
     route_selection_cursors: BTreeMap<Option<RelaySideId>, u64>,
+    adaptive_route_stats: BTreeMap<RelaySideId, AdaptiveRouteStats>,
     rx_queue: BoundedDeque<RelayRxItem>,
     tx_queue: BoundedDeque<RelayTxItem>,
     replay_queue: BoundedDeque<RelayReplayItem>,
     recent_rx: BoundedDeque<u64>,
     reliable_tx: BTreeMap<(RelaySideId, u32), ReliableTxState>,
     reliable_rx: BTreeMap<(RelaySideId, u32), ReliableRxState>,
+    reliable_return_routes: BTreeMap<u64, ReliableReturnRouteState>,
+    end_to_end_acked_destinations: BTreeMap<u64, BTreeSet<u64>>,
     #[cfg(feature = "discovery")]
     discovery_routes: BTreeMap<RelaySideId, DiscoverySideState>,
     #[cfg(feature = "discovery")]
@@ -182,12 +264,92 @@ enum RemoteSidePlan {
 }
 
 impl Relay {
+    const END_TO_END_ACK_SENDER: &'static str = "E2EACK";
+    const END_TO_END_ACK_PREFIX: &'static str = "E2EACK:";
+
     fn relay_item_priority(data: &RelayItem) -> TelemetryResult<u8> {
         let ty = match data {
             RelayItem::Packet(pkt) => pkt.data_type(),
             RelayItem::Serialized(bytes) => serialize::peek_envelope(bytes.as_ref())?.ty,
         };
         Ok(message_priority(ty))
+    }
+
+    fn process_replay_queue_item(&self) -> TelemetryResult<bool> {
+        let Some(item) = ({
+            let mut st = self.state.lock();
+            st.replay_queue.pop_front()
+        }) else {
+            return Ok(false);
+        };
+        let frame = serialize::peek_frame_info(item.bytes.as_ref())?;
+        let ty = frame.envelope.ty;
+        let Some(hdr) = frame.reliable else {
+            return Ok(false);
+        };
+        {
+            let mut st = self.state.lock();
+            let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
+            if !tx_state.sent.contains_key(&hdr.seq) {
+                return Ok(false);
+            }
+        }
+        self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
+        let mut st = self.state.lock();
+        let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
+        if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
+            sent.last_send_ms = self.clock.now_ms();
+            sent.queued = false;
+        }
+        Ok(true)
+    }
+
+    fn pop_ready_tx_item(
+        &self,
+    ) -> Option<(
+        Option<RelaySideId>,
+        RelaySideId,
+        RelayTxHandlerFn,
+        RelaySideOptions,
+        RelayItem,
+    )> {
+        let mut st = self.state.lock();
+        if let Some(item) = st.tx_queue.pop_front() {
+            let side = st.sides.get(item.dst).and_then(|side| side.clone());
+            side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
+        } else {
+            None
+        }
+    }
+
+    fn send_tx_item(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+        handler: RelayTxHandlerFn,
+        opts: RelaySideOptions,
+        data: RelayItem,
+    ) -> TelemetryResult<bool> {
+        let allowed = {
+            let st = self.state.lock();
+            let ty = match &data {
+                RelayItem::Packet(pkt) => Some(pkt.data_type()),
+                RelayItem::Serialized(bytes) => Some(serialize::peek_envelope(bytes.as_ref())?.ty),
+            };
+            self.route_allowed_locked(&st, src, ty, dst)
+        };
+        if !allowed {
+            return Ok(false);
+        }
+        if opts.reliable_enabled && matches!(handler, RelayTxHandlerFn::Serialized(_)) {
+            self.send_reliable_to_side(dst, data)?;
+            Ok(true)
+        } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
+            self.call_tx_handler(dst, &handler, &adjusted)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Create a new relay with the given clock.
@@ -201,6 +363,7 @@ impl Relay {
                 route_priorities: BTreeMap::new(),
                 source_route_modes: BTreeMap::new(),
                 route_selection_cursors: BTreeMap::new(),
+                adaptive_route_stats: BTreeMap::new(),
                 rx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 tx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 replay_queue: BoundedDeque::new(
@@ -215,6 +378,8 @@ impl Relay {
                 ),
                 reliable_tx: BTreeMap::new(),
                 reliable_rx: BTreeMap::new(),
+                reliable_return_routes: BTreeMap::new(),
+                end_to_end_acked_destinations: BTreeMap::new(),
                 #[cfg(feature = "discovery")]
                 discovery_routes: BTreeMap::new(),
                 #[cfg(feature = "discovery")]
@@ -318,17 +483,18 @@ impl Relay {
         st: &mut RelayInner,
         src: Option<RelaySideId>,
         mut sides: Vec<RelaySideId>,
+        origin: RouteSelectionOrigin,
     ) -> Vec<RelaySideId> {
         if sides.len() <= 1 {
             return sides;
         }
 
-        match st
-            .source_route_modes
-            .get(&src)
-            .copied()
-            .unwrap_or(RouteSelectionMode::Fanout)
-        {
+        let selection_mode = st.source_route_modes.get(&src).copied();
+        if selection_mode.is_none() && origin == RouteSelectionOrigin::Discovered {
+            return self.apply_adaptive_discovery_selection_locked(st, src, sides);
+        }
+
+        match selection_mode.unwrap_or(RouteSelectionMode::Fanout) {
             RouteSelectionMode::Fanout => sides,
             RouteSelectionMode::Weighted => {
                 sides.sort_unstable();
@@ -363,6 +529,137 @@ impl Relay {
                 sides
             }
         }
+    }
+
+    fn apply_adaptive_discovery_selection_locked(
+        &self,
+        st: &mut RelayInner,
+        src: Option<RelaySideId>,
+        mut sides: Vec<RelaySideId>,
+    ) -> Vec<RelaySideId> {
+        sides.sort_unstable();
+        let mut unmeasured: Vec<_> = sides
+            .iter()
+            .copied()
+            .filter(|side| !st.adaptive_route_stats.contains_key(side))
+            .collect();
+        if !unmeasured.is_empty() {
+            let cursor = st.route_selection_cursors.entry(src).or_insert(0);
+            let pick = (*cursor as usize) % unmeasured.len();
+            *cursor = cursor.wrapping_add(1);
+            return vec![unmeasured.swap_remove(pick)];
+        }
+
+        let total_weight = sides.iter().fold(0_u64, |acc, side| {
+            acc + st
+                .adaptive_route_stats
+                .get(side)
+                .map(AdaptiveRouteStats::weight)
+                .unwrap_or(1)
+        });
+        if total_weight == 0 {
+            sides.truncate(1);
+            return sides;
+        }
+
+        let cursor = st.route_selection_cursors.entry(src).or_insert(0);
+        let pick = *cursor % total_weight;
+        *cursor = cursor.wrapping_add(1);
+        let mut remaining = pick;
+        for side in sides {
+            let weight = st
+                .adaptive_route_stats
+                .get(&side)
+                .map(AdaptiveRouteStats::weight)
+                .unwrap_or(1);
+            if remaining < weight {
+                return vec![side];
+            }
+            remaining -= weight;
+        }
+        Vec::new()
+    }
+
+    fn record_side_tx_sample(
+        &self,
+        side: RelaySideId,
+        bytes: usize,
+        started_ms: u64,
+        ended_ms: u64,
+    ) {
+        let sample_ms = ended_ms.saturating_sub(started_ms).max(1);
+        let sample_bps = ((bytes as u128).saturating_mul(1000) / u128::from(sample_ms))
+            .min(u128::from(u64::MAX)) as u64;
+        let mut st = self.state.lock();
+        st.adaptive_route_stats
+            .entry(side)
+            .or_default()
+            .observe(sample_bps, ended_ms);
+    }
+
+    fn relay_item_wire_len(data: &RelayItem) -> TelemetryResult<usize> {
+        match data {
+            RelayItem::Packet(pkt) => Ok(serialize::serialize_packet(pkt).len()),
+            RelayItem::Serialized(bytes) => Ok(bytes.len()),
+        }
+    }
+
+    #[inline]
+    fn decode_end_to_end_reliable_ack(payload: &[u8]) -> TelemetryResult<u64> {
+        if payload.len() != 8 {
+            return Err(TelemetryError::Deserialize("bad reliable e2e ack payload"));
+        }
+        Ok(u64::from_le_bytes(payload[0..8].try_into().unwrap()))
+    }
+
+    #[inline]
+    fn is_end_to_end_ack_sender(sender: &str) -> bool {
+        sender == Self::END_TO_END_ACK_SENDER || sender.starts_with(Self::END_TO_END_ACK_PREFIX)
+    }
+
+    #[inline]
+    fn sender_hash(sender: &str) -> u64 {
+        hash_bytes_u64(0x517C_C1B7_2722_0A95, sender.as_bytes())
+    }
+
+    fn decode_end_to_end_ack_sender_hash(sender: &str) -> Option<u64> {
+        sender
+            .strip_prefix(Self::END_TO_END_ACK_PREFIX)
+            .filter(|sender| !sender.is_empty())
+            .map(Self::sender_hash)
+    }
+
+    #[cfg(feature = "discovery")]
+    fn is_end_to_end_destination_sender(sender: &str) -> bool {
+        sender != "RELAY" && !Self::is_end_to_end_ack_sender(sender)
+    }
+
+    fn reliable_control_target_packet_id(data: &RelayItem) -> TelemetryResult<Option<u64>> {
+        match data {
+            RelayItem::Packet(pkt) => {
+                if pkt.data_type() != crate::DataType::ReliableAck
+                    || !Self::is_end_to_end_ack_sender(pkt.sender())
+                {
+                    return Ok(None);
+                }
+                Self::decode_end_to_end_reliable_ack(pkt.payload()).map(Some)
+            }
+            RelayItem::Serialized(bytes) => {
+                let pkt = serialize::deserialize_packet(bytes.as_ref())?;
+                if pkt.data_type() != crate::DataType::ReliableAck
+                    || !Self::is_end_to_end_ack_sender(pkt.sender())
+                {
+                    return Ok(None);
+                }
+                Self::decode_end_to_end_reliable_ack(pkt.payload()).map(Some)
+            }
+        }
+    }
+
+    fn note_reliable_return_route(&self, side: RelaySideId, packet_id: u64) {
+        let mut st = self.state.lock();
+        st.reliable_return_routes
+            .insert(packet_id, ReliableReturnRouteState { side });
     }
 
     #[inline]
@@ -524,13 +821,18 @@ impl Relay {
             side_ref.tx_handler.clone()
         };
 
-        match handler {
+        let started_ms = self.clock.now_ms();
+        let result = match handler {
             RelayTxHandlerFn::Serialized(f) => f(bytes.as_ref()),
             RelayTxHandlerFn::Packet(f) => {
                 let pkt = serialize::deserialize_packet(bytes.as_ref())?;
                 f(&pkt)
             }
+        };
+        if result.is_ok() {
+            self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
         }
+        result
     }
 
     fn send_reliable_to_side(&self, side: RelaySideId, data: RelayItem) -> TelemetryResult<()> {
@@ -541,12 +843,12 @@ impl Relay {
         };
 
         let RelayTxHandlerFn::Serialized(f) = &handler else {
-            return self.call_tx_handler(&handler, &data);
+            return self.call_tx_handler(side, &handler, &data);
         };
 
         if !opts.reliable_enabled {
             if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
-                return self.call_tx_handler(&handler, &adjusted);
+                return self.call_tx_handler(side, &handler, &adjusted);
             }
             return Ok(());
         }
@@ -555,7 +857,7 @@ impl Relay {
             RelayItem::Packet(pkt) => pkt.data_type(),
             RelayItem::Serialized(bytes) => {
                 let Ok(frame) = serialize::peek_frame_info(bytes.as_ref()) else {
-                    return self.call_tx_handler(&handler, &data);
+                    return self.call_tx_handler(side, &handler, &data);
                 };
                 frame.envelope.ty
             }
@@ -563,7 +865,7 @@ impl Relay {
 
         if !is_reliable_type(ty) {
             if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
-                self.call_tx_handler(&handler, &adjusted)?;
+                self.call_tx_handler(side, &handler, &adjusted)?;
             }
             return Ok(());
         }
@@ -594,13 +896,18 @@ impl Relay {
             RelayItem::Serialized(bytes) => {
                 let mut v = bytes.to_vec();
                 if !serialize::rewrite_reliable_header(&mut v, flags, seq, 0)? {
-                    return f(bytes.as_ref());
+                    let started_ms = self.clock.now_ms();
+                    f(bytes.as_ref())?;
+                    self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+                    return Ok(());
                 }
                 Arc::from(v)
             }
         };
 
+        let started_ms = self.clock.now_ms();
         f(bytes.as_ref())?;
+        self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
 
         {
             let mut st = self.state.lock();
@@ -653,6 +960,7 @@ impl Relay {
         #[cfg(feature = "discovery")]
         {
             let (eps, ty) = self.item_route_info(data)?;
+            let preferred_packet_id = Self::reliable_control_target_packet_id(data)?;
             if discovery::is_discovery_type(ty) {
                 let mut st = self.state.lock();
                 let sides = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), false);
@@ -660,6 +968,7 @@ impl Relay {
                     &mut st,
                     Some(exclude),
                     sides,
+                    RouteSelectionOrigin::Flood,
                 )));
             }
 
@@ -668,7 +977,26 @@ impl Relay {
             #[cfg(not(feature = "timesync"))]
             let preferred_timesync_source: Option<String> = None;
             let mut st = self.state.lock();
+            if let Some(packet_id) = preferred_packet_id {
+                let target_side = self.allowed_target_side_locked(
+                    &st,
+                    exclude,
+                    ty,
+                    st.reliable_return_routes
+                        .get(&packet_id)
+                        .map(|route| route.side),
+                );
+                if let Some(side) = target_side {
+                    return Ok(RemoteSidePlan::Target(vec![side]));
+                }
+                return Ok(RemoteSidePlan::Target(Vec::new()));
+            }
             let restrict_link_local = Self::endpoints_are_link_local_only(&eps);
+            let discovered_origin = if is_reliable_type(ty) {
+                RouteSelectionOrigin::Flood
+            } else {
+                RouteSelectionOrigin::Discovered
+            };
             if st.discovery_routes.is_empty() {
                 if restrict_link_local {
                     let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), true);
@@ -676,6 +1004,7 @@ impl Relay {
                         &mut st,
                         Some(exclude),
                         targets,
+                        RouteSelectionOrigin::Flood,
                     )));
                 }
                 let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), false);
@@ -683,6 +1012,7 @@ impl Relay {
                     &mut st,
                     Some(exclude),
                     targets,
+                    RouteSelectionOrigin::Flood,
                 )));
             }
             let now_ms = self.clock.now_ms();
@@ -724,16 +1054,32 @@ impl Relay {
             }
 
             if had_exact {
+                let targets = self.filter_end_to_end_satisfied_sides_locked(
+                    &st,
+                    data,
+                    exact_targets,
+                    &eps,
+                    ty,
+                )?;
                 Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
                     &mut st,
                     Some(exclude),
-                    exact_targets,
+                    targets,
+                    discovered_origin,
                 )))
             } else if had_known {
+                let targets = self.filter_end_to_end_satisfied_sides_locked(
+                    &st,
+                    data,
+                    generic_targets,
+                    &eps,
+                    ty,
+                )?;
                 Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
                     &mut st,
                     Some(exclude),
-                    generic_targets,
+                    targets,
+                    discovered_origin,
                 )))
             } else if restrict_link_local {
                 let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), true);
@@ -741,6 +1087,7 @@ impl Relay {
                     &mut st,
                     Some(exclude),
                     targets,
+                    RouteSelectionOrigin::Flood,
                 )))
             } else {
                 let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), false);
@@ -748,6 +1095,7 @@ impl Relay {
                     &mut st,
                     Some(exclude),
                     targets,
+                    RouteSelectionOrigin::Flood,
                 )))
             }
         }
@@ -755,13 +1103,106 @@ impl Relay {
         {
             let (_, ty) = self.item_route_info(data)?;
             let mut st = self.state.lock();
+            if let Some(packet_id) = Self::reliable_control_target_packet_id(data)? {
+                let target_side = self.allowed_target_side_locked(
+                    &st,
+                    exclude,
+                    ty,
+                    st.reliable_return_routes
+                        .get(&packet_id)
+                        .map(|route| route.side),
+                );
+                if let Some(side) = target_side {
+                    return Ok(RemoteSidePlan::Target(vec![side]));
+                }
+                return Ok(RemoteSidePlan::Target(Vec::new()));
+            }
             let sides = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), false);
             Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
                 &mut st,
                 Some(exclude),
                 sides,
+                RouteSelectionOrigin::Flood,
             )))
         }
+    }
+
+    #[inline]
+    fn allowed_target_side_locked(
+        &self,
+        st: &RelayInner,
+        exclude: RelaySideId,
+        ty: crate::DataType,
+        target_side: Option<RelaySideId>,
+    ) -> Option<RelaySideId> {
+        target_side.filter(|side| self.route_allowed_locked(st, Some(exclude), Some(ty), *side))
+    }
+
+    fn filter_end_to_end_satisfied_sides_locked(
+        &self,
+        st: &RelayInner,
+        data: &RelayItem,
+        sides: Vec<RelaySideId>,
+        eps: &[crate::DataEndpoint],
+        ty: crate::DataType,
+    ) -> TelemetryResult<Vec<RelaySideId>> {
+        if !is_reliable_type(ty) || Self::reliable_control_target_packet_id(data)?.is_some() {
+            return Ok(sides);
+        }
+        let packet_id = match data {
+            RelayItem::Packet(pkt) => pkt.packet_id(),
+            RelayItem::Serialized(bytes) => serialize::packet_id_from_wire(bytes.as_ref())?,
+        };
+        let Some(acked) = st.end_to_end_acked_destinations.get(&packet_id) else {
+            return Ok(sides);
+        };
+        let mut filtered = Vec::new();
+        for side in sides {
+            let Some(route) = st.discovery_routes.get(&side) else {
+                filtered.push(side);
+                continue;
+            };
+            let mut still_pending = false;
+            let mut had_destination_announcer = false;
+            for (sender, sender_state) in route.announcers.iter() {
+                if !Self::is_end_to_end_destination_sender(sender) {
+                    continue;
+                }
+                had_destination_announcer = true;
+                if eps
+                    .iter()
+                    .copied()
+                    .any(|ep| sender_state.reachable.contains(&ep))
+                    && !acked.contains(&Self::sender_hash(sender))
+                {
+                    still_pending = true;
+                    break;
+                }
+            }
+            if still_pending || !had_destination_announcer {
+                filtered.push(side);
+            }
+        }
+        Ok(filtered)
+    }
+
+    #[cfg(feature = "discovery")]
+    fn recompute_discovery_side_state(route: &mut DiscoverySideState) {
+        let mut reachable = Vec::new();
+        let mut reachable_timesync_sources = Vec::new();
+        let mut last_seen_ms = 0u64;
+        for sender in route.announcers.values() {
+            reachable.extend(sender.reachable.iter().copied());
+            reachable_timesync_sources.extend(sender.reachable_timesync_sources.iter().cloned());
+            last_seen_ms = last_seen_ms.max(sender.last_seen_ms);
+        }
+        reachable.sort_unstable();
+        reachable.dedup();
+        reachable_timesync_sources.sort_unstable();
+        reachable_timesync_sources.dedup();
+        route.reachable = reachable;
+        route.reachable_timesync_sources = reachable_timesync_sources;
+        route.last_seen_ms = last_seen_ms;
     }
 
     #[cfg(feature = "discovery")]
@@ -771,10 +1212,31 @@ impl Relay {
 
     #[cfg(feature = "discovery")]
     fn prune_discovery_routes_locked(st: &mut RelayInner, now_ms: u64) -> bool {
-        let before = st.discovery_routes.len();
-        st.discovery_routes
-            .retain(|_, route| now_ms.saturating_sub(route.last_seen_ms) <= DISCOVERY_ROUTE_TTL_MS);
-        before != st.discovery_routes.len()
+        let before = st.discovery_routes.clone();
+        st.discovery_routes.retain(|_, route| {
+            route.announcers.retain(|_, sender| {
+                now_ms.saturating_sub(sender.last_seen_ms) <= DISCOVERY_ROUTE_TTL_MS
+            });
+            Self::recompute_discovery_side_state(route);
+            !route.announcers.is_empty()
+        });
+        st.discovery_routes != before
+    }
+
+    #[cfg(feature = "discovery")]
+    fn reconcile_end_to_end_acked_destinations_locked(st: &mut RelayInner) {
+        let mut active_senders = BTreeSet::new();
+        for route in st.discovery_routes.values() {
+            for sender in route.announcers.keys() {
+                if Self::is_end_to_end_destination_sender(sender) {
+                    active_senders.insert(Self::sender_hash(sender));
+                }
+            }
+        }
+        st.end_to_end_acked_destinations.retain(|_, acked| {
+            acked.retain(|sender_hash| active_senders.contains(sender_hash));
+            !acked.is_empty()
+        });
     }
 
     #[cfg(feature = "discovery")]
@@ -847,6 +1309,7 @@ impl Relay {
         let per_side = {
             let mut st = self.state.lock();
             if Self::prune_discovery_routes_locked(&mut st, now_ms) {
+                Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
             if !st.sides.iter().any(|side| side.is_some()) {
@@ -923,6 +1386,7 @@ impl Relay {
             let mut st = self.state.lock();
             let removed = Self::prune_discovery_routes_locked(&mut st, now_ms);
             if removed {
+                Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
             let has_any = st.sides.iter().enumerate().any(|(side_id, side)| {
@@ -981,27 +1445,46 @@ impl Relay {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
         let mut route = st.discovery_routes.get(&src).cloned().unwrap_or_default();
+        let side_link_local_enabled = st
+            .sides
+            .get(src)
+            .and_then(|entry| entry.as_ref())
+            .map(|side_ref| side_ref.opts.link_local_enabled)
+            .unwrap_or(false);
+        let mut sender_state = route
+            .announcers
+            .get(pkt.sender())
+            .cloned()
+            .unwrap_or_default();
         let changed = match pkt.data_type() {
             crate::DataType::DiscoveryAnnounce => {
-                let reachable = discovery::decode_discovery_announce(&pkt)?;
-                let changed = route.reachable != reachable;
-                route.reachable = reachable;
+                let mut reachable = discovery::decode_discovery_announce(&pkt)?;
+                if !side_link_local_enabled {
+                    reachable.retain(|ep| !ep.is_link_local_only());
+                }
+                let changed = sender_state.reachable != reachable;
+                sender_state.reachable = reachable;
                 changed
             }
             crate::DataType::DiscoveryTimeSyncSources => {
                 let sources = discovery::decode_discovery_timesync_sources(&pkt)?;
-                let changed = route.reachable_timesync_sources != sources;
-                route.reachable_timesync_sources = sources;
+                let changed = sender_state.reachable_timesync_sources != sources;
+                sender_state.reachable_timesync_sources = sources;
                 changed
             }
             _ => false,
         };
-        route.last_seen_ms = now_ms;
+        sender_state.last_seen_ms = now_ms;
+        route
+            .announcers
+            .insert(pkt.sender().to_string(), sender_state);
+        Self::recompute_discovery_side_state(&mut route);
         st.discovery_routes.insert(src, route);
         if changed {
             Self::note_discovery_topology_change_locked(&mut st, now_ms);
         }
         let _ = Self::prune_discovery_routes_locked(&mut st, now_ms);
+        Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
         Ok(())
     }
 
@@ -1196,6 +1679,9 @@ impl Relay {
             .retain(|(src_side, dst_side), _| *src_side != Some(side) && *dst_side != side);
         st.source_route_modes.remove(&Some(side));
         st.route_selection_cursors.remove(&Some(side));
+        st.adaptive_route_stats.remove(&side);
+        st.reliable_return_routes
+            .retain(|_, route| route.side != side);
         st.rx_queue.retain(|queued| queued.src != side);
         st.tx_queue
             .retain(|queued| queued.dst != side && queued.src != Some(side));
@@ -1430,6 +1916,7 @@ impl Relay {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
         if Self::prune_discovery_routes_locked(&mut st, now_ms) {
+            Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
             Self::note_discovery_topology_change_locked(&mut st, now_ms);
         }
         let routes = st
@@ -1458,6 +1945,14 @@ impl Relay {
             current_announce_interval_ms: st.discovery_cadence.current_interval_ms,
             next_announce_ms: st.discovery_cadence.next_announce_ms,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_end_to_end_acked_destination_count(&self, packet_id: u64) -> Option<usize> {
+        let st = self.state.lock();
+        st.end_to_end_acked_destinations
+            .get(&packet_id)
+            .map(BTreeSet::len)
     }
 
     /// Enqueue serialized bytes that originated from `src` into the relay RX queue.
@@ -1524,6 +2019,22 @@ impl Relay {
     /// Fanout is cheap: the `RelayItem` is cloned (Arc bump) and reused across all destinations.
     fn process_rx_queue_item(&self, item: RelayRxItem) -> TelemetryResult<()> {
         self.ensure_side_ingress_enabled(item.src)?;
+        match &item.data {
+            RelayItem::Packet(pkt) => {
+                if is_reliable_type(pkt.data_type()) && !is_internal_control_type(pkt.data_type()) {
+                    self.note_reliable_return_route(item.src, pkt.packet_id());
+                }
+            }
+            RelayItem::Serialized(bytes) => {
+                if let Ok(env) = serialize::peek_envelope(bytes.as_ref())
+                    && is_reliable_type(env.ty)
+                    && !is_internal_control_type(env.ty)
+                    && let Ok(packet_id) = serialize::packet_id_from_wire(bytes.as_ref())
+                {
+                    self.note_reliable_return_route(item.src, packet_id);
+                }
+            }
+        }
         let mut released_buffered: Vec<Arc<[u8]>> = Vec::new();
         if let RelayItem::Serialized(bytes) = &item.data {
             let (opts, handler_is_serialized) = {
@@ -1668,21 +2179,41 @@ impl Relay {
                     pkt.data_type(),
                     crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
                 ) {
-                    let vals = pkt.data_as_u32()?;
-                    if vals.len() != 2 {
-                        return Err(TelemetryError::Deserialize("bad reliable control payload"));
-                    }
-                    let ty = crate::DataType::try_from_u32(vals[0])
-                        .ok_or(TelemetryError::InvalidType)?;
-                    let seq = vals[1];
-                    match pkt.data_type() {
-                        crate::DataType::ReliableAck => self.handle_reliable_ack(item.src, ty, seq),
-                        crate::DataType::ReliablePacketRequest => {
-                            self.queue_reliable_retransmit(item.src, ty, seq)?
+                    if pkt.data_type() == crate::DataType::ReliableAck
+                        && Self::is_end_to_end_ack_sender(pkt.sender())
+                        && Self::decode_end_to_end_reliable_ack(pkt.payload()).is_ok()
+                    {
+                        if let Ok(packet_id) = Self::decode_end_to_end_reliable_ack(pkt.payload())
+                            && let Some(sender_hash) =
+                                Self::decode_end_to_end_ack_sender_hash(pkt.sender())
+                        {
+                            let mut st = self.state.lock();
+                            st.end_to_end_acked_destinations
+                                .entry(packet_id)
+                                .or_default()
+                                .insert(sender_hash);
                         }
-                        _ => {}
+                    } else {
+                        let vals = pkt.data_as_u32()?;
+                        if vals.len() != 2 {
+                            return Err(TelemetryError::Deserialize(
+                                "bad reliable control payload",
+                            ));
+                        }
+                        let ty = crate::DataType::try_from_u32(vals[0])
+                            .ok_or(TelemetryError::InvalidType)?;
+                        let seq = vals[1];
+                        match pkt.data_type() {
+                            crate::DataType::ReliableAck => {
+                                self.handle_reliable_ack(item.src, ty, seq)
+                            }
+                            crate::DataType::ReliablePacketRequest => {
+                                self.queue_reliable_retransmit(item.src, ty, seq)?
+                            }
+                            _ => {}
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
             }
             RelayItem::Serialized(bytes) => {
@@ -1728,8 +2259,14 @@ impl Relay {
     /// - Serialized handler + Serialized item: direct.
     /// - Packet handler + Serialized item: deserialize for this call.
     /// - Serialized handler + Packet item: serialize for this call.
-    fn call_tx_handler(&self, handler: &RelayTxHandlerFn, data: &RelayItem) -> TelemetryResult<()> {
-        match (handler, data) {
+    fn call_tx_handler(
+        &self,
+        side: RelaySideId,
+        handler: &RelayTxHandlerFn,
+        data: &RelayItem,
+    ) -> TelemetryResult<()> {
+        let started_ms = self.clock.now_ms();
+        let result = match (handler, data) {
             // Fast paths
             (RelayTxHandlerFn::Serialized(f), RelayItem::Serialized(bytes)) => f(bytes.as_ref()),
             (RelayTxHandlerFn::Packet(f), RelayItem::Packet(pkt)) => f(pkt),
@@ -1743,7 +2280,13 @@ impl Relay {
                 let pkt = serialize::deserialize_packet(bytes.as_ref())?;
                 f(&pkt)
             }
+        };
+        if result.is_ok()
+            && let Ok(bytes) = Self::relay_item_wire_len(data)
+        {
+            self.record_side_tx_sample(side, bytes, started_ms, self.clock.now_ms());
         }
+        result
     }
 
     fn adjust_reliable_for_side(
@@ -1807,73 +2350,19 @@ impl Relay {
         let start = self.clock.now_ms();
         loop {
             self.process_reliable_timeouts()?;
-            if let Some(item) = {
-                let mut st = self.state.lock();
-                st.replay_queue.pop_front()
-            } {
-                let frame = serialize::peek_frame_info(item.bytes.as_ref())?;
-                let ty = frame.envelope.ty;
-                let Some(hdr) = frame.reliable else {
-                    continue;
-                };
-                {
-                    let mut st = self.state.lock();
-                    let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                    if !tx_state.sent.contains_key(&hdr.seq) {
-                        continue;
-                    }
-                }
-                self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
-                let mut st = self.state.lock();
-                let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
-                    sent.last_send_ms = self.clock.now_ms();
-                    sent.queued = false;
-                }
+            if self.process_replay_queue_item()? {
                 if timeout_ms != 0 && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64 {
                     break;
                 }
                 continue;
             }
-            let opt: Option<(
-                Option<RelaySideId>,
-                RelaySideId,
-                RelayTxHandlerFn,
-                RelaySideOptions,
-                RelayItem,
-            )> = {
-                let mut st = self.state.lock();
-                if let Some(item) = st.tx_queue.pop_front() {
-                    let side = st.sides.get(item.dst).and_then(|side| side.clone());
-                    side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
-                } else {
-                    None
-                }
-            };
-
-            let Some((src, dst, handler, opts, data)) = opt else {
+            let Some((src, dst, handler, opts, data)) = self.pop_ready_tx_item() else {
                 break;
             };
-            let allowed = {
-                let st = self.state.lock();
-                let ty = match &data {
-                    RelayItem::Packet(pkt) => Some(pkt.data_type()),
-                    RelayItem::Serialized(bytes) => {
-                        Some(serialize::peek_envelope(bytes.as_ref())?.ty)
-                    }
-                };
-                self.route_allowed_locked(&st, src, ty, dst)
-            };
-            if !allowed {
-                continue;
-            }
-            if opts.reliable_enabled && matches!(handler, RelayTxHandlerFn::Serialized(_)) {
-                self.send_reliable_to_side(dst, data)?;
-            } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
-                self.call_tx_handler(&handler, &adjusted)?;
-            }
-
-            if timeout_ms != 0 && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64 {
+            if self.send_tx_item(src, dst, handler, opts, data)?
+                && timeout_ms != 0
+                && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64
+            {
                 break;
             }
         }
@@ -1921,76 +2410,15 @@ impl Relay {
                 break;
             }
 
-            if let Some(item) = {
-                let mut st = self.state.lock();
-                st.replay_queue.pop_front()
-            } {
-                let frame = serialize::peek_frame_info(item.bytes.as_ref())?;
-                let ty = frame.envelope.ty;
-                if let Some(hdr) = frame.reliable {
-                    {
-                        let mut st = self.state.lock();
-                        let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                        if !tx_state.sent.contains_key(&hdr.seq) {
-                            continue;
-                        }
-                    }
-                    self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
-                    let mut st = self.state.lock();
-                    let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                    if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
-                        sent.last_send_ms = self.clock.now_ms();
-                        sent.queued = false;
-                    }
-                    did_any = true;
-                }
+            if self.process_replay_queue_item()? {
+                did_any = true;
             }
 
             // Then send out TX
-            let sent_one = {
-                let opt: Option<(
-                    Option<RelaySideId>,
-                    RelaySideId,
-                    RelayTxHandlerFn,
-                    RelaySideOptions,
-                    RelayItem,
-                )> = {
-                    let mut st = self.state.lock();
-                    if let Some(item) = st.tx_queue.pop_front() {
-                        let side = st.sides.get(item.dst).and_then(|side| side.clone());
-                        side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some((src, dst, handler, opts, data)) = opt {
-                    let allowed = {
-                        let st = self.state.lock();
-                        let ty = match &data {
-                            RelayItem::Packet(pkt) => Some(pkt.data_type()),
-                            RelayItem::Serialized(bytes) => {
-                                Some(serialize::peek_envelope(bytes.as_ref())?.ty)
-                            }
-                        };
-                        self.route_allowed_locked(&st, src, ty, dst)
-                    };
-                    if !allowed {
-                        false
-                    } else if opts.reliable_enabled
-                        && matches!(handler, RelayTxHandlerFn::Serialized(_))
-                    {
-                        self.send_reliable_to_side(dst, data)?;
-                        true
-                    } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
-                        self.call_tx_handler(&handler, &adjusted)?;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
+            let sent_one = if let Some((src, dst, handler, opts, data)) = self.pop_ready_tx_item() {
+                self.send_tx_item(src, dst, handler, opts, data)?
+            } else {
+                false
             };
 
             if sent_one {

@@ -97,9 +97,11 @@ ACKs, retransmits, and optional ordering to deliver messages more like TCP.
 
 This is useful on lossy links, but you can disable it for transports that are already reliable.
 
-With discovery enabled, reliable packets are sent to all currently known candidate sides for the target endpoints. This
-improves delivery across known paths, but it is still link-level reliability. It does not prove that every remote
-application endpoint processed the packet unless you add an application-level acknowledgement.
+With discovery enabled, reliable packets are sent to all currently known candidate sides for the target endpoints. In
+`3.11.0` and later, the source router also keeps the packet in flight until every currently discovered holder has
+returned an end-to-end acknowledgement after local delivery, and retransmits are narrowed to only the holders that are
+still outstanding. If one holder later disappears from discovery, that holder is removed from the pending obligation
+set so topology loss does not keep the end-to-end transaction alive forever.
 
 ## Dedupe
 

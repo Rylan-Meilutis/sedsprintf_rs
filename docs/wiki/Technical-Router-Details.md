@@ -28,10 +28,9 @@ The router uses **named sides** (UART/CAN/RADIO/etc.) instead of LinkId.
   threading side IDs through their handlers.
 - Side-aware RX functions can still tag an ingress side when you must override it:
   `rx_serialized_from_side` / `rx_from_side`.
-- `RouterMode` now seeds the default forwarding graph:
-  `Sink` disables RX-side relay by default, while `Relay` starts as a full mesh.
-- Runtime controls can then override that default with per-side ingress/egress policy and
-  per-path route overrides for `(local TX or source side) -> destination side`.
+- `Router` now starts from the same full-mesh forwarding model as `Relay`.
+- Runtime controls then shape the graph with per-side ingress/egress policy and per-path route
+  overrides for `(local TX or source side) -> destination side`.
 - Type-specific route overrides can further narrow a source-side path set for a specific
   `DataType`, effectively creating a manual allowlist of destination sides for that packet type.
 - With discovery enabled and a known route, forwarding is still limited to matching candidate
@@ -90,16 +89,13 @@ Discovery advertisements are adaptive:
 4) Recent‑ID cache drops duplicates.
 5) Local handlers are invoked with retries.
 6) Built-in discovery packets are learned internally when enabled.
-7) In `RouterMode::Relay`, packets that require remote forwarding are forwarded once.
+7) Packets that require remote forwarding are forwarded according to the active route rules and the
+   discovery/path-selection state.
 
 ## Forwarding rules
 
-A packet is eligible for forwarding if any endpoint is remote‑eligible:
-
-- Endpoint is not local AND broadcast mode is not `Never`, OR
-- Broadcast mode is `Always`.
-
-This decision is made per packet, not per endpoint, to avoid multiple forwards for one packet.
+A packet is eligible for forwarding when at least one destination endpoint is not handled purely
+locally and the active side policy still leaves an eligible remote path.
 
 With discovery enabled, forwarding also consults the learned side map:
 
@@ -109,6 +105,8 @@ With discovery enabled, forwarding also consults the learned side map:
 - If typed route overrides exist for `(source side or local TX, packet type)`, only those enabled
   destination sides remain eligible before path selection and discovery matching are applied.
 - Reliable packets are sent to all known candidate sides for their endpoints.
+- Non-reliable discovered traffic defaults to adaptive one-path load balancing derived from recent
+  measured side transmit bandwidth.
 - For time sync traffic, exact discovered source IDs win over generic `TIME_SYNC` endpoint matches
   when the router knows which source it currently wants to talk to.
 - Source-side `TIME_SYNC_RESPONSE` traffic is returned to the requesting ingress side rather than
@@ -156,27 +154,43 @@ This makes local handlers idempotent: a resent packet can be processed again aft
 
 ## Reliability boundary
 
-Reliable delivery in the router is per side. With discovery enabled, a reliable packet is transmitted reliably to every
-currently known candidate side for its endpoints. That improves reachability across the known topology, but it is not an
-end-to-end proof that every remote application endpoint consumed the packet. If you need that guarantee, add an
-application-level acknowledgement on top of the transport-level reliable mode.
+Reliable delivery now has two layers:
 
-Reliable TX no longer blocks a side/type stream on one inflight frame. The router keeps recent sent history per
-side/type, requests missing ordered sequences explicitly, and requeues retransmits with elevated priority.
+- per-link reliable sequencing, ACKs, packet requests, buffering, and retransmits
+- source-to-destination end-to-end verification
 
-## Router modes
+With discovery enabled, a reliable packet is still transmitted reliably to every currently known
+candidate side for its endpoints. That preserves the previous multi-path reachability behavior.
 
-- `RouterMode::Sink`: seeds local-only RX behavior, while still allowing local TX to registered
-  sides.
-- `RouterMode::Relay`: seeds a full side-to-side forwarding mesh.
+On top of that, the source router now records each locally-originated reliable packet until every
+currently discovered holder for the packet's target endpoints confirms local delivery. The
+confirmation path works like this:
 
-Mode is now the starting policy. Runtime calls such as `remove_side`, `set_side_ingress_enabled`,
-`set_side_egress_enabled`, `set_route`, `clear_route`, `set_source_route_mode`,
-`set_route_weight`, and `set_route_priority` can override it without rebuilding the router.
+- each destination router that locally delivers the packet emits a dedicated end-to-end
+  `ReliableAck`
+- routers and relays learn reliable return routes from the ingress side of reliable data packets
+- those end-to-end acknowledgements are routed only toward the learned return side for that packet
+  id
+- unrelated sides do not receive the end-to-end acknowledgement
+- if one acknowledgement is lost, the source retransmits only toward the destinations that are
+  still outstanding instead of replaying to holders that already confirmed delivery
+- if discovery later ages out one of those holders, the source removes that holder from the
+  pending set so the transaction can complete cleanly after a topology change
+- relays prune their learned holder-ACK map against the same discovery expiry so stale
+  confirmations do not keep suppressing later forwarding choices
 
-`Relay` now uses the same runtime side lifecycle and route-override model, but without
-`RouterMode`; relay defaults to a full mesh and runtime calls can remove sides or selectively
-remove and restore paths.
+Reliable TX also no longer blocks a side/type stream on one inflight frame. The router keeps recent
+sent history per side/type, requests missing ordered sequences explicitly, and requeues retransmits
+with elevated priority. The end-to-end holder verification layer piggybacks on that model instead
+of reintroducing a blocking per-side gate.
+
+## Default routing model
+
+`Router` and `Relay` now both start from the same full-mesh side graph.
+
+Runtime calls such as `remove_side`, `set_side_ingress_enabled`, `set_side_egress_enabled`,
+`set_route`, `clear_route`, `set_source_route_mode`, `set_route_weight`, and
+`set_route_priority` shape that graph without rebuilding the instance.
 
 When discovery reports multiple eligible paths for the same endpoint set:
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.11.0
+
+- Removed `RouterMode` from the active router model and moved router forwarding fully onto the
+  same runtime route-rule system already used by `Relay`.
+- Routers now default to a full forwarding mesh when no explicit route rules are installed, and
+  discovery-driven multi-path routing now defaults to adaptive load balancing for normal traffic.
+- Reliable delivery is now end-to-end verified in addition to the existing per-link reliable
+  transport. Source routers retain locally-originated reliable packets until every currently
+  discovered destination holder confirms local delivery.
+- Destination routers now emit directed end-to-end reliable acknowledgements, and routers/relays
+  learn return paths from reliable ingress traffic so those acknowledgements are routed only to the
+  side that needs them instead of flooding unrelated links.
+- When one discovered destination holder has already acknowledged, retries are narrowed to only the
+  holders that are still outstanding instead of replaying to all holders again.
+- If discovery later ages out one of those holders, the source drops that holder from the
+  in-flight obligation set so the transaction completes instead of replaying forever toward a board
+  that has disappeared from the topology view.
+- Relays now prune their learned per-packet holder-ACK state against the same discovery view, so
+  stale holder confirmations do not survive topology expiry or distort later route decisions.
+- The end-to-end layer keeps the non-blocking reliable-stream behavior from `3.10.0`: waiting for
+  holder ACKs does not stall the side/type lane for newer reliable packets.
+- Added regression coverage for the new default routing model, adaptive discovery balancing, route
+  disabling in place of sink-mode behavior, end-to-end reliable acknowledgement recovery for both
+  single-destination and multi-holder delivery in the Rust system tests, and holder-expiry cleanup
+  in both router and relay unit tests.
+- Expanded documentation for testing, including unit tests, Rust system tests, C system tests, and
+  local code-coverage reporting with `cargo llvm-cov`.
+
 ## 3.10.0
 
 - Reworked reliable delivery in both `Router` and `Relay` to use built-in internal
@@ -66,9 +94,9 @@
 - Added runtime route overrides for `(local TX or source side) -> destination side`, enabling
   one-way relay paths such as `A -> B` while blocking `B -> A`, plus selective exclusion of
   specific sides from locally-originated traffic on both routers and relays.
-- Default routing behavior still matches the existing model seeded by `RouterMode`: `Relay`
-  initializes as a full side-to-side mesh, while `Sink` keeps RX-side forwarding disabled unless
-  routing is explicitly enabled.
+- Default routing behavior still matched the older router model at this point: `RouterMode::Relay`
+  initialized as a full side-to-side mesh, while `RouterMode::Sink` kept RX-side forwarding
+  disabled unless routing was explicitly enabled.
 - Discovery announcements now respect the active per-side egress policy and local route overrides,
   so advertised topology follows the currently allowed output links for both routers and relays.
 - Added regression coverage for asymmetric routing, ingress-disabled sides, and the new C ABI

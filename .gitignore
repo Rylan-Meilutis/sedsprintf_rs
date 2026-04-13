@@ -22,3 +22,4 @@ python-files/sedsprintf_rs/sedsprintf_rs.pyi
 /sedsprintf_macros/Cargo.lock
 
 *..wiki/
+/inspection/

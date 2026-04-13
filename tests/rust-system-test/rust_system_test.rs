@@ -1,18 +1,18 @@
 #[cfg(test)]
 mod threaded_system_tests {
-    use sedsprintf_rs::config::{DataEndpoint, DataType};
-    use sedsprintf_rs::discovery::{build_discovery_announce, DISCOVERY_ROUTE_TTL_MS};
-    use sedsprintf_rs::packet::Packet;
-    use sedsprintf_rs::relay::Relay;
-    use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
     use sedsprintf_rs::RouteSelectionMode;
     use sedsprintf_rs::TelemetryResult;
+    use sedsprintf_rs::config::{DataEndpoint, DataType};
+    use sedsprintf_rs::discovery::{DISCOVERY_ROUTE_TTL_MS, build_discovery_announce};
+    use sedsprintf_rs::packet::Packet;
+    use sedsprintf_rs::relay::Relay;
+    use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
 
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::Arc;
-    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -77,7 +77,6 @@ mod threaded_system_tests {
         let seen_b_c = seen_b.clone();
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::default(),
             Box::new(SharedClock {
                 now_ms: now_ms.clone(),
@@ -323,9 +322,9 @@ mod threaded_system_tests {
             };
 
             let router = if handlers.is_empty() {
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), clock)
+                Router::new_with_clock(RouterConfig::default(), clock)
             } else {
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::new(handlers), clock)
+                Router::new_with_clock(RouterConfig::new(handlers), clock)
             };
             router.add_side_serialized("bus", tx);
 

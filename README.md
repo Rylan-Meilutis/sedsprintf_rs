@@ -71,6 +71,24 @@ environments.
 
 ## Recent changelog milestones
 
+## Version 3.11.0 highlights
+
+- Removed `RouterMode` from the active router model. Routers now use the same runtime routing-rule
+  model as relays, and with no explicit route rules they default to a full forwarding mesh.
+- Discovery-driven multi-path routing now defaults to adaptive load balancing for normal traffic,
+  while reliable discovered traffic still fans out across all known candidate paths.
+- Reliable delivery is now end-to-end verified in addition to the existing per-link ACK/retransmit
+  layer. Destination routers emit directed end-to-end acknowledgements, and discovery-informed
+  return-path learning routes those ACKs only toward the source instead of flooding them.
+- When a discovered destination holder disappears from topology, the source retires that holder
+  from the in-flight obligation set instead of replaying forever toward a vanished board.
+- Relays also prune their learned holder-ACK state against discovery expiry so stale confirmations
+  do not keep affecting later discovered routing choices.
+- Reliable streams still stay non-blocking while those end-to-end acknowledgements are outstanding.
+- Added expanded testing documentation covering unit tests, Rust system tests, C system tests,
+  local coverage reporting, and the new end-to-end reliability regression tests.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
+
 ## Version 3.10.0 highlights
 
 - Reliable delivery in both `Router` and `Relay` now uses built-in internal
@@ -98,13 +116,6 @@ environments.
   ACKs, retransmits, and optional ordering.
 - This established the modern router/reliability model that later releases expanded.
 - Full changelog: [v2.4.0...v3.0.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v2.4.0...v3.0.0)
-
-## Version 2.0.0 highlights
-
-- Added `RouterMode` with distinct `Relay` vs `Sink` behavior.
-- Fixed packet-hash handling so already-seen packets are not processed twice.
-- This was the release where the router/relay behavior became an explicit part of the public model.
-- Full changelog: [v1.5.2...v2.0.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v1.5.2...v2.0.0)
 
 ## Version 1.0.0 highlights
 
@@ -192,9 +203,28 @@ If you want profiler-friendly output while iterating locally:
 cargo bench --bench packet_paths -- --profile-time=5
 ```
 
-`./build.py test` now starts with the same strict clippy checks as `./build.py check`, then runs the Cargo test suite,
-a short Criterion smoke pass, and the python plus embedded build validation steps. The benchmark smoke pass uses Cargo
-`--profile release`.
+`./build.py test` now starts with the same strict clippy checks as `./build.py check`, then runs:
+
+- `cargo test --features timesync`, which includes the unit tests in `src/tests.rs`, the Rust system tests under
+  `tests/rust-system-test/`, and the C integration tests under `tests/c-system-test/`
+- a short Criterion smoke pass for `packet_paths` and `router_system_paths`
+- a `cargo build` validation for the `python` feature
+- a `cargo build` validation for the `embedded` feature when a matching cross C toolchain is available
+
+The benchmark smoke pass uses Cargo `--profile release`. The C system-test harness waits for all asserted endpoint hits
+before exiting, so it does not fail early while one side is still draining forwarded traffic.
+
+Coverage is regression-oriented rather than percentage-gated in CI today. If you want a local line/branch coverage
+number, the supported path is:
+
+```bash
+cargo llvm-cov --features timesync --workspace --html
+```
+
+That writes an HTML report under `target/llvm-cov/html/` when `cargo-llvm-cov` is installed.
+
+More detail on the test layers, what each suite covers, and the intended commands is in
+[docs/wiki/Testing.md](./docs/wiki/Testing.md).
 
 ## Usage
 

@@ -237,6 +237,23 @@ fn read_reliable_header(r: &mut ByteReader) -> Result<ReliableHeader, TelemetryE
     Ok(ReliableHeader { flags, seq, ack })
 }
 
+fn decode_sender_name(
+    sender_wire_bytes: &[u8],
+    sender_is_compressed: bool,
+    sender_len: usize,
+) -> TelemetryResult<String> {
+    if sender_is_compressed {
+        let decompressed = payload_compression::decompress(sender_wire_bytes, sender_len)?;
+        Ok(core::str::from_utf8(&decompressed)
+            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8 after decompress"))?
+            .to_owned())
+    } else {
+        Ok(core::str::from_utf8(sender_wire_bytes)
+            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8"))?
+            .to_owned())
+    }
+}
+
 #[inline]
 fn is_reliable_type_from_raw(ty_v: u64) -> Result<bool, TelemetryError> {
     let ty_u32 = u32::try_from(ty_v).map_err(|_| TelemetryError::Deserialize("type too large"))?;
@@ -524,16 +541,7 @@ pub fn deserialize_packet(buf: &[u8]) -> Result<Packet, TelemetryError> {
 
     // ----- Sender handling -----
     let sender_wire_bytes = r.read_bytes(sender_wire_len)?;
-    let sender_str: String = if sender_is_compressed {
-        let decompressed = payload_compression::decompress(sender_wire_bytes, slen)?;
-        core::str::from_utf8(&decompressed)
-            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8 after decompress"))?
-            .to_owned()
-    } else {
-        core::str::from_utf8(sender_wire_bytes)
-            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8"))?
-            .to_owned()
-    };
+    let sender_str = decode_sender_name(sender_wire_bytes, sender_is_compressed, slen)?;
 
     // ----- Reliable header (optional) -----
     let mut reliable_hdr: Option<ReliableHeader> = None;
@@ -622,16 +630,7 @@ pub fn peek_envelope(buf: &[u8]) -> TelemetryResult<TelemetryEnvelope> {
     let eps: Arc<[DataEndpoint]> = Arc::from(&ep_buf[..ep_len]);
 
     let sender_wire_bytes = r.read_bytes(sender_wire_len)?;
-    let sender_str: String = if sender_is_compressed {
-        let decompressed = payload_compression::decompress(sender_wire_bytes, slen)?;
-        core::str::from_utf8(&decompressed)
-            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8 after decompress"))?
-            .to_owned()
-    } else {
-        core::str::from_utf8(sender_wire_bytes)
-            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8"))?
-            .to_owned()
-    };
+    let sender_str = decode_sender_name(sender_wire_bytes, sender_is_compressed, slen)?;
 
     let ty_u32 = u32::try_from(ty_v).map_err(|_| TelemetryError::Deserialize("type too large"))?;
     if ty_u32 > MAX_VALUE_DATA_TYPE {
@@ -698,16 +697,7 @@ fn peek_frame_info_inner(buf: &[u8]) -> TelemetryResult<TelemetryFrameInfo> {
     let eps: Arc<[DataEndpoint]> = Arc::from(&ep_buf[..ep_len]);
 
     let sender_wire_bytes = r.read_bytes(sender_wire_len)?;
-    let sender_str: String = if sender_is_compressed {
-        let decompressed = payload_compression::decompress(sender_wire_bytes, slen)?;
-        core::str::from_utf8(&decompressed)
-            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8 after decompress"))?
-            .to_owned()
-    } else {
-        core::str::from_utf8(sender_wire_bytes)
-            .map_err(|_| TelemetryError::Deserialize("sender not UTF-8"))?
-            .to_owned()
-    };
+    let sender_str = decode_sender_name(sender_wire_bytes, sender_is_compressed, slen)?;
 
     let ty_u32 = u32::try_from(ty_v).map_err(|_| TelemetryError::Deserialize("type too large"))?;
     if ty_u32 > MAX_VALUE_DATA_TYPE {
