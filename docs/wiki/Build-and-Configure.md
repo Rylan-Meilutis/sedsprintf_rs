@@ -28,8 +28,12 @@ Examples:
 Useful options:
 
 - `check` runs `cargo clippy -D warnings` for the default, python, and embedded builds.
-- `test` runs the same clippy checks, then the Cargo test suite, a short benchmark smoke pass, and python plus embedded
-  build validation.
+- `test` runs the same clippy checks, then:
+  - `cargo test --features timesync`
+  - a short Criterion smoke pass for `packet_paths` and `router_system_paths`
+  - `cargo build --features python`
+  - `cargo build --no-default-features --target <embedded-target> --features embedded` when a matching cross C
+    toolchain is available
 - `device_id=<id>` sets `DEVICE_IDENTIFIER` for the build.
 - `schema_path=<path>` sets `SEDSPRINTF_RS_SCHEMA_PATH`.
 - `ipc_schema_path=<path>` sets `SEDSPRINTF_RS_IPC_SCHEMA_PATH` for a board-local IPC overlay.
@@ -69,6 +73,33 @@ for roles, packet fields, internal clock behavior, and master-side setter APIs.
 
 Python builds via `maturin` in this repo enable `timesync` by default (see
 pyproject.toml ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/pyproject.toml))).
+
+## Test coverage and what runs
+
+`./build.py test` is the intended top-level validation command for local development and CI-style checks in this repo.
+It covers four layers:
+
+- Static analysis: strict `cargo clippy -D warnings` for default, `python`, and embedded variants.
+- Rust unit and integration tests: `cargo test --features timesync`, including `src/tests.rs`, Rust system tests in
+  `tests/rust-system-test/`, and the Rust harness that configures and runs the C system tests in
+  `tests/c-system-test/c_system_test.rs`.
+- Benchmark smoke: short Criterion runs for `benches/packet_paths.rs` and `benches/router_system_paths.rs`.
+- Build validation: host `python` feature build and embedded-feature build when an embedded cross C toolchain is
+  present.
+
+The C system tests exercise the generated C ABI, multi-endpoint routing, relay forwarding, discovery, and time-sync
+behavior through compiled executables in `c-system-test/`. The main multi-node C test now waits for every asserted
+endpoint count before shutdown so it does not fail early when one simulated board drains slightly slower than another.
+
+This repo does not currently publish or gate on a single required coverage percentage in `build.py test`. Coverage is
+tracked primarily through regression tests across unit, Rust system, and C system layers. If you want a local
+percentage/HTML report, use `cargo-llvm-cov`:
+
+```bash
+cargo llvm-cov --features timesync --workspace --html
+```
+
+That produces a local report under `target/llvm-cov/html/`.
 
 ## Device identifier
 

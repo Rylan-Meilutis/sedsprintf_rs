@@ -245,12 +245,16 @@ int main(void)
     pthread_join(thC, NULL);
     pthread_join(thD, NULL);
 
-    // 5) Wait until expected hits arrive or timeout
-    const uint64_t deadline_us = 5ULL * 1000 * 1000; // 5s safety
+    // 5) Wait until all asserted endpoint hits arrive or timeout.
+    // This keeps the test from exiting early on slower machines while one
+    // side is still draining its last forwarded packet.
+    const uint64_t deadline_us = 15ULL * 1000 * 1000; // 15s safety
     struct timeval start, now;
     gettimeofday(&start, NULL);
 
-    while (!(radioBoard.radio_hits == num_endpoint_hits && flightControllerBoard.sd_hits == num_endpoint_hits))
+    while (!(radioBoard.radio_hits == num_endpoint_hits
+             && flightControllerBoard.sd_hits == num_endpoint_hits
+             && valve_board.radio_hits == num_endpoint_hits))
     {
         gettimeofday(&now, NULL);
         uint64_t elapsed_us =

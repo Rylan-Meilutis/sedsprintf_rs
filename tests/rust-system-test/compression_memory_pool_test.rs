@@ -5,6 +5,7 @@ mod compression_memory_pool_test {
     use sedsprintf_rs::serialize;
 
     use std::alloc::{GlobalAlloc, Layout, System};
+    use std::mem::{align_of, size_of};
     use std::ptr::null_mut;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -68,8 +69,8 @@ mod compression_memory_pool_test {
     unsafe impl GlobalAlloc for LimitedAlloc {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let req = layout.size().max(1);
-            let align = layout.align().max(std::mem::align_of::<usize>());
-            let hdr_sz = HDR_WORDS * std::mem::size_of::<usize>();
+            let align = layout.align().max(align_of::<usize>());
+            let hdr_sz = HDR_WORDS * size_of::<usize>();
             let total = req.saturating_add(align).saturating_add(hdr_sz);
 
             if !try_reserve(req) {

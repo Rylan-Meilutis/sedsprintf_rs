@@ -192,9 +192,25 @@ If you want profiler-friendly output while iterating locally:
 cargo bench --bench packet_paths -- --profile-time=5
 ```
 
-`./build.py test` now starts with the same strict clippy checks as `./build.py check`, then runs the Cargo test suite,
-a short Criterion smoke pass, and the python plus embedded build validation steps. The benchmark smoke pass uses Cargo
-`--profile release`.
+`./build.py test` now starts with the same strict clippy checks as `./build.py check`, then runs:
+
+- `cargo test --features timesync`, which includes the unit tests in `src/tests.rs`, the Rust system tests under
+  `tests/rust-system-test/`, and the C integration tests under `tests/c-system-test/`
+- a short Criterion smoke pass for `packet_paths` and `router_system_paths`
+- a `cargo build` validation for the `python` feature
+- a `cargo build` validation for the `embedded` feature when a matching cross C toolchain is available
+
+The benchmark smoke pass uses Cargo `--profile release`. The C system-test harness waits for all asserted endpoint hits
+before exiting, so it does not fail early while one side is still draining forwarded traffic.
+
+Coverage is regression-oriented rather than percentage-gated in CI today. If you want a local line/branch coverage
+number, the supported path is:
+
+```bash
+cargo llvm-cov --features timesync --workspace --html
+```
+
+That writes an HTML report under `target/llvm-cov/html/` when `cargo-llvm-cov` is installed.
 
 ## Usage
 

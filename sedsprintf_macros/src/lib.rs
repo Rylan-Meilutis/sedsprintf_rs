@@ -422,6 +422,22 @@ fn ensure_caps_name(kind: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn valid_ident_or_compile_error(s: &str) -> Result<syn::Ident, TokenStream> {
+    ensure_valid_ident(s)
+        .map_err(|e| syn::Error::new(Span::call_site(), e).to_compile_error().into())
+}
+
+fn quoted_variant_with_doc(id: &syn::Ident, doc: &str) -> proc_macro2::TokenStream {
+    if doc.is_empty() {
+        quote!(#id,)
+    } else {
+        quote!(
+            #[doc = #doc]
+            #id,
+        )
+    }
+}
+
 fn is_timesync_endpoint(ep: &JsonEndpoint) -> bool {
     ep.rust == "TimeSync" || ep.name == "TIME_SYNC"
 }
@@ -717,9 +733,9 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
             return syn::Error::new(Span::call_site(), e).to_compile_error().into();
         }
 
-        let id = match ensure_valid_ident(&ep.rust) {
+        let id = match valid_ident_or_compile_error(&ep.rust) {
             Ok(id) => id,
-            Err(e) => return syn::Error::new(Span::call_site(), e).to_compile_error().into(),
+            Err(tokens) => return tokens,
         };
 
         ep_idents.push(id);
@@ -753,16 +769,10 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
         + if timesync_enabled { 1 } else { 0 }
         + if discovery_enabled { 1 } else { 0 };
 
-    let ep_variants = ep_idents.iter().zip(ep_docs.iter()).map(|(id, doc)| {
-        if doc.is_empty() {
-            quote!(#id,)
-        } else {
-            quote!(
-                #[doc = #doc]
-                #id,
-            )
-        }
-    });
+    let ep_variants = ep_idents
+        .iter()
+        .zip(ep_docs.iter())
+        .map(|(id, doc)| quoted_variant_with_doc(id, doc));
 
     // DataEndpoint::as_str() uses JSON "name" (RADIO, SD_CARD, ...)
     let ep_meta_arms = ep_idents
@@ -812,9 +822,9 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
                 .into();
         }
 
-        let id = match ensure_valid_ident(&ty.rust) {
+        let id = match valid_ident_or_compile_error(&ty.rust) {
             Ok(id) => id,
-            Err(e) => return syn::Error::new(Span::call_site(), e).to_compile_error().into(),
+            Err(tokens) => return tokens,
         };
 
         ty_entries.push((id, ty.doc.clone().unwrap_or_default()));
@@ -866,16 +876,7 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
             "Encoded telemetry error text (string payload) (CRITICAL FOR SYSTEM FUNCTIONALITY, DO NOT REMOVE)"
                 .to_string(),
         )))
-        .map(|(id, doc)| {
-            if doc.is_empty() {
-                quote!(#id,)
-            } else {
-                quote!(
-                #[doc = #doc]
-                #id,
-            )
-            }
-        });
+        .map(|(id, doc)| quoted_variant_with_doc(&id, &doc));
 
     let builtin_ty_meta = {
         let endpoints_tokens: Vec<proc_macro2::TokenStream> =

@@ -190,6 +190,83 @@ impl Relay {
         Ok(message_priority(ty))
     }
 
+    fn process_replay_queue_item(&self) -> TelemetryResult<bool> {
+        let Some(item) = ({
+            let mut st = self.state.lock();
+            st.replay_queue.pop_front()
+        }) else {
+            return Ok(false);
+        };
+        let frame = serialize::peek_frame_info(item.bytes.as_ref())?;
+        let ty = frame.envelope.ty;
+        let Some(hdr) = frame.reliable else {
+            return Ok(false);
+        };
+        {
+            let mut st = self.state.lock();
+            let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
+            if !tx_state.sent.contains_key(&hdr.seq) {
+                return Ok(false);
+            }
+        }
+        self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
+        let mut st = self.state.lock();
+        let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
+        if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
+            sent.last_send_ms = self.clock.now_ms();
+            sent.queued = false;
+        }
+        Ok(true)
+    }
+
+    fn pop_ready_tx_item(
+        &self,
+    ) -> Option<(
+        Option<RelaySideId>,
+        RelaySideId,
+        RelayTxHandlerFn,
+        RelaySideOptions,
+        RelayItem,
+    )> {
+        let mut st = self.state.lock();
+        if let Some(item) = st.tx_queue.pop_front() {
+            let side = st.sides.get(item.dst).and_then(|side| side.clone());
+            side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
+        } else {
+            None
+        }
+    }
+
+    fn send_tx_item(
+        &self,
+        src: Option<RelaySideId>,
+        dst: RelaySideId,
+        handler: RelayTxHandlerFn,
+        opts: RelaySideOptions,
+        data: RelayItem,
+    ) -> TelemetryResult<bool> {
+        let allowed = {
+            let st = self.state.lock();
+            let ty = match &data {
+                RelayItem::Packet(pkt) => Some(pkt.data_type()),
+                RelayItem::Serialized(bytes) => Some(serialize::peek_envelope(bytes.as_ref())?.ty),
+            };
+            self.route_allowed_locked(&st, src, ty, dst)
+        };
+        if !allowed {
+            return Ok(false);
+        }
+        if opts.reliable_enabled && matches!(handler, RelayTxHandlerFn::Serialized(_)) {
+            self.send_reliable_to_side(dst, data)?;
+            Ok(true)
+        } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
+            self.call_tx_handler(&handler, &adjusted)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Create a new relay with the given clock.
     pub fn new(clock: Box<dyn Clock + Send + Sync>) -> Self {
         Self {
@@ -1807,73 +1884,19 @@ impl Relay {
         let start = self.clock.now_ms();
         loop {
             self.process_reliable_timeouts()?;
-            if let Some(item) = {
-                let mut st = self.state.lock();
-                st.replay_queue.pop_front()
-            } {
-                let frame = serialize::peek_frame_info(item.bytes.as_ref())?;
-                let ty = frame.envelope.ty;
-                let Some(hdr) = frame.reliable else {
-                    continue;
-                };
-                {
-                    let mut st = self.state.lock();
-                    let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                    if !tx_state.sent.contains_key(&hdr.seq) {
-                        continue;
-                    }
-                }
-                self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
-                let mut st = self.state.lock();
-                let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
-                    sent.last_send_ms = self.clock.now_ms();
-                    sent.queued = false;
-                }
+            if self.process_replay_queue_item()? {
                 if timeout_ms != 0 && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64 {
                     break;
                 }
                 continue;
             }
-            let opt: Option<(
-                Option<RelaySideId>,
-                RelaySideId,
-                RelayTxHandlerFn,
-                RelaySideOptions,
-                RelayItem,
-            )> = {
-                let mut st = self.state.lock();
-                if let Some(item) = st.tx_queue.pop_front() {
-                    let side = st.sides.get(item.dst).and_then(|side| side.clone());
-                    side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
-                } else {
-                    None
-                }
-            };
-
-            let Some((src, dst, handler, opts, data)) = opt else {
+            let Some((src, dst, handler, opts, data)) = self.pop_ready_tx_item() else {
                 break;
             };
-            let allowed = {
-                let st = self.state.lock();
-                let ty = match &data {
-                    RelayItem::Packet(pkt) => Some(pkt.data_type()),
-                    RelayItem::Serialized(bytes) => {
-                        Some(serialize::peek_envelope(bytes.as_ref())?.ty)
-                    }
-                };
-                self.route_allowed_locked(&st, src, ty, dst)
-            };
-            if !allowed {
-                continue;
-            }
-            if opts.reliable_enabled && matches!(handler, RelayTxHandlerFn::Serialized(_)) {
-                self.send_reliable_to_side(dst, data)?;
-            } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
-                self.call_tx_handler(&handler, &adjusted)?;
-            }
-
-            if timeout_ms != 0 && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64 {
+            if self.send_tx_item(src, dst, handler, opts, data)?
+                && timeout_ms != 0
+                && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64
+            {
                 break;
             }
         }
@@ -1921,76 +1944,15 @@ impl Relay {
                 break;
             }
 
-            if let Some(item) = {
-                let mut st = self.state.lock();
-                st.replay_queue.pop_front()
-            } {
-                let frame = serialize::peek_frame_info(item.bytes.as_ref())?;
-                let ty = frame.envelope.ty;
-                if let Some(hdr) = frame.reliable {
-                    {
-                        let mut st = self.state.lock();
-                        let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                        if !tx_state.sent.contains_key(&hdr.seq) {
-                            continue;
-                        }
-                    }
-                    self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
-                    let mut st = self.state.lock();
-                    let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
-                    if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
-                        sent.last_send_ms = self.clock.now_ms();
-                        sent.queued = false;
-                    }
-                    did_any = true;
-                }
+            if self.process_replay_queue_item()? {
+                did_any = true;
             }
 
             // Then send out TX
-            let sent_one = {
-                let opt: Option<(
-                    Option<RelaySideId>,
-                    RelaySideId,
-                    RelayTxHandlerFn,
-                    RelaySideOptions,
-                    RelayItem,
-                )> = {
-                    let mut st = self.state.lock();
-                    if let Some(item) = st.tx_queue.pop_front() {
-                        let side = st.sides.get(item.dst).and_then(|side| side.clone());
-                        side.map(|s| (item.src, item.dst, s.tx_handler, s.opts, item.data))
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some((src, dst, handler, opts, data)) = opt {
-                    let allowed = {
-                        let st = self.state.lock();
-                        let ty = match &data {
-                            RelayItem::Packet(pkt) => Some(pkt.data_type()),
-                            RelayItem::Serialized(bytes) => {
-                                Some(serialize::peek_envelope(bytes.as_ref())?.ty)
-                            }
-                        };
-                        self.route_allowed_locked(&st, src, ty, dst)
-                    };
-                    if !allowed {
-                        false
-                    } else if opts.reliable_enabled
-                        && matches!(handler, RelayTxHandlerFn::Serialized(_))
-                    {
-                        self.send_reliable_to_side(dst, data)?;
-                        true
-                    } else if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
-                        self.call_tx_handler(&handler, &adjusted)?;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
+            let sent_one = if let Some((src, dst, handler, opts, data)) = self.pop_ready_tx_item() {
+                self.send_tx_item(src, dst, handler, opts, data)?
+            } else {
+                false
             };
 
             if sent_one {

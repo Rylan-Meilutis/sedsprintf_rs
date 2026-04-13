@@ -10,6 +10,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::mem::size_of;
 
 use crate::router::{encode_slice_le, Router};
 use crate::{
@@ -346,7 +347,7 @@ impl SlewedNetworkClock {
         let applied_adjust_ns = if self.pending_adjust_ns >= 0 {
             self.pending_adjust_ns.min(max_adjust_ns)
         } else {
-            -((-self.pending_adjust_ns).min(max_adjust_ns))
+            -(-self.pending_adjust_ns).min(max_adjust_ns)
         };
 
         Some(
@@ -382,7 +383,7 @@ impl SlewedNetworkClock {
         let applied_adjust_ns = if self.pending_adjust_ns >= 0 {
             self.pending_adjust_ns.min(max_adjust_ns)
         } else {
-            -((-self.pending_adjust_ns).min(max_adjust_ns))
+            -(-self.pending_adjust_ns).min(max_adjust_ns)
         };
         let remaining_adjust_ns = self.pending_adjust_ns.saturating_sub(applied_adjust_ns);
 
@@ -864,8 +865,8 @@ fn decode_u64_payload(
     let vals = pkt.data_as_u64()?;
     if vals.len() != expected_words {
         return Err(TelemetryError::SizeMismatch {
-            expected: expected_words * core::mem::size_of::<u64>(),
-            got: vals.len() * core::mem::size_of::<u64>(),
+            expected: expected_words * size_of::<u64>(),
+            got: vals.len() * size_of::<u64>(),
         });
     }
 

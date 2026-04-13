@@ -49,6 +49,7 @@ use crate::{
 };
 
 static GLOBAL_ROUTER_SINGLETON: OnceLock<SArc<Mutex<Router>>> = OnceLock::new();
+type EndpointHandlerBundle = (Vec<EndpointHandler>, Vec<Py<PyAny>>, Vec<Py<PyAny>>);
 
 // ===========================================================================
 // Macros
@@ -95,11 +96,180 @@ fn endpoint_from_u32(x: u32) -> TelemetryResult<DataEndpoint> {
     DataEndpoint::try_from_u32(x).ok_or(TelemetryError::Deserialize("bad endpoint"))
 }
 
+fn router_mode_from_u32(mode: u32) -> PyResult<RouterMode> {
+    match mode {
+        0 => Ok(RouterMode::Sink),
+        1 => Ok(RouterMode::Relay),
+        _ => Err(PyValueError::new_err("mode must be 0 (Sink) or 1 (Relay)")),
+    }
+}
+
+fn build_router_config(handlers: Vec<EndpointHandler>, timesync_enabled: bool) -> RouterConfig {
+    let cfg = RouterConfig::new(handlers);
+    #[cfg(feature = "timesync")]
+    let cfg = if timesync_enabled {
+        cfg.with_timesync(TimeSyncConfig::default())
+    } else {
+        cfg
+    };
+    cfg
+}
+
+fn build_router_with_optional_clock(
+    py: Python<'_>,
+    mode: RouterMode,
+    cfg: RouterConfig,
+    now_keep: Option<&Py<PyAny>>,
+) -> Router {
+    if let Some(cb) = now_keep {
+        Router::new_with_clock(
+            mode,
+            cfg,
+            Box::new(PyClock {
+                cb: Some(cb.clone_ref(py)),
+            }),
+        )
+    } else {
+        Router::new(mode, cfg)
+    }
+}
+
+fn build_endpoint_handlers(
+    py: Python<'_>,
+    handlers: Option<&Bound<'_, PyAny>>,
+) -> PyResult<EndpointHandlerBundle> {
+    let mut handlers_vec = Vec::new();
+    let mut keep_pkt = Vec::new();
+    let mut keep_ser = Vec::new();
+
+    if let Some(hs) = handlers {
+        let list = hs.cast::<PyList>().map_err(|_| {
+            PyValueError::new_err("handlers must be list of (endpoint, pkt_cb, ser_cb) tuples")
+        })?;
+
+        for item in list.iter() {
+            let tup = item
+                .cast::<PyTuple>()
+                .map_err(|_| PyValueError::new_err("handler must be a 3-tuple"))?;
+            if tup.len() != 3 {
+                return Err(PyValueError::new_err("tuple arity must be 3"));
+            }
+
+            let ep_u32: u32 = tup.get_item(0)?.extract()?;
+            let endpoint = endpoint_from_u32(ep_u32).map_err(py_err_from)?;
+
+            if !tup.get_item(1)?.is_none() {
+                let cb: Py<PyAny> = tup.get_item(1)?.extract()?;
+                let cb_for_closure = cb.clone_ref(py);
+                keep_pkt.push(cb);
+
+                let eh = EndpointHandler::new_packet_handler(endpoint, move |pkt| {
+                    Python::attach(|py| {
+                        let py_pkt = PyPacket { inner: pkt.clone() };
+                        let any = Py::new(py, py_pkt)
+                            .map_err(|_| TelemetryError::Io("packet wrapper"))?
+                            .into_any();
+                        let any = any.bind(py);
+
+                        match cb_for_closure.call1(py, (any,)) {
+                            Ok(_cb) => Ok(()),
+                            Err(err) => {
+                                err.restore(py);
+                                Err(TelemetryError::Io("packet handler error"))
+                            }
+                        }
+                    })
+                });
+
+                handlers_vec.push(eh);
+            }
+
+            if !tup.get_item(2)?.is_none() {
+                let cb: Py<PyAny> = tup.get_item(2)?.extract()?;
+                let cb_for_closure = cb.clone_ref(py);
+                keep_ser.push(cb);
+
+                let eh = EndpointHandler::new_serialized_handler(endpoint, move |bytes| {
+                    Python::attach(|py| {
+                        let arg = PyBytes::new(py, bytes).into_any();
+                        match cb_for_closure.call1(py, (arg,)) {
+                            Ok(_cb) => Ok(()),
+                            Err(err) => {
+                                err.restore(py);
+                                Err(TelemetryError::Io("serialized handler error"))
+                            }
+                        }
+                    })
+                });
+
+                handlers_vec.push(eh);
+            }
+        }
+    }
+
+    Ok((handlers_vec, keep_pkt, keep_ser))
+}
+
 /// Return the fixed payload size in bytes for a type, or `None` if dynamic.
 fn required_payload_size_for(ty: DataType) -> Option<usize> {
     match message_meta(ty).element {
         MessageElement::Static(_, _, _) => Some(get_needed_message_size(ty)),
         MessageElement::Dynamic(_, _) => None,
+    }
+}
+
+fn normalize_u8_payload_for_type(ty: DataType, buf: &mut Vec<u8>) {
+    if let Some(required) = required_payload_size_for(ty) {
+        if buf.len() < required {
+            buf.resize(required, 0u8);
+        } else if buf.len() > required {
+            buf.truncate(required);
+        }
+    }
+}
+
+fn normalize_f32_payload_for_type(ty: DataType, vals: &mut Vec<f32>) -> PyResult<()> {
+    if let Some(required_bytes) = required_payload_size_for(ty) {
+        if required_bytes % 4 != 0 {
+            return Err(py_err_from(TelemetryError::BadArg));
+        }
+        let need = required_bytes / 4;
+        if vals.len() < need {
+            vals.resize(need, 0.0);
+        } else if vals.len() > need {
+            vals.truncate(need);
+        }
+    }
+    Ok(())
+}
+
+fn with_router_lock<T>(
+    inner: &SArc<Mutex<Router>>,
+    f: impl FnOnce(&Router) -> TelemetryResult<T>,
+) -> PyResult<T> {
+    let rtr = inner
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+    f(&rtr).map_err(py_err_from)
+}
+
+fn dispatch_log_slice<T: LeBytes + Copy>(
+    router: &Router,
+    ty: DataType,
+    timestamp_ms: Option<u64>,
+    queue: bool,
+    values: &[T],
+) -> TelemetryResult<()> {
+    if queue {
+        match timestamp_ms {
+            Some(ts) => router.log_queue_ts::<T>(ty, ts, values),
+            None => router.log_queue::<T>(ty, values),
+        }
+    } else {
+        match timestamp_ms {
+            Some(ts) => router.log_ts::<T>(ty, ts, values),
+            None => router.log::<T>(ty, values),
+        }
     }
 }
 
@@ -304,111 +474,10 @@ impl PyRouter {
         // Copy callbacks to keep them alive
         let now_keep = now_ms.as_ref().map(|p| p.clone_ref(py));
 
-        // Build endpoint handlers
-        let mut handlers_vec = Vec::new();
-        let mut keep_pkt = Vec::new();
-        let mut keep_ser = Vec::new();
-
-        if let Some(hs) = handlers {
-            let list = hs.cast::<PyList>().map_err(|_| {
-                PyValueError::new_err("handlers must be list of (endpoint, pkt_cb, ser_cb) tuples")
-            })?;
-
-            for item in list.iter() {
-                let tup = item
-                    .cast::<PyTuple>()
-                    .map_err(|_| PyValueError::new_err("handler must be a 3-tuple"))?;
-                if tup.len() != 3 {
-                    return Err(PyValueError::new_err("tuple arity must be 3"));
-                }
-
-                let ep_u32: u32 = tup.get_item(0)?.extract()?;
-                let endpoint = endpoint_from_u32(ep_u32).map_err(py_err_from)?;
-
-                // Packet handler
-                if !tup.get_item(1)?.is_none() {
-                    let cb: Py<PyAny> = tup.get_item(1)?.extract()?;
-                    let cb_for_closure = cb.clone_ref(py);
-                    keep_pkt.push(cb);
-
-                    let eh = EndpointHandler::new_packet_handler(endpoint, move |pkt| {
-                        Python::attach(|py| {
-                            let py_pkt = PyPacket { inner: pkt.clone() };
-                            let any = Py::new(py, py_pkt)
-                                .map_err(|_| TelemetryError::Io("packet wrapper"))?
-                                .into_any();
-
-                            // FIX: bind owned Py<PyAny> into Bound<PyAny>
-                            let any = any.bind(py);
-
-                            match cb_for_closure.call1(py, (any,)) {
-                                Ok(_cb) => Ok(()),
-                                Err(err) => {
-                                    err.restore(py);
-                                    Err(TelemetryError::Io("packet handler error"))
-                                }
-                            }
-                        })
-                    });
-
-                    handlers_vec.push(eh);
-                }
-
-                // Serialized handler
-                if !tup.get_item(2)?.is_none() {
-                    let cb: Py<PyAny> = tup.get_item(2)?.extract()?;
-                    let cb_for_closure = cb.clone_ref(py);
-                    keep_ser.push(cb);
-
-                    let eh = EndpointHandler::new_serialized_handler(endpoint, move |bytes| {
-                        Python::attach(|py| {
-                            let arg = PyBytes::new(py, bytes).into_any();
-                            match cb_for_closure.call1(py, (arg,)) {
-                                Ok(_cb) => Ok(()),
-                                Err(err) => {
-                                    err.restore(py);
-                                    Err(TelemetryError::Io("serialized handler error"))
-                                }
-                            }
-                        })
-                    });
-
-                    handlers_vec.push(eh);
-                }
-            }
-        }
-
-        // Build clock callback
-        // Build router
-        let cfg = {
-            let cfg = RouterConfig::new(handlers_vec);
-            #[cfg(feature = "timesync")]
-            let cfg = if timesync_enabled {
-                cfg.with_timesync(TimeSyncConfig::default())
-            } else {
-                cfg
-            };
-            cfg
-        };
-
-        let mode = match mode {
-            0 => RouterMode::Sink,
-            1 => RouterMode::Relay,
-            _ => {
-                return Err(PyValueError::new_err("mode must be 0 (Sink) or 1 (Relay)"));
-            }
-        };
-        let router = if let Some(cb) = now_keep.as_ref() {
-            Router::new_with_clock(
-                mode,
-                cfg,
-                Box::new(PyClock {
-                    cb: Some(cb.clone_ref(py)),
-                }),
-            )
-        } else {
-            Router::new(mode, cfg)
-        };
+        let (handlers_vec, keep_pkt, keep_ser) = build_endpoint_handlers(py, handlers)?;
+        let cfg = build_router_config(handlers_vec, timesync_enabled);
+        let mode = router_mode_from_u32(mode)?;
+        let router = build_router_with_optional_clock(py, mode, cfg, now_keep.as_ref());
         let arc = SArc::new(Mutex::new(router));
 
         GLOBAL_ROUTER_SINGLETON
@@ -436,109 +505,10 @@ impl PyRouter {
     ) -> PyResult<Self> {
         let now_keep = now_ms.as_ref().map(|p| p.clone_ref(py));
 
-        let mut handlers_vec = Vec::new();
-        let mut keep_pkt = Vec::new();
-        let mut keep_ser = Vec::new();
-
-        if let Some(hs) = handlers {
-            let list = hs.cast::<PyList>().map_err(|_| {
-                PyValueError::new_err("handlers must be list of (endpoint, pkt_cb, ser_cb) tuples")
-            })?;
-
-            for item in list.iter() {
-                let tup = item
-                    .cast::<PyTuple>()
-                    .map_err(|_| PyValueError::new_err("handler must be a 3-tuple"))?;
-                if tup.len() != 3 {
-                    return Err(PyValueError::new_err("tuple arity must be 3"));
-                }
-
-                let ep_u32: u32 = tup.get_item(0)?.extract()?;
-                let endpoint = endpoint_from_u32(ep_u32).map_err(py_err_from)?;
-
-                // Packet handler
-                if !tup.get_item(1)?.is_none() {
-                    let cb: Py<PyAny> = tup.get_item(1)?.extract()?;
-                    let cb_for_closure = cb.clone_ref(py);
-                    keep_pkt.push(cb);
-
-                    let eh = EndpointHandler::new_packet_handler(endpoint, move |pkt| {
-                        Python::attach(|py| {
-                            let py_pkt = PyPacket { inner: pkt.clone() };
-                            let any = Py::new(py, py_pkt)
-                                .map_err(|_| TelemetryError::Io("packet wrapper"))?
-                                .into_any();
-
-                            // FIX: bind owned Py<PyAny> into Bound<PyAny>
-                            let any = any.bind(py);
-
-                            match cb_for_closure.call1(py, (any,)) {
-                                Ok(_cb) => Ok(()),
-                                Err(err) => {
-                                    err.restore(py);
-                                    Err(TelemetryError::Io("packet handler error"))
-                                }
-                            }
-                        })
-                    });
-
-                    handlers_vec.push(eh);
-                }
-
-                // Serialized handler
-                if !tup.get_item(2)?.is_none() {
-                    let cb: Py<PyAny> = tup.get_item(2)?.extract()?;
-                    let cb_for_closure = cb.clone_ref(py);
-                    keep_ser.push(cb);
-
-                    let eh = EndpointHandler::new_serialized_handler(endpoint, move |bytes| {
-                        Python::attach(|py| {
-                            let arg = PyBytes::new(py, bytes).into_any();
-                            match cb_for_closure.call1(py, (arg,)) {
-                                Ok(_cb) => Ok(()),
-                                Err(err) => {
-                                    err.restore(py);
-                                    Err(TelemetryError::Io("serialized handler error"))
-                                }
-                            }
-                        })
-                    });
-
-                    handlers_vec.push(eh);
-                }
-            }
-        }
-
-        let cfg = {
-            let cfg = RouterConfig::new(handlers_vec);
-            #[cfg(feature = "timesync")]
-            let cfg = if timesync_enabled {
-                cfg.with_timesync(TimeSyncConfig::default())
-            } else {
-                cfg
-            };
-            cfg
-        };
-
-        let mode = match mode {
-            0 => RouterMode::Sink,
-            1 => RouterMode::Relay,
-            _ => {
-                return Err(PyValueError::new_err("mode must be 0 (Sink) or 1 (Relay)"));
-            }
-        };
-
-        let router = if let Some(cb) = now_keep.as_ref() {
-            Router::new_with_clock(
-                mode,
-                cfg,
-                Box::new(PyClock {
-                    cb: Some(cb.clone_ref(py)),
-                }),
-            )
-        } else {
-            Router::new(mode, cfg)
-        };
+        let (handlers_vec, keep_pkt, keep_ser) = build_endpoint_handlers(py, handlers)?;
+        let cfg = build_router_config(handlers_vec, timesync_enabled);
+        let mode = router_mode_from_u32(mode)?;
+        let router = build_router_with_optional_clock(py, mode, cfg, now_keep.as_ref());
 
         Ok(Self {
             inner: SArc::new(Mutex::new(router)),
@@ -994,30 +964,10 @@ impl PyRouter {
         let ty = dtype_from_u32(ty).map_err(py_err_from)?;
         let mut buf: Vec<u8> = data.extract::<&[u8]>()?.to_vec();
 
-        if let Some(required) = required_payload_size_for(ty) {
-            if buf.len() < required {
-                buf.resize(required, 0u8);
-            } else if buf.len() > required {
-                buf.truncate(required);
-            }
-        }
-
-        let rtr = self
-            .inner
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
-        let r = if queue {
-            match timestamp_ms {
-                Some(ts) => rtr.log_queue_ts::<u8>(ty, ts, &buf),
-                None => rtr.log_queue::<u8>(ty, &buf),
-            }
-        } else {
-            match timestamp_ms {
-                Some(ts) => rtr.log_ts::<u8>(ty, ts, &buf),
-                None => rtr.log::<u8>(ty, &buf),
-            }
-        };
-        r.map_err(py_err_from)
+        normalize_u8_payload_for_type(ty, &mut buf);
+        with_router_lock(&self.inner, |rtr| {
+            dispatch_log_slice::<u8>(rtr, ty, timestamp_ms, queue, &buf)
+        })
     }
 
     #[pyo3(signature = (ty, values, timestamp_ms=None, queue=false))]
@@ -1032,34 +982,10 @@ impl PyRouter {
         let ty = dtype_from_u32(ty).map_err(py_err_from)?;
         let mut vals: Vec<f32> = values.extract()?;
 
-        if let Some(required_bytes) = required_payload_size_for(ty) {
-            if required_bytes % 4 != 0 {
-                return Err(py_err_from(TelemetryError::BadArg));
-            }
-            let need = required_bytes / 4;
-            if vals.len() < need {
-                vals.resize(need, 0.0);
-            } else if vals.len() > need {
-                vals.truncate(need);
-            }
-        }
-
-        let rtr = self
-            .inner
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
-        let r = if queue {
-            match timestamp_ms {
-                Some(ts) => rtr.log_queue_ts::<f32>(ty, ts, &vals),
-                None => rtr.log_queue::<f32>(ty, &vals),
-            }
-        } else {
-            match timestamp_ms {
-                Some(ts) => rtr.log_ts::<f32>(ty, ts, &vals),
-                None => rtr.log::<f32>(ty, &vals),
-            }
-        };
-        r.map_err(py_err_from)
+        normalize_f32_payload_for_type(ty, &mut vals)?;
+        with_router_lock(&self.inner, |rtr| {
+            dispatch_log_slice::<f32>(rtr, ty, timestamp_ms, queue, &vals)
+        })
     }
 
     #[allow(clippy::too_many_arguments)] // PyO3 method: `self` and `py` are not Python-visible
@@ -1101,33 +1027,14 @@ impl PyRouter {
             }
         };
 
-        if let Some(required) = required_payload_size_for(ty) {
-            if bytes.len() < required {
-                bytes.resize(required, 0);
-            } else if bytes.len() > required {
-                bytes.truncate(required);
-            }
-        }
+        normalize_u8_payload_for_type(ty, &mut bytes);
 
         let ts = timestamp_ms;
 
         if elem_size == 1 && elem_kind == EK_UNSIGNED {
-            let rtr = self
-                .inner
-                .lock()
-                .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
-            let r = if queue {
-                match ts {
-                    Some(t) => rtr.log_queue_ts::<u8>(ty, t, &bytes),
-                    None => rtr.log_queue::<u8>(ty, &bytes),
-                }
-            } else {
-                match ts {
-                    Some(t) => rtr.log_ts::<u8>(ty, t, &bytes),
-                    None => rtr.log::<u8>(ty, &bytes),
-                }
-            };
-            return r.map_err(py_err_from);
+            return with_router_lock(&self.inner, |rtr| {
+                dispatch_log_slice::<u8>(rtr, ty, ts, queue, &bytes)
+            });
         }
 
         macro_rules! finish_with {
@@ -1141,22 +1048,9 @@ impl PyRouter {
                 let mut v: Vec<$T> = Vec::with_capacity(cnt);
                 vectorize_data::<$T>(bytes.as_ptr(), cnt, elem_size, &mut v)
                     .map_err(|_| PyValueError::new_err("vectorize failed"))?;
-                let rtr = self
-                    .inner
-                    .lock()
-                    .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
-                let r = if queue {
-                    match ts {
-                        Some(t) => rtr.log_queue_ts::<$T>(ty, t, &v),
-                        None => rtr.log_queue::<$T>(ty, &v),
-                    }
-                } else {
-                    match ts {
-                        Some(t) => rtr.log_ts::<$T>(ty, t, &v),
-                        None => rtr.log::<$T>(ty, &v),
-                    }
-                };
-                r.map_err(py_err_from)
+                with_router_lock(&self.inner, |rtr| {
+                    dispatch_log_slice::<$T>(rtr, ty, ts, queue, &v)
+                })
             }};
         }
 
@@ -1893,13 +1787,7 @@ pub fn make_packet(
 
     let mut buf: Vec<u8> = payload.extract()?;
 
-    if let Some(required) = required_payload_size_for(ty) {
-        if buf.len() < required {
-            buf.resize(required, 0u8);
-        } else if buf.len() > required {
-            buf.truncate(required);
-        }
-    }
+    normalize_u8_payload_for_type(ty, &mut buf);
 
     let payload_arc = AArc::<[u8]>::from(buf);
 
