@@ -3,7 +3,7 @@ use sedsprintf_rs::TelemetryResult;
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
-use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
+use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -34,13 +34,12 @@ fn benchmark_router_system_paths(c: &mut Criterion) {
             }),
             EndpointHandler::new_packet_handler(DataEndpoint::SdCard, |_pkt: &Packet| Ok(())),
         ];
-        Router::new_with_clock(RouterMode::Sink, RouterConfig::new(handlers), zero_clock())
+        Router::new_with_clock(RouterConfig::new(handlers), zero_clock())
     };
 
     let source = {
         let tx_frames = tx_frames.clone();
-        let router =
-            Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+        let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
         router.add_side_serialized("bench_bus", move |bytes: &[u8]| -> TelemetryResult<()> {
             tx_frames.lock().unwrap().push(bytes.to_vec());
             Ok(())

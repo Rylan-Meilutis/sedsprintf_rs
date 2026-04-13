@@ -536,16 +536,11 @@ pub extern "C" fn seds_router_new(
         let cfg = cfg.with_timesync(TimeSyncConfig::default());
         cfg
     };
-    let mode = match mode {
-        0 => crate::router::RouterMode::Sink,
-        1 => crate::router::RouterMode::Relay,
-        _ => return ptr::null_mut(),
-    };
+    let _ = mode;
 
     #[cfg(feature = "std")]
     let router = if now_ms_cb.is_some() {
         Router::new_with_clock(
-            mode,
             cfg,
             Box::new(FfiClock {
                 cb: now_ms_cb,
@@ -553,12 +548,11 @@ pub extern "C" fn seds_router_new(
             }),
         )
     } else {
-        Router::new(mode, cfg)
+        Router::new(cfg)
     };
 
     #[cfg(not(feature = "std"))]
     let router = Router::new_with_clock(
-        mode,
         cfg,
         Box::new(FfiClock {
             cb: now_ms_cb,
@@ -2984,7 +2978,6 @@ pub extern "C" fn seds_owned_header_view(
 mod tests {
     use super::*;
     use crate::discovery::{build_discovery_announce, DISCOVERY_FAST_INTERVAL_MS};
-    use crate::router::RouterMode;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -3043,7 +3036,6 @@ mod tests {
         let mut did_queue = false;
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::Radio,
                 |_pkt| Ok(()),
@@ -3086,7 +3078,6 @@ mod tests {
         let side_name_b = b"B";
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::Radio,
                 |_pkt| Ok(()),
@@ -3192,7 +3183,6 @@ mod tests {
         let side_name_b = b"B";
 
         let router = Router::new_with_clock(
-            RouterMode::Relay,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::Radio,
                 |_pkt| Ok(()),
@@ -3240,7 +3230,6 @@ mod tests {
         let side_name_b = b"B";
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::Radio,
                 |_pkt| Ok(()),
@@ -3319,7 +3308,6 @@ mod tests {
         let side_name_c = b"C";
 
         let router = Router::new_with_clock(
-            RouterMode::Relay,
             RouterConfig::default(),
             Box::new(TestClock {
                 now_ms: Arc::new(AtomicU64::new(0)),
@@ -3412,7 +3400,6 @@ mod tests {
         let side_name = b"NET";
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::Radio,
                 |_pkt| Ok(()),

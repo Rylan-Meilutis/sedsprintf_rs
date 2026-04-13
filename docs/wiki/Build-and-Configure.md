@@ -91,6 +91,16 @@ The C system tests exercise the generated C ABI, multi-endpoint routing, relay f
 behavior through compiled executables in `c-system-test/`. The main multi-node C test now waits for every asserted
 endpoint count before shutdown so it does not fail early when one simulated board drains slightly slower than another.
 
+The Rust system tests under `tests/rust-system-test/` cover the higher-level multi-node behaviors that matter most for
+regressions:
+
+- router-to-router and router-to-relay forwarding
+- discovery route learning and selective forwarding
+- adaptive multi-path routing
+- reliable dropped-frame recovery
+- end-to-end reliable verification and directed ACK return-path routing
+- time-sync election, failover, and multi-node convergence
+
 This repo does not currently publish or gate on a single required coverage percentage in `build.py test`. Coverage is
 tracked primarily through regression tests across unit, Rust system, and C system layers. If you want a local
 percentage/HTML report, use `cargo-llvm-cov`:
@@ -100,6 +110,8 @@ cargo llvm-cov --features timesync --workspace --html
 ```
 
 That produces a local report under `target/llvm-cov/html/`.
+
+For a fuller description of the test layers and recommended commands, see [Testing](Testing).
 
 ## Device identifier
 

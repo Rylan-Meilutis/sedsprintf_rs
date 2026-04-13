@@ -71,6 +71,24 @@ environments.
 
 ## Recent changelog milestones
 
+## Version 3.11.0 highlights
+
+- Removed `RouterMode` from the active router model. Routers now use the same runtime routing-rule
+  model as relays, and with no explicit route rules they default to a full forwarding mesh.
+- Discovery-driven multi-path routing now defaults to adaptive load balancing for normal traffic,
+  while reliable discovered traffic still fans out across all known candidate paths.
+- Reliable delivery is now end-to-end verified in addition to the existing per-link ACK/retransmit
+  layer. Destination routers emit directed end-to-end acknowledgements, and discovery-informed
+  return-path learning routes those ACKs only toward the source instead of flooding them.
+- When a discovered destination holder disappears from topology, the source retires that holder
+  from the in-flight obligation set instead of replaying forever toward a vanished board.
+- Relays also prune their learned holder-ACK state against discovery expiry so stale confirmations
+  do not keep affecting later discovered routing choices.
+- Reliable streams still stay non-blocking while those end-to-end acknowledgements are outstanding.
+- Added expanded testing documentation covering unit tests, Rust system tests, C system tests,
+  local coverage reporting, and the new end-to-end reliability regression tests.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
+
 ## Version 3.10.0 highlights
 
 - Reliable delivery in both `Router` and `Relay` now uses built-in internal
@@ -98,13 +116,6 @@ environments.
   ACKs, retransmits, and optional ordering.
 - This established the modern router/reliability model that later releases expanded.
 - Full changelog: [v2.4.0...v3.0.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v2.4.0...v3.0.0)
-
-## Version 2.0.0 highlights
-
-- Added `RouterMode` with distinct `Relay` vs `Sink` behavior.
-- Fixed packet-hash handling so already-seen packets are not processed twice.
-- This was the release where the router/relay behavior became an explicit part of the public model.
-- Full changelog: [v1.5.2...v2.0.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v1.5.2...v2.0.0)
 
 ## Version 1.0.0 highlights
 
@@ -211,6 +222,9 @@ cargo llvm-cov --features timesync --workspace --html
 ```
 
 That writes an HTML report under `target/llvm-cov/html/` when `cargo-llvm-cov` is installed.
+
+More detail on the test layers, what each suite covers, and the intended commands is in
+[docs/wiki/Testing.md](./docs/wiki/Testing.md).
 
 ## Usage
 

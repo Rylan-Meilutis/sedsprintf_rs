@@ -176,7 +176,6 @@ mod tests2 {
     //! Basic smoke tests for packet roundtrip, string formatting, and simple
     //! router send/receive paths.
 
-    use crate::router::RouterMode;
     use crate::tests::timeout_tests::StepClock;
     use crate::tests::{get_sd_card_handler, SeenType};
     use crate::{
@@ -268,11 +267,7 @@ mod tests2 {
         let sd_handler = get_sd_card_handler(sd_seen_c);
         let box_clock = StepClock::new_default_box();
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![sd_handler]),
-            box_clock,
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![sd_handler]), box_clock);
         router.add_side_serialized("tx", transmit);
 
         // send GPS_DATA (3 * f32) using Router::log (uses default endpoints from schema)
@@ -317,11 +312,7 @@ mod tests2 {
         let seen_a_c = seen_a.clone();
         let seen_b_c = seen_b.clone();
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::default(),
-            StepClock::new_default_box(),
-        );
+        let router = Router::new_with_clock(RouterConfig::default(), StepClock::new_default_box());
         let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
             seen_a_c.lock().unwrap().push(pkt.clone());
             Ok(())
@@ -466,7 +457,7 @@ mod tests2 {
         let box_clock_tx = StepClock::new_default_box();
         let box_clock_rx = StepClock::new_default_box();
 
-        let tx_router = Router::new_with_clock(RouterMode::Sink, Default::default(), box_clock_tx);
+        let tx_router = Router::new_with_clock(Default::default(), box_clock_tx);
         tx_router.add_side_serialized("tx", tx_fn);
 
         // --- Set up an RX router with a local SD handler that decodes f32 payloads ---
@@ -479,7 +470,6 @@ mod tests2 {
         }
 
         let rx_router = Router::new_with_clock(
-            RouterMode::Sink,
             crate::router::RouterConfig::new(vec![sd_handler]),
             box_clock_rx,
         );
@@ -515,7 +505,7 @@ mod tests2 {
         let (bus, tx_fn) = TestBus::new();
         let box_clock = StepClock::new_default_box();
 
-        let router = Router::new_with_clock(RouterMode::Sink, Default::default(), box_clock);
+        let router = Router::new_with_clock(Default::default(), box_clock);
         router.add_side_serialized("tx", tx_fn);
 
         // Enqueue for transmit
@@ -655,7 +645,7 @@ mod handler_failure_tests {
 
     use super::*;
     use crate::config::DEVICE_IDENTIFIER;
-    use crate::router::{EndpointHandler, RouterMode};
+    use crate::router::EndpointHandler;
     use crate::router::{Router, RouterConfig};
     use crate::tests::timeout_tests::StepClock;
     use crate::{DataType, TelemetryError, MAX_VALUE_DATA_TYPE};
@@ -710,11 +700,7 @@ mod handler_failure_tests {
 
         let box_clock = StepClock::new_default_box();
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![failing, capturing]),
-            box_clock,
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![failing, capturing]), box_clock);
 
         let pkt = Packet::new(
             ty,
@@ -775,11 +761,7 @@ mod handler_failure_tests {
             |_bytes: &[u8]| -> crate::TelemetryResult<()> { Err(TelemetryError::Io("boom")) };
         let box_clock = StepClock::new_default_box();
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![capturing]),
-            box_clock,
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![capturing]), box_clock);
         router.add_side_serialized("tx", tx_fail);
 
         let pkt = Packet::new(
@@ -820,7 +802,7 @@ mod timeout_tests {
     //! including u64 wraparound handling.
 
     use crate::config::DataEndpoint;
-    use crate::router::{EndpointHandler, RouterMode};
+    use crate::router::EndpointHandler;
     use crate::tests::{get_handler, UnixClock};
     use crate::{
         packet::Packet, router::Clock, router::Router, router::RouterConfig, DataType,
@@ -905,11 +887,7 @@ mod timeout_tests {
 
         let box_clock = StepClock::new_default_box();
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            box_clock,
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), box_clock);
         r.add_side_serialized("tx", tx);
 
         // Enqueue TX (3) – make each payload slightly different to avoid dedup.
@@ -954,7 +932,6 @@ mod timeout_tests {
         // Use a real-time clock; current implementation may process more than one
         // iteration in a single call depending on timing.
         let r = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![handler]),
             Box::new(|| UnixClock.now_ms()),
         );
@@ -1015,7 +992,7 @@ mod timeout_tests {
         let handler = get_handler(rx_count_c);
         let clock = StepClock::new_box(0, 5);
 
-        let r = Router::new_with_clock(RouterMode::Sink, RouterConfig::new(vec![handler]), clock);
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), clock);
         r.add_side_serialized("tx", tx);
 
         // Seed work in both queues – make each item unique to avoid dedup.
@@ -1068,7 +1045,7 @@ mod timeout_tests {
         let handler = get_handler(rx_count_c);
         let start = u64::MAX - 1;
         let clock = StepClock::new_box(start, 2);
-        let r = Router::new_with_clock(RouterMode::Sink, RouterConfig::new(vec![handler]), clock);
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), clock);
         r.add_side_serialized("tx", tx);
 
         // One TX and one RX (RX is only-local to avoid creating extra TX on receive)
@@ -1112,7 +1089,6 @@ mod timeout_tests {
         let seen_remote_c = seen_remote.clone();
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::Radio,
                 |_pkt| Ok(()),
@@ -1162,7 +1138,6 @@ mod tests_extra {
     //! These are white-box tests that exercise public APIs (and some
     //! indirect behavior) to avoid changing visibility in core modules.
     use crate::config::DataEndpoint;
-    use crate::router::RouterMode;
     use crate::tests::test_payload_len_for;
     use crate::{
         config::DataType, packet::Packet, router::{Clock, EndpointHandler, Router, RouterConfig},
@@ -1555,11 +1530,7 @@ mod tests_extra {
                 Ok(())
             });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         r.add_side_serialized("tx", tx);
 
         // Enqueue one TX and one RX
@@ -1618,11 +1589,7 @@ mod tests_extra {
             });
 
         // Router with no TX (we only care about local handler invocation count).
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![failing]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![failing]), zero_clock());
 
         // Build a valid packet addressed to the failing endpoint.
         let pkt = Packet::from_f32_slice(
@@ -1726,11 +1693,7 @@ mod tests_extra {
                 Ok(())
             });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![capturing]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![capturing]), zero_clock());
         r.add_side_serialized("tx", failing_tx);
 
         // Include both a local and a non-local endpoint to force remote TX.
@@ -1766,7 +1729,6 @@ mod tests_more {
     //! These tests complement `tests_extra` by covering boundary,
     //! error, and fast-path behaviors not previously exercised.
     use crate::config::get_message_meta;
-    use crate::router::RouterMode;
     use crate::tests::UnixClock;
     use crate::{
         config::{DataEndpoint, DataType}, get_data_type, get_needed_message_size, message_meta,
@@ -1906,11 +1868,7 @@ mod tests_more {
                 Ok(())
             });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         r.rx_serialized(&wire).unwrap();
         assert_eq!(called.load(Ordering::SeqCst), 1);
     }
@@ -1943,7 +1901,6 @@ mod tests_more {
             });
 
         let r = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![packet_h, serialized_h]),
             zero_clock(),
         );
@@ -1973,11 +1930,7 @@ mod tests_more {
                 Ok(())
             });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         r.add_side_serialized("tx", tx);
         let pkt = Packet::from_f32_slice(
             DataType::GpsData,
@@ -2003,11 +1956,7 @@ mod tests_more {
             Ok(())
         });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         let pkt = Packet::from_f32_slice(
             DataType::GpsData,
             &[0.5, 0.5, 0.5],
@@ -2039,11 +1988,7 @@ mod tests_more {
             Ok(())
         });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         r.add_side_serialized("tx", failing_tx);
         let pkt = Packet::from_f32_slice(
             DataType::GpsData,
@@ -2193,7 +2138,6 @@ mod tests_more {
         });
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![handler]),
             Box::new(|| UnixClock.now_ms()),
         );
@@ -2236,7 +2180,6 @@ mod concurrency_tests {
     //! Concurrency-focused tests that exercise Router’s thread-safety
     //! guarantees for logging, receiving, and processing.
 
-    use crate::router::RouterMode;
     use crate::{
         config::{DataEndpoint, DataType},
         packet::Packet,
@@ -2286,11 +2229,7 @@ mod concurrency_tests {
                 Ok(())
             });
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         let r = Arc::new(router);
 
         let mut threads_vec = Vec::new();
@@ -2344,7 +2283,6 @@ mod concurrency_tests {
             });
 
         let router = Arc::new(Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![handler]),
             zero_clock(),
         ));
@@ -2414,7 +2352,6 @@ mod concurrency_tests {
         let tx_c1 = tx_count.clone();
 
         let router = Arc::new(Router::new_with_clock(
-            RouterMode::Relay,
             RouterConfig::new(vec![local]),
             zero_clock(),
         ));
@@ -2520,7 +2457,6 @@ mod concurrency_tests {
         });
 
         let router = Arc::new(Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![h1, h2]),
             zero_clock(),
         ));
@@ -2582,11 +2518,7 @@ mod concurrency_tests {
                 Ok(())
             });
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         let r = Arc::new(router);
 
         let mut threads_vec = Vec::new();
@@ -2654,11 +2586,7 @@ mod concurrency_tests {
             });
 
         // Shared router: TX + one local endpoint.
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         router.add_side_serialized("tx", tx);
         let r = Arc::new(router);
 
@@ -2723,11 +2651,7 @@ mod concurrency_tests {
                 Ok(())
             });
 
-        let router = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let router = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
         router.add_side_serialized("tx", tx);
         let r = Arc::new(router);
 
@@ -3133,7 +3057,7 @@ mod dedupe_tests {
 
     use crate::config::{DataEndpoint, DataType};
     use crate::relay::Relay;
-    use crate::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
+    use crate::router::{Clock, EndpointHandler, Router, RouterConfig};
     use crate::tests::timeout_tests::StepClock;
     use crate::{packet::Packet, serialize, TelemetryResult};
 
@@ -3174,11 +3098,7 @@ mod dedupe_tests {
             });
 
         // Router with no TX; only RX + local fan-out.
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
 
         // Build a single wire frame we will reuse.
         let pkt = Packet::from_f32_slice(
@@ -3217,7 +3137,7 @@ mod dedupe_tests {
 
         // Step clock that advances every time we look at it.
         let clock = StepClock::new_box(0, 1_000);
-        let r = Router::new_with_clock(RouterMode::Sink, RouterConfig::new(vec![handler]), clock);
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), clock);
 
         let pkt = Packet::from_f32_slice(
             DataType::GpsData,
@@ -3253,11 +3173,7 @@ mod dedupe_tests {
                 Ok(())
             });
 
-        let r = Router::new_with_clock(
-            RouterMode::Sink,
-            RouterConfig::new(vec![handler]),
-            zero_clock(),
-        );
+        let r = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
 
         // Frame A
         let pkt_a = Packet::from_f32_slice(
@@ -3780,9 +3696,7 @@ mod relay_reliable_tests {
 #[cfg(test)]
 mod reliable_tests {
     use crate::config::{DataEndpoint, DataType};
-    use crate::router::{
-        Clock, EndpointHandler, Router, RouterConfig, RouterMode, RouterSideOptions,
-    };
+    use crate::router::{Clock, EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use crate::tests::timeout_tests::StepClock;
     use crate::{packet::Packet, serialize, TelemetryResult};
 
@@ -3804,13 +3718,11 @@ mod reliable_tests {
             });
 
         let sender = Arc::new(Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(Vec::new()).with_reliable_enabled(true),
             StepClock::new_box(0, 250),
         ));
 
         let receiver = Arc::new(Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![handler]).with_reliable_enabled(true),
             zero_clock(),
         ));
@@ -3896,7 +3808,6 @@ mod reliable_tests {
         );
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![handler]).with_reliable_enabled(true),
             zero_clock(),
         );
@@ -3962,7 +3873,6 @@ mod reliable_tests {
         let sent_c = sent.clone();
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(Vec::new()).with_reliable_enabled(true),
             zero_clock(),
         );
@@ -4025,7 +3935,6 @@ mod reliable_tests {
         };
 
         let receiver = Arc::new(Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![handler]).with_reliable_enabled(false),
             zero_clock(),
         ));
@@ -4038,7 +3947,6 @@ mod reliable_tests {
         };
 
         let sender = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(Vec::new()).with_reliable_enabled(false),
             zero_clock(),
         );
@@ -4067,7 +3975,7 @@ mod router_tests {
 
     use crate::config::{DataEndpoint, DataType};
     use crate::packet::Packet;
-    use crate::router::{EndpointHandler, Router, RouterConfig, RouterMode};
+    use crate::router::{EndpointHandler, Router, RouterConfig};
     use crate::tests::timeout_tests::StepClock;
     use crate::{serialize, TelemetryResult};
     use std::sync::{Arc, Mutex};
@@ -4086,9 +3994,8 @@ mod router_tests {
         let _ = EndpointHandler::new_packet_handler(DataEndpoint::TimeSync, |_pkt| Ok(()));
     }
 
-    /// In `Relay` mode, receiving a packet that includes at least one
-    /// non-local endpoint should cause the router to re-transmit (re-broadcast)
-    /// the packet.
+    /// Receiving a packet that includes at least one non-local endpoint should
+    /// cause the router to forward it by default.
     #[test]
     fn relay_mode_retransmits_when_remote_endpoint_present() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4108,7 +4015,6 @@ mod router_tests {
         });
 
         let router = Router::new_with_clock(
-            RouterMode::Relay,
             RouterConfig::new(vec![sd_handler]),
             StepClock::new_default_box(),
         );
@@ -4123,13 +4029,13 @@ mod router_tests {
 
         // Local handler should fire once.
         assert_eq!(local_calls.load(Ordering::SeqCst), 1);
-        // Relay should transmit at least once.
+        // Default routing should transmit once.
         assert_eq!(TX_CALLS.load(Ordering::SeqCst), 1);
     }
 
-    /// In `Sink` mode, receiving a packet should never re-transmit.
+    /// Explicit route disables should suppress remote forwarding.
     #[test]
-    fn sink_mode_never_retransmits_on_receive() {
+    fn disabled_route_prevents_retransmit_on_receive() {
         use crate::router::RouterConfig;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4141,14 +4047,14 @@ mod router_tests {
         }
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                 DataEndpoint::SdCard,
                 |_pkt| Ok(()),
             )]),
             StepClock::new_default_box(),
         );
-        router.add_side_serialized("tx", transmit);
+        let side = router.add_side_serialized("tx", transmit);
+        router.set_route(None, side, false).unwrap();
 
         let endpoints = &[DataEndpoint::SdCard, DataEndpoint::Radio];
         let pkt =
@@ -4174,7 +4080,6 @@ mod router_tests {
         });
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![sd_handler]),
             StepClock::new_default_box(),
         );
@@ -4204,7 +4109,6 @@ mod router_tests {
         });
 
         let router = Router::new_with_clock(
-            RouterMode::Sink,
             RouterConfig::new(vec![sd_handler]),
             StepClock::new_default_box(),
         );
@@ -4228,12 +4132,9 @@ mod router_tests {
         use crate::relay::Relay;
         use crate::router::{Clock, EndpointHandler, RouterConfig};
         use crate::tests::timeout_tests::StepClock;
-        use crate::{
-            packet::Packet,
-            router::{Router, RouterMode},
-        };
+        use crate::{packet::Packet, router::Router};
         use crate::{DataEndpoint, DataType, RouteSelectionMode, TelemetryError, TelemetryResult};
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
 
         fn zero_clock() -> Box<dyn Clock + Send + Sync> {
@@ -4280,8 +4181,7 @@ mod router_tests {
             let seen_a_c = seen_a.clone();
             let seen_b_c = seen_b.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -4294,6 +4194,8 @@ mod router_tests {
             let discovery_pkt =
                 build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
             router.rx_from_side(&discovery_pkt, side_a).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
 
             let msg = Packet::from_f32_slice(
                 DataType::GpsData,
@@ -4312,12 +4214,79 @@ mod router_tests {
         }
 
         #[test]
+        fn end_to_end_pending_destinations_clear_when_discovered_holder_expires() {
+            use std::sync::Arc;
+
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let clock = Box::new(SharedClock {
+                now_ms: now_ms.clone(),
+            });
+            let router = Router::new_with_clock(RouterConfig::default().with_sender("SRC"), clock);
+            let side = router.add_side_serialized_with_options(
+                "link",
+                |_bytes| Ok(()),
+                crate::router::RouterSideOptions {
+                    reliable_enabled: true,
+                    link_local_enabled: false,
+                    ..crate::router::RouterSideOptions::default()
+                },
+            );
+
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_A", 0, &[DataEndpoint::Radio]).unwrap(),
+                    side,
+                )
+                .unwrap();
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_B", 0, &[DataEndpoint::Radio]).unwrap(),
+                    side,
+                )
+                .unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::GpsData,
+                &[11.0, 0.0, 0.0],
+                &[DataEndpoint::Radio],
+                11,
+            )
+            .unwrap();
+            let packet_id = pkt.packet_id();
+            router.tx(pkt).unwrap();
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                Some(2)
+            );
+
+            let ack = Packet::new(
+                DataType::ReliableAck,
+                crate::message_meta(DataType::ReliableAck).endpoints,
+                "E2EACK:DEST_A",
+                0,
+                Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
+            )
+            .unwrap();
+            router.rx_from_side(&ack, side).unwrap();
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                Some(1)
+            );
+
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+            router.periodic_no_timesync(0).unwrap();
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                None
+            );
+        }
+
+        #[test]
         fn queued_serialized_discovery_learns_routes_for_locally_handled_endpoints() {
             let seen_remote: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
             let seen_remote_c = seen_remote.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::Radio,
                     |_pkt| Ok(()),
@@ -4363,7 +4332,6 @@ mod router_tests {
         #[test]
         fn queued_packet_discovery_updates_route_table_after_full_queue_drain() {
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::SdCard,
                     |_pkt| Ok(()),
@@ -4400,7 +4368,6 @@ mod router_tests {
         fn queued_serialized_discovery_timesync_sources_update_route_table_after_full_queue_drain()
         {
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::SdCard,
                     |_pkt| Ok(()),
@@ -4450,7 +4417,6 @@ mod router_tests {
             let seen_remote_c = seen_remote.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::Radio,
                     |_pkt| Ok(()),
@@ -4779,7 +4745,6 @@ mod router_tests {
         #[test]
         fn router_exports_topology_and_adaptive_discovery_schedule() {
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::Radio,
                     |_pkt| Ok(()),
@@ -4819,8 +4784,7 @@ mod router_tests {
             let seen_a_c = seen_a.clone();
             let seen_b_c = seen_b.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -4859,7 +4823,6 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::Radio,
                     |_pkt| Ok(()),
@@ -4907,8 +4870,7 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
             let seen_c_c = seen_c.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -4982,8 +4944,7 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
             let seen_c_c = seen_c.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -5045,8 +5006,7 @@ mod router_tests {
             let seen_a_c = seen_a.clone();
             let seen_b_c = seen_b.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -5083,8 +5043,7 @@ mod router_tests {
             let seen_a_c = seen_a.clone();
             let seen_b_c = seen_b.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -5111,8 +5070,15 @@ mod router_tests {
 
             for seq in 0..6 {
                 let pkt = Packet::from_f32_slice(
-                    DataType::GpsData,
-                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    DataType::ImuData,
+                    &[
+                        seq as f32,
+                        seq as f32 + 1.0,
+                        seq as f32 + 2.0,
+                        seq as f32 + 3.0,
+                        seq as f32 + 4.0,
+                        seq as f32 + 5.0,
+                    ],
                     &[DataEndpoint::Radio],
                     seq as u64,
                 )
@@ -5125,6 +5091,87 @@ mod router_tests {
         }
 
         #[test]
+        fn router_discovery_defaults_to_adaptive_load_balancing() {
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let armed = Arc::new(AtomicBool::new(false));
+            let seen_a = Arc::new(AtomicUsize::new(0));
+            let seen_b = Arc::new(AtomicUsize::new(0));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let now_a = now_ms.clone();
+            let now_b = now_ms.clone();
+            let armed_b = armed.clone();
+
+            let router = Router::new_with_clock(
+                RouterConfig::default(),
+                Box::new(SharedClock {
+                    now_ms: now_ms.clone(),
+                }),
+            );
+            let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                if pkt.data_type() == DataType::ImuData {
+                    seen_a_c.fetch_add(1, Ordering::SeqCst);
+                }
+                now_a.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                if pkt.data_type() == DataType::ImuData {
+                    seen_b_c.fetch_add(1, Ordering::SeqCst);
+                }
+                let delay_ms =
+                    if armed_b.load(Ordering::SeqCst) && pkt.data_type() == DataType::ImuData {
+                        4
+                    } else {
+                        1
+                    };
+                now_b.fetch_add(delay_ms, Ordering::SeqCst);
+                Ok(())
+            });
+            router.set_side_egress_enabled(side_a, false).unwrap();
+            router.set_side_egress_enabled(side_b, false).unwrap();
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+            router.rx_from_side(&discovery_a, side_a).unwrap();
+            router.rx_from_side(&discovery_b, side_b).unwrap();
+            router.set_side_egress_enabled(side_a, true).unwrap();
+            router.set_side_egress_enabled(side_b, true).unwrap();
+            seen_a.store(0, Ordering::SeqCst);
+            seen_b.store(0, Ordering::SeqCst);
+            armed.store(true, Ordering::SeqCst);
+
+            for seq in 0..24 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::ImuData,
+                    &[
+                        seq as f32,
+                        seq as f32 + 1.0,
+                        seq as f32 + 2.0,
+                        seq as f32 + 3.0,
+                        seq as f32 + 4.0,
+                        seq as f32 + 5.0,
+                    ],
+                    &[DataEndpoint::Radio],
+                    seq as u64,
+                )
+                .unwrap();
+                router.tx(pkt).unwrap();
+            }
+
+            let a = seen_a.load(Ordering::SeqCst);
+            let b = seen_b.load(Ordering::SeqCst);
+            assert_eq!(a + b, 24);
+            assert!(
+                a > b,
+                "expected faster side to receive more traffic: a={a}, b={b}"
+            );
+            assert!(b > 0, "expected adaptive balancing instead of failover");
+        }
+
+        #[test]
         fn router_failover_route_mode_switches_when_preferred_path_expires() {
             let now_ms = Arc::new(AtomicU64::new(0));
             let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5133,7 +5180,6 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default(),
                 Box::new(SharedClock {
                     now_ms: now_ms.clone(),
@@ -5201,7 +5247,6 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default(),
                 Box::new(SharedClock {
                     now_ms: now_ms.clone(),
@@ -5271,8 +5316,7 @@ mod router_tests {
             let seen_a_c = seen_a.clone();
             let seen_b_c = seen_b.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -5586,8 +5630,7 @@ mod router_tests {
 
         #[test]
         fn router_can_disable_ingress_for_a_side() {
-            let router =
-                Router::new_with_clock(RouterMode::Relay, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side =
                 router.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
             router.set_side_ingress_enabled(side, false).unwrap();
@@ -5615,7 +5658,6 @@ mod router_tests {
             let seen_c = seen.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig {
                     role: crate::timesync::TimeSyncRole::Source,
                     ..Default::default()
@@ -5647,7 +5689,6 @@ mod router_tests {
             let seen_c = seen.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig {
                     role: crate::timesync::TimeSyncRole::Source,
                     ..Default::default()
@@ -5679,7 +5720,6 @@ mod router_tests {
             let seen_c = seen.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig {
                     role: crate::timesync::TimeSyncRole::Consumer,
                     ..Default::default()
@@ -5700,9 +5740,16 @@ mod router_tests {
             router.process_tx_queue().unwrap();
 
             let pkts = seen.lock().unwrap().clone();
-            assert_eq!(pkts.len(), 2);
-            assert_eq!(pkts[0].data_type(), DataType::TimeSyncRequest);
-            assert_eq!(pkts[1].data_type(), DataType::GpsData);
+            assert!(pkts.len() >= 2);
+            let gps_idx = pkts
+                .iter()
+                .position(|pkt| pkt.data_type() == DataType::GpsData)
+                .expect("expected queued GPS packet");
+            let request_idx = pkts
+                .iter()
+                .position(|pkt| pkt.data_type() == DataType::TimeSyncRequest)
+                .expect("expected queued time-sync request");
+            assert!(request_idx < gps_idx);
         }
 
         #[cfg(feature = "discovery")]
@@ -5712,7 +5759,6 @@ mod router_tests {
             let seen_c = seen.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::Radio,
                     |_pkt| Ok(()),
@@ -5743,8 +5789,7 @@ mod router_tests {
             let seen_a_c = seen_a.clone();
             let seen_b_c = seen_b.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a = router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_a_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -5760,6 +5805,8 @@ mod router_tests {
             let discovery_pkt =
                 build_discovery_announce("REMOTE_B", 0, &[DataEndpoint::Radio]).unwrap();
             router.rx_from_side(&discovery_pkt, side_b).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
 
             let msg = Packet::from_f32_slice(
                 DataType::GpsData,
@@ -5832,6 +5879,47 @@ mod router_tests {
         }
 
         #[test]
+        fn relay_end_to_end_acked_holders_clear_when_discovered_holder_expires() {
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let relay = Relay::new(Box::new(SharedClock {
+                now_ms: now_ms.clone(),
+            }));
+            let side =
+                relay.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            relay
+                .rx_from_side(
+                    side,
+                    build_discovery_announce("DEST_A", 0, &[DataEndpoint::Radio]).unwrap(),
+                )
+                .unwrap();
+            relay.process_all_queues().unwrap();
+
+            let packet_id = 77u64;
+            let ack = Packet::new(
+                DataType::ReliableAck,
+                crate::message_meta(DataType::ReliableAck).endpoints,
+                "E2EACK:DEST_A",
+                0,
+                Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
+            )
+            .unwrap();
+            relay.rx_from_side(side, ack).unwrap();
+            relay.process_all_queues().unwrap();
+            assert_eq!(
+                relay.debug_end_to_end_acked_destination_count(packet_id),
+                Some(1)
+            );
+
+            now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
+            relay.periodic(0).unwrap();
+            assert_eq!(
+                relay.debug_end_to_end_acked_destination_count(packet_id),
+                None
+            );
+        }
+
+        #[test]
         fn link_local_only_packets_stay_on_software_bus_sides() {
             let Some(software_bus) = endpoint_by_name("SOFTWARE_BUS") else {
                 return;
@@ -5844,8 +5932,7 @@ mod router_tests {
             let seen_net_c = seen_net.clone();
             let seen_ll_c = seen_ll.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             router.add_side_packet("NET", move |pkt: &Packet| -> TelemetryResult<()> {
                 seen_net_c.lock().unwrap().push(pkt.clone());
                 Ok(())
@@ -5890,8 +5977,7 @@ mod router_tests {
             let seen_net_c = seen_net.clone();
             let seen_ll_c = seen_ll.clone();
 
-            let router =
-                Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_net =
                 router.add_side_packet("NET", move |pkt: &Packet| -> TelemetryResult<()> {
                     seen_net_c.lock().unwrap().push(pkt.clone());
@@ -5914,6 +6000,8 @@ mod router_tests {
             router.rx_from_side(&pkt_net, side_net).unwrap();
             let pkt_ll = build_discovery_announce("LL_NODE", 0, &[software_bus]).unwrap();
             router.rx_from_side(&pkt_ll, side_ll).unwrap();
+            seen_net.lock().unwrap().clear();
+            seen_ll.lock().unwrap().clear();
 
             let pkt = Packet::new(
                 ipc_message,
@@ -5997,7 +6085,6 @@ mod router_tests {
             let seen_ll_c = seen_ll.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::new(vec![
                     EndpointHandler::new_packet_handler(software_bus, |_pkt| Ok(())),
                     EndpointHandler::new_packet_handler(DataEndpoint::Radio, |_pkt| Ok(())),
@@ -6042,7 +6129,6 @@ mod router_tests {
             let seen_c = seen.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig::default()),
                 zero_clock(),
             );
@@ -6072,7 +6158,6 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig::default()),
                 zero_clock(),
             );
@@ -6088,6 +6173,8 @@ mod router_tests {
             let discovery_pkt =
                 build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::TimeSync]).unwrap();
             router.rx_from_side(&discovery_pkt, side_a).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
 
             let request = crate::timesync::build_timesync_request(1, 123).unwrap();
             router.tx(request).unwrap();
@@ -6107,7 +6194,6 @@ mod router_tests {
             let seen_c = seen.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig {
                     role: crate::timesync::TimeSyncRole::Source,
                     ..Default::default()
@@ -6140,7 +6226,6 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig::default()),
                 zero_clock(),
             );
@@ -6159,10 +6244,14 @@ mod router_tests {
             let exact_source =
                 build_discovery_timesync_sources("SIDE_B", 0, &["SRC_BEST"]).unwrap();
             router.rx_from_side(&exact_source, side_b).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
 
             let source_announce =
                 crate::timesync::build_timesync_announce_with_sender("SRC_BEST", 1, 1000).unwrap();
             router.rx(&source_announce).unwrap();
+            seen_a.lock().unwrap().clear();
+            seen_b.lock().unwrap().clear();
 
             let request = crate::timesync::build_timesync_request(1, 123).unwrap();
             router.tx(request).unwrap();
@@ -6184,7 +6273,6 @@ mod router_tests {
             let seen_b_c = seen_b.clone();
 
             let router = Router::new_with_clock(
-                RouterMode::Sink,
                 RouterConfig::default().with_timesync(crate::timesync::TimeSyncConfig {
                     role: crate::timesync::TimeSyncRole::Source,
                     ..Default::default()

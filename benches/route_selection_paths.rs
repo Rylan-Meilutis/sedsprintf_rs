@@ -4,7 +4,7 @@ use sedsprintf_rs::TelemetryResult;
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
-use sedsprintf_rs::router::{Clock, Router, RouterConfig, RouterMode};
+use sedsprintf_rs::router::{Clock, Router, RouterConfig};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -28,7 +28,7 @@ fn benchmark_route_selection_paths(c: &mut Criterion) {
 
     let weighted_hits_a = Arc::new(AtomicUsize::new(0));
     let weighted_hits_b = Arc::new(AtomicUsize::new(0));
-    let router = Router::new_with_clock(RouterMode::Sink, RouterConfig::default(), zero_clock());
+    let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
     let side_a = {
         let weighted_hits_a = weighted_hits_a.clone();
         router.add_side_packet("A", move |_pkt| -> TelemetryResult<()> {

@@ -1,5 +1,38 @@
 # Changelogs
 
+## Version 3.11.0 highlights
+
+- Router model cleanup:
+    - Removed `RouterMode` from the active router API and forwarding logic.
+    - Routers now use the same runtime route-rule model as relays.
+    - With no explicit route rules, routers default to a full forwarding mesh.
+- Discovery and path selection:
+    - Discovery-driven multi-path routing now defaults to adaptive load balancing for normal
+      traffic.
+    - Reliable traffic still fans out across all discovered candidates so a single weak path does
+      not suppress successful remote delivery.
+- End-to-end reliability:
+    - Reliable delivery is now end-to-end verified instead of stopping at per-link ACKs.
+    - Destination routers emit directed end-to-end acknowledgements after local delivery.
+    - Source routers keep reliable packets in flight until every currently discovered holder has
+      acknowledged.
+    - Routers and relays learn reliable return paths from ingress traffic and route those ACKs only
+      where needed instead of flooding unrelated sides.
+    - Retries are narrowed to only the holders that are still outstanding instead of replaying to
+      holders that already acknowledged.
+    - If discovery ages out a holder, that holder is removed from the in-flight obligation set so
+      the transaction completes instead of replaying forever toward a disappeared board.
+    - Relay-side learned holder-ACK state is also pruned against discovery expiry so stale
+      confirmations do not linger after topology changes.
+    - This still uses the non-blocking reliable send path introduced in `3.10.0`; waiting for
+      end-to-end ACKs does not stall newer reliable packets on that side/type lane.
+- Test and docs coverage:
+    - Added regression coverage for the new routing defaults, sink-style route disabling, adaptive
+      discovery balancing, and end-to-end reliable acknowledgement loss/retry behavior, including a
+      multi-holder system test plus holder-expiry cleanup unit coverage for both routers and relays.
+    - Added dedicated testing documentation covering unit tests, Rust system tests, C system
+      tests, and local coverage reporting with `cargo llvm-cov`.
+
 ## Version 3.10.0 highlights
 
 - Reliable delivery in both `Router` and `Relay` now uses built-in internal

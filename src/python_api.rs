@@ -22,7 +22,7 @@
 //!   - `make_packet(...)` → `Packet`
 //!
 //! - Dynamic enums
-//!   - `DataType`, `DataEndpoint`, `ElemKind`, `RouterMode`
+//!   - `DataType`, `DataEndpoint`, `ElemKind`
 //!
 //! The Python module name is `sedsprintf_rs`.
 
@@ -36,9 +36,7 @@ use std::sync::{Arc as SArc, Mutex, OnceLock};
 use crate::timesync::TimeSyncConfig;
 use crate::{
     config::{DataEndpoint, DataType}, get_message_name, get_needed_message_size, message_meta,
-    packet::Packet, relay::{Relay, RelaySideOptions}, router::{
-        Clock, EndpointHandler, LeBytes, Router, RouterConfig, RouterMode, RouterSideOptions,
-    },
+    packet::Packet, relay::{Relay, RelaySideOptions}, router::{Clock, EndpointHandler, LeBytes, Router, RouterConfig, RouterSideOptions},
     serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet},
     try_enum_from_i32, try_enum_from_u32, MessageElement,
     RouteSelectionMode,
@@ -96,14 +94,6 @@ fn endpoint_from_u32(x: u32) -> TelemetryResult<DataEndpoint> {
     DataEndpoint::try_from_u32(x).ok_or(TelemetryError::Deserialize("bad endpoint"))
 }
 
-fn router_mode_from_u32(mode: u32) -> PyResult<RouterMode> {
-    match mode {
-        0 => Ok(RouterMode::Sink),
-        1 => Ok(RouterMode::Relay),
-        _ => Err(PyValueError::new_err("mode must be 0 (Sink) or 1 (Relay)")),
-    }
-}
-
 fn build_router_config(handlers: Vec<EndpointHandler>, timesync_enabled: bool) -> RouterConfig {
     let cfg = RouterConfig::new(handlers);
     #[cfg(feature = "timesync")]
@@ -117,20 +107,18 @@ fn build_router_config(handlers: Vec<EndpointHandler>, timesync_enabled: bool) -
 
 fn build_router_with_optional_clock(
     py: Python<'_>,
-    mode: RouterMode,
     cfg: RouterConfig,
     now_keep: Option<&Py<PyAny>>,
 ) -> Router {
     if let Some(cb) = now_keep {
         Router::new_with_clock(
-            mode,
             cfg,
             Box::new(PyClock {
                 cb: Some(cb.clone_ref(py)),
             }),
         )
     } else {
-        Router::new(mode, cfg)
+        Router::new(cfg)
     }
 }
 
@@ -448,12 +436,11 @@ impl PyRouter {
 
     /// Create or retrieve a per-process singleton Router.
     #[staticmethod]
-    #[pyo3(signature = (now_ms=None, handlers=None, mode = 0, timesync_enabled = true))]
+    #[pyo3(signature = (now_ms=None, handlers=None, timesync_enabled = true))]
     fn new_singleton(
         py: Python<'_>,
         now_ms: Option<Py<PyAny>>,
         handlers: Option<&Bound<'_, PyAny>>,
-        mode: u32,
         timesync_enabled: bool,
     ) -> PyResult<Self> {
         if let Some(existing) = GLOBAL_ROUTER_SINGLETON.get() {
@@ -476,8 +463,7 @@ impl PyRouter {
 
         let (handlers_vec, keep_pkt, keep_ser) = build_endpoint_handlers(py, handlers)?;
         let cfg = build_router_config(handlers_vec, timesync_enabled);
-        let mode = router_mode_from_u32(mode)?;
-        let router = build_router_with_optional_clock(py, mode, cfg, now_keep.as_ref());
+        let router = build_router_with_optional_clock(py, cfg, now_keep.as_ref());
         let arc = SArc::new(Mutex::new(router));
 
         GLOBAL_ROUTER_SINGLETON
@@ -494,21 +480,18 @@ impl PyRouter {
 
     /// Create a new router.
     #[new]
-    #[pyo3(signature = (now_ms=None, handlers=None, mode=RouterMode::Relay as u32, timesync_enabled=true)
-    )]
+    #[pyo3(signature = (now_ms=None, handlers=None, timesync_enabled=true))]
     fn new(
         py: Python<'_>,
         now_ms: Option<Py<PyAny>>,
         handlers: Option<&Bound<'_, PyAny>>,
-        mode: u32,
         timesync_enabled: bool,
     ) -> PyResult<Self> {
         let now_keep = now_ms.as_ref().map(|p| p.clone_ref(py));
 
         let (handlers_vec, keep_pkt, keep_ser) = build_endpoint_handlers(py, handlers)?;
         let cfg = build_router_config(handlers_vec, timesync_enabled);
-        let mode = router_mode_from_u32(mode)?;
-        let router = build_router_with_optional_clock(py, mode, cfg, now_keep.as_ref());
+        let router = build_router_with_optional_clock(py, cfg, now_keep.as_ref());
 
         Ok(Self {
             inner: SArc::new(Mutex::new(router)),
@@ -1856,17 +1839,6 @@ pub fn sedsprintf_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         ek_dict.set_item("FLOAT", EK_FLOAT)?;
         let ek_enum = int_enum.call1(("ElemKind", ek_dict))?;
         m.add("ElemKind", ek_enum)?;
-    }
-
-    // ------------------ RouterMode ------------------
-    {
-        let rm_dict = PyDict::new(py);
-        rm_dict.set_item("__module__", &mod_name)?;
-        rm_dict.set_item("Relay", 1u32)?;
-        rm_dict.set_item("Sink", 0u32)?;
-
-        let rm_enum = int_enum.call1(("RouterMode", rm_dict))?;
-        m.add("RouterMode", rm_enum)?;
     }
 
     // ------------------ RouteSelectionMode ------------------
