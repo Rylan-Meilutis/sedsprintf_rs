@@ -1121,13 +1121,14 @@ mod timeout_tests {
                 now_ms: now_ms.clone(),
             }),
         );
-        let side_remote = router.add_side_packet("REMOTE", move |pkt: &Packet| -> TelemetryResult<()> {
-            tx_count_c.fetch_add(1, Ordering::SeqCst);
-            // Simulate a blocking transport send that consumes the whole timeout budget.
-            now_ms_c.store(2, Ordering::SeqCst);
-            seen_remote_c.lock().unwrap().push(pkt.clone());
-            Ok(())
-        });
+        let side_remote =
+            router.add_side_packet("REMOTE", move |pkt: &Packet| -> TelemetryResult<()> {
+                tx_count_c.fetch_add(1, Ordering::SeqCst);
+                // Simulate a blocking transport send that consumes the whole timeout budget.
+                now_ms_c.store(2, Ordering::SeqCst);
+                seen_remote_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
 
         router
             .log_queue(DataType::GpsData, &[1.0_f32, 2.0, 3.0])
@@ -1144,7 +1145,10 @@ mod timeout_tests {
         assert_eq!(tx_count.load(Ordering::SeqCst), 1);
         let topo = router.export_topology();
         assert_eq!(topo.routes.len(), 1);
-        assert_eq!(topo.routes[0].reachable_endpoints, vec![DataEndpoint::Radio]);
+        assert_eq!(
+            topo.routes[0].reachable_endpoints,
+            vec![DataEndpoint::Radio]
+        );
     }
 }
 
@@ -3715,6 +3719,62 @@ mod relay_reliable_tests {
             "out-of-order frames must be reordered"
         );
     }
+
+    #[test]
+    fn relay_reliable_sender_does_not_block_while_waiting_for_ack() {
+        let relay = Arc::new(Relay::new(zero_clock()));
+
+        relay.add_side_serialized_with_options(
+            "SRC",
+            |_b| Ok(()),
+            RelaySideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            },
+        );
+
+        let sent: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let sent_c = sent.clone();
+        relay.add_side_serialized_with_options(
+            "DST",
+            move |bytes: &[u8]| -> TelemetryResult<()> {
+                let frame = serialize::peek_frame_info(bytes)?;
+                if frame.envelope.ty == DataType::GpsData
+                    && let Some(hdr) = frame.reliable
+                {
+                    sent_c.lock().unwrap().push(hdr.seq);
+                }
+                Ok(())
+            },
+            RelaySideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            },
+        );
+
+        let pkt1 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0_f32, 2.0, 3.0],
+            &[DataEndpoint::SdCard],
+            0,
+        )
+        .unwrap();
+        let pkt2 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[4.0_f32, 5.0, 6.0],
+            &[DataEndpoint::SdCard],
+            1,
+        )
+        .unwrap();
+
+        relay.rx_from_side(0, pkt1).unwrap();
+        relay.rx_from_side(0, pkt2).unwrap();
+        relay.process_all_queues_with_timeout(0).unwrap();
+
+        assert_eq!(*sent.lock().unwrap(), vec![1, 2]);
+    }
 }
 
 #[cfg(test)]
@@ -3894,6 +3954,57 @@ mod reliable_tests {
             vec![1, 2],
             "ordered reliable delivery must reorder"
         );
+    }
+
+    #[test]
+    fn reliable_sender_does_not_block_while_waiting_for_ack() {
+        let sent: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let sent_c = sent.clone();
+
+        let router = Router::new_with_clock(
+            RouterMode::Sink,
+            RouterConfig::new(Vec::new()).with_reliable_enabled(true),
+            zero_clock(),
+        );
+
+        router.add_side_serialized_with_options(
+            "DST",
+            move |bytes: &[u8]| -> TelemetryResult<()> {
+                let frame = serialize::peek_frame_info(bytes)?;
+                if frame.envelope.ty == DataType::GpsData
+                    && let Some(hdr) = frame.reliable
+                {
+                    sent_c.lock().unwrap().push(hdr.seq);
+                }
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        let pkt1 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0_f32, 2.0, 3.0],
+            &[DataEndpoint::SdCard],
+            0,
+        )
+        .unwrap();
+        let pkt2 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[4.0_f32, 5.0, 6.0],
+            &[DataEndpoint::SdCard],
+            1,
+        )
+        .unwrap();
+
+        router.tx(pkt1).unwrap();
+        router.tx(pkt2).unwrap();
+        router.process_tx_queue_with_timeout(0).unwrap();
+
+        assert_eq!(*sent.lock().unwrap(), vec![1, 2]);
     }
 
     #[test]
@@ -4229,7 +4340,10 @@ mod router_tests {
 
             let topo = router.export_topology();
             assert_eq!(topo.routes.len(), 1);
-            assert_eq!(topo.routes[0].reachable_endpoints, vec![DataEndpoint::Radio]);
+            assert_eq!(
+                topo.routes[0].reachable_endpoints,
+                vec![DataEndpoint::Radio]
+            );
             assert_eq!(topo.advertised_endpoints, vec![DataEndpoint::Radio]);
 
             let msg = Packet::from_f32_slice(
@@ -4259,12 +4373,9 @@ mod router_tests {
             let side_fill =
                 router.add_side_packet("FILL", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
 
-            let discovery_pkt = build_discovery_announce(
-                "AB",
-                0,
-                &[DataEndpoint::Radio, DataEndpoint::TimeSync],
-            )
-            .unwrap();
+            let discovery_pkt =
+                build_discovery_announce("AB", 0, &[DataEndpoint::Radio, DataEndpoint::TimeSync])
+                    .unwrap();
             router.rx_queue_from_side(discovery_pkt, side_fill).unwrap();
             router.process_all_queues_with_timeout(0).unwrap();
 
@@ -4286,7 +4397,8 @@ mod router_tests {
         }
 
         #[test]
-        fn queued_serialized_discovery_timesync_sources_update_route_table_after_full_queue_drain() {
+        fn queued_serialized_discovery_timesync_sources_update_route_table_after_full_queue_drain()
+        {
             let router = Router::new_with_clock(
                 RouterMode::Sink,
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
@@ -4304,8 +4416,7 @@ mod router_tests {
                 .rx_serialized_queue_from_side(announce_bytes.as_ref(), side_fill)
                 .unwrap();
 
-            let sources =
-                build_discovery_timesync_sources("AB", 0, &["AB", "AB_BACKUP"]).unwrap();
+            let sources = build_discovery_timesync_sources("AB", 0, &["AB", "AB_BACKUP"]).unwrap();
             let source_bytes = crate::serialize::serialize_packet(&sources);
             router
                 .rx_serialized_queue_from_side(source_bytes.as_ref(), side_fill)
@@ -4316,7 +4427,10 @@ mod router_tests {
             let topo = router.export_topology();
             assert_eq!(topo.routes.len(), 1);
             assert_eq!(topo.routes[0].side_name, "FILL");
-            assert_eq!(topo.routes[0].reachable_endpoints, vec![DataEndpoint::Radio]);
+            assert_eq!(
+                topo.routes[0].reachable_endpoints,
+                vec![DataEndpoint::Radio]
+            );
             assert_eq!(
                 topo.routes[0].reachable_timesync_sources,
                 vec!["AB".to_string(), "AB_BACKUP".to_string()]
@@ -4328,8 +4442,8 @@ mod router_tests {
         }
 
         #[test]
-        fn queued_serialized_discovery_from_same_sender_is_ignored_and_local_endpoint_does_not_flood(
-        ) {
+        fn queued_serialized_discovery_from_same_sender_is_ignored_and_local_endpoint_does_not_flood()
+         {
             use crate::config::DEVICE_IDENTIFIER;
 
             let seen_remote: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));

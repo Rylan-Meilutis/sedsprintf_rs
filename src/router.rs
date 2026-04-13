@@ -98,6 +98,10 @@ enum RouterTxItem {
         dst: RouterSideId,
         data: RouterItem,
     },
+    ReliableReplay {
+        dst: RouterSideId,
+        bytes: Arc<[u8]>,
+    },
 }
 
 impl ByteCost for RouterRxItem {
@@ -122,6 +126,7 @@ impl ByteCost for RouterTxItem {
                 RouterItem::Packet(pkt) => pkt.byte_cost(),
                 RouterItem::Serialized(bytes) => size_of::<Arc<[u8]>>() + bytes.len(),
             },
+            RouterTxItem::ReliableReplay { bytes, .. } => size_of::<Arc<[u8]>>() + bytes.len(),
         }
     }
 }
@@ -159,28 +164,22 @@ impl ByteCost for u64 {
 #[derive(Debug, Clone)]
 struct ReliableTxState {
     next_seq: u32,
-    inflight: Option<ReliableInflight>,
-    pending: VecDeque<PendingReliable>,
+    sent_order: VecDeque<u32>,
+    sent: BTreeMap<u32, ReliableSent>,
 }
 
 #[derive(Debug, Clone)]
-struct ReliableInflight {
-    seq: u32,
+struct ReliableSent {
     bytes: Arc<[u8]>,
     last_send_ms: u64,
     retries: u32,
-}
-
-#[derive(Debug, Clone)]
-struct PendingReliable {
-    data: RouterItem,
-    side: RouterSideId,
+    queued: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ReliableRxState {
     expected_seq: u32,
-    last_ack: u32,
+    buffered: BTreeMap<u32, Arc<[u8]>>,
 }
 
 #[cfg(feature = "discovery")]
@@ -778,6 +777,10 @@ fn has_nonlocal_endpoint(eps: &[DataEndpoint], cfg: &RouterConfig) -> bool {
 
 #[inline]
 fn is_internal_control_type(ty: DataType) -> bool {
+    if matches!(ty, DataType::ReliableAck | DataType::ReliablePacketRequest) {
+        return true;
+    }
+
     #[cfg(feature = "timesync")]
     if matches!(
         ty,
@@ -985,6 +988,11 @@ impl Router {
             RouterItem::Serialized(bytes) => serialize::peek_envelope(bytes.as_ref())?.ty,
         };
         Ok(message_priority(ty))
+    }
+
+    #[inline]
+    fn router_item_priority_bumped(ty: DataType) -> u8 {
+        message_priority(ty).saturating_add(16)
     }
 
     #[cfg(feature = "timesync")]
@@ -1552,8 +1560,8 @@ impl Router {
             .entry(key)
             .or_insert_with(|| ReliableTxState {
                 next_seq: 1,
-                inflight: None,
-                pending: VecDeque::new(),
+                sent_order: VecDeque::new(),
+                sent: BTreeMap::new(),
             })
     }
 
@@ -1568,77 +1576,132 @@ impl Router {
             .entry(key)
             .or_insert_with(|| ReliableRxState {
                 expected_seq: 1,
-                last_ack: 0,
+                buffered: BTreeMap::new(),
             })
     }
 
-    fn reliable_ack_to_send(&self, st: &mut RouterInner, side: RouterSideId, ty: DataType) -> u32 {
-        let rx = self.reliable_rx_state_mut(st, side, ty);
-        rx.last_ack
+    fn reliable_control_packet(
+        &self,
+        control_ty: DataType,
+        ty: DataType,
+        seq: u32,
+    ) -> TelemetryResult<Packet> {
+        Packet::new(
+            control_ty,
+            message_meta(control_ty).endpoints,
+            self.sender,
+            self.packet_timestamp_ms(),
+            encode_slice_le(&[ty as u32, seq]),
+        )
     }
 
-    fn send_reliable_ack(&self, side: RouterSideId, ty: DataType, ack: u32) -> TelemetryResult<()> {
-        let (handler, opts) = {
-            let st = self.state.lock();
-            let side_ref = Self::side_ref(&st, side)?;
-            (side_ref.tx_handler.clone(), side_ref.opts)
-        };
+    fn queue_reliable_ack(
+        &self,
+        side: RouterSideId,
+        ty: DataType,
+        seq: u32,
+    ) -> TelemetryResult<()> {
+        let pkt = self.reliable_control_packet(DataType::ReliableAck, ty, seq)?;
+        self.tx_queue_item_with_priority(
+            RouterTxItem::ToSide {
+                src: None,
+                dst: side,
+                data: RouterItem::Packet(pkt),
+            },
+            true,
+            message_priority(DataType::ReliableAck),
+        )
+    }
 
-        if !opts.reliable_enabled {
-            return Ok(());
-        }
-
-        let RouterTxHandlerFn::Serialized(f) = handler else {
-            return Ok(());
-        };
-
-        let bytes =
-            serialize::serialize_reliable_ack(self.sender, ty, self.packet_timestamp_ms(), ack);
-        self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()))
-            .map_err(|_| TelemetryError::Io("reliable ack send failed"))?;
-        Ok(())
+    fn queue_reliable_packet_request(
+        &self,
+        side: RouterSideId,
+        ty: DataType,
+        seq: u32,
+    ) -> TelemetryResult<()> {
+        let pkt = self.reliable_control_packet(DataType::ReliablePacketRequest, ty, seq)?;
+        self.tx_queue_item_with_priority(
+            RouterTxItem::ToSide {
+                src: None,
+                dst: side,
+                data: RouterItem::Packet(pkt),
+            },
+            true,
+            message_priority(DataType::ReliablePacketRequest),
+        )
     }
 
     fn handle_reliable_ack(&self, side: RouterSideId, ty: DataType, ack: u32) {
-        let pending = {
-            let mut st = self.state.lock();
-            let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
-            if let Some(inflight) = tx_state.inflight.as_mut() {
-                if ack >= tx_state.next_seq {
-                    let next = ack.wrapping_add(1);
-                    tx_state.next_seq = if next == 0 { 1 } else { next };
-                }
-                if ack >= inflight.seq {
-                    tx_state.inflight = None;
-                    self.take_next_reliable(&mut st, side, ty)
-                } else if ack + 1 == inflight.seq {
-                    // NACK-like signal: requester is still waiting on inflight seq.
-                    inflight.last_send_ms = 0;
-                    None
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
+        let mut st = self.state.lock();
+        let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
+        if matches!(reliable_mode(ty), crate::ReliableMode::Unordered) {
+            tx_state.sent.remove(&ack);
+            tx_state.sent_order.retain(|seq| *seq != ack);
+            return;
+        }
 
-        if let Some(p) = pending {
-            let _ = self.send_reliable_to_side(p.side, p.data);
+        while let Some(seq) = tx_state.sent_order.front().copied() {
+            if seq > ack {
+                break;
+            }
+            tx_state.sent_order.pop_front();
+            tx_state.sent.remove(&seq);
         }
     }
 
-    fn take_next_reliable(
+    fn queue_reliable_retransmit(
         &self,
-        st: &mut RouterInner,
         side: RouterSideId,
         ty: DataType,
-    ) -> Option<PendingReliable> {
-        let tx_state = self.reliable_tx_state_mut(st, side, ty);
-        if tx_state.inflight.is_some() {
-            return None;
+        seq: u32,
+    ) -> TelemetryResult<()> {
+        let mut queued = None;
+        {
+            let mut st = self.state.lock();
+            let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
+            if let Some(sent) = tx_state.sent.get_mut(&seq)
+                && !sent.queued
+            {
+                sent.queued = true;
+                queued = Some(sent.bytes.clone());
+            }
         }
-        tx_state.pending.pop_front()
+
+        if let Some(bytes) = queued {
+            self.tx_queue_item_with_priority(
+                RouterTxItem::ReliableReplay { dst: side, bytes },
+                true,
+                Self::router_item_priority_bumped(ty),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn send_reliable_raw_to_side(
+        &self,
+        side: RouterSideId,
+        bytes: Arc<[u8]>,
+    ) -> TelemetryResult<()> {
+        let handler = {
+            let st = self.state.lock();
+            let side_ref = Self::side_ref(&st, side)?;
+            if !side_ref.opts.egress_enabled {
+                return Ok(());
+            }
+            side_ref.tx_handler.clone()
+        };
+
+        match handler {
+            RouterTxHandlerFn::Serialized(f) => self
+                .retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()))
+                .map_err(|_| TelemetryError::Io("reliable retransmit failed")),
+            RouterTxHandlerFn::Packet(f) => {
+                let pkt = serialize::deserialize_packet(bytes.as_ref())?;
+                self.retry(MAX_HANDLER_RETRIES, || f(&pkt))
+                    .map_err(|_| TelemetryError::Io("reliable retransmit failed"))
+            }
+        }
     }
 
     fn send_reliable_to_side(&self, side: RouterSideId, data: RouterItem) -> TelemetryResult<()> {
@@ -1673,37 +1736,32 @@ impl Router {
             return Ok(());
         }
 
-        let (seq, ack, flags) = {
+        let (seq, flags) = {
             let mut st = self.state.lock();
             let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
-            if tx_state.inflight.is_some() {
-                if tx_state.pending.len() >= RELIABLE_MAX_PENDING {
-                    return Err(TelemetryError::PacketTooLarge(
-                        "router reliable pending full",
-                    ));
-                }
-                tx_state.pending.push_back(PendingReliable { data, side });
-                return Ok(());
+            if tx_state.sent.len() >= RELIABLE_MAX_PENDING {
+                return Err(TelemetryError::PacketTooLarge(
+                    "router reliable history full",
+                ));
             }
             let seq = tx_state.next_seq;
             let next = tx_state.next_seq.wrapping_add(1);
             tx_state.next_seq = if next == 0 { 1 } else { next };
-            let ack = self.reliable_ack_to_send(&mut st, side, ty);
             let flags = match reliable_mode(ty) {
                 crate::ReliableMode::Unordered => serialize::RELIABLE_FLAG_UNORDERED,
                 _ => 0,
             };
-            (seq, ack, flags)
+            (seq, flags)
         };
 
         let bytes: Arc<[u8]> = match data {
             RouterItem::Packet(pkt) => serialize::serialize_packet_with_reliable(
                 &pkt,
-                serialize::ReliableHeader { flags, seq, ack },
+                serialize::ReliableHeader { flags, seq, ack: 0 },
             ),
             RouterItem::Serialized(bytes) => {
                 let mut v = bytes.to_vec();
-                if !serialize::rewrite_reliable_header(&mut v, flags, seq, ack)? {
+                if !serialize::rewrite_reliable_header(&mut v, flags, seq, 0)? {
                     return f(bytes.as_ref());
                 }
                 Arc::from(v)
@@ -1715,14 +1773,16 @@ impl Router {
         {
             let mut st = self.state.lock();
             let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
-            if tx_state.inflight.is_none() {
-                tx_state.inflight = Some(ReliableInflight {
-                    seq,
+            tx_state.sent_order.push_back(seq);
+            tx_state.sent.insert(
+                seq,
+                ReliableSent {
                     bytes: bytes.clone(),
                     last_send_ms: self.clock.now_ms(),
                     retries: 0,
-                });
-            }
+                    queued: false,
+                },
+            );
         }
 
         Ok(())
@@ -1770,7 +1830,7 @@ impl Router {
                         let _ = serialize::rewrite_reliable_header(
                             &mut v,
                             serialize::RELIABLE_FLAG_UNSEQUENCED,
-                            0,
+                            hdr.seq,
                             0,
                         )?;
                         return Ok(Some(RouterItem::Serialized(Arc::from(v))));
@@ -1783,65 +1843,40 @@ impl Router {
     }
 
     fn process_reliable_timeouts(&self) -> TelemetryResult<()> {
-        {
-            let st = self.state.lock();
-            if st.reliable_tx.is_empty() {
-                return Ok(());
-            }
-        }
-
         let now = self.clock.now_ms();
-        let mut resend: Vec<(RouterTxHandlerFn, Arc<[u8]>)> = Vec::new();
-        let mut to_send: Vec<PendingReliable> = Vec::new();
-        let mut cleared: Vec<(RouterSideId, u32)> = Vec::new();
+        let mut requeue: Vec<(RouterSideId, DataType, u32)> = Vec::new();
 
         {
             let mut st = self.state.lock();
-
-            // Snapshot handlers so we don't borrow st immutably while iterating reliable_tx mutably.
-            let handlers: Vec<Option<RouterTxHandlerFn>> = st
-                .sides
-                .iter()
-                .map(|side_ref| side_ref.as_ref().map(|side| side.tx_handler.clone()))
-                .collect();
+            if st.reliable_tx.is_empty() {
+                return Ok(());
+            }
 
             for ((side, ty_u32), tx_state) in st.reliable_tx.iter_mut() {
-                if let Some(inflight) = tx_state.inflight.as_mut()
-                    && now.wrapping_sub(inflight.last_send_ms) >= RELIABLE_RETRANSMIT_MS
-                {
-                    if inflight.retries >= RELIABLE_MAX_RETRIES {
-                        tx_state.inflight = None;
-                        cleared.push((*side, *ty_u32));
+                let Some(ty) = DataType::try_from_u32(*ty_u32) else {
+                    continue;
+                };
+                let sent_order: Vec<u32> = tx_state.sent_order.iter().copied().collect();
+                for seq in sent_order {
+                    let Some(sent) = tx_state.sent.get_mut(&seq) else {
+                        continue;
+                    };
+                    if sent.queued || now.wrapping_sub(sent.last_send_ms) < RELIABLE_RETRANSMIT_MS {
                         continue;
                     }
-
-                    inflight.retries += 1;
-                    inflight.last_send_ms = now;
-
-                    if let Some(Some(handler)) = handlers.get(*side) {
-                        resend.push((handler.clone(), inflight.bytes.clone()));
+                    if sent.retries >= RELIABLE_MAX_RETRIES {
+                        tx_state.sent.remove(&seq);
+                        tx_state.sent_order.retain(|existing| *existing != seq);
+                        continue;
                     }
-                }
-            }
-
-            for (side, ty_u32) in cleared.iter().copied() {
-                if let Some(ty) = DataType::try_from_u32(ty_u32)
-                    && let Some(p) = self.take_next_reliable(&mut st, side, ty)
-                {
-                    to_send.push(p);
+                    sent.retries += 1;
+                    requeue.push((*side, ty, seq));
                 }
             }
         }
 
-        for (handler, bytes) in resend {
-            if let RouterTxHandlerFn::Serialized(f) = handler {
-                self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()))
-                    .map_err(|_| TelemetryError::Io("reliable retransmit failed"))?;
-            }
-        }
-
-        for p in to_send {
-            let _ = self.send_reliable_to_side(p.side, p.data);
+        for (side, ty, seq) in requeue {
+            self.queue_reliable_retransmit(side, ty, seq)?;
         }
 
         Ok(())
@@ -2619,7 +2654,10 @@ impl Router {
             st.source_route_modes.remove(&Some(side));
             st.route_selection_cursors.remove(&Some(side));
             st.transmit_queue.retain(
-                |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
+                |queued| {
+                    !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side)
+                        && !matches!(&queued.item, RouterTxItem::ReliableReplay { dst, .. } if *dst == side)
+                },
             );
             st.received_queue.retain(|queued| queued.src != Some(side));
             st.reliable_tx.retain(|(side_id, _), _| *side_id != side);
@@ -2668,7 +2706,10 @@ impl Router {
         side_ref.opts.egress_enabled = enabled;
         if !enabled {
             st.transmit_queue.retain(
-                |queued| !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side),
+                |queued| {
+                    !matches!(&queued.item, RouterTxItem::ToSide { dst, .. } if *dst == side)
+                        && !matches!(&queued.item, RouterTxItem::ReliableReplay { dst, .. } if *dst == side)
+                },
             );
         }
         #[cfg(feature = "discovery")]
@@ -3200,11 +3241,25 @@ impl Router {
         item: RouterTxItem,
         ignore_local: bool,
     ) -> TelemetryResult<()> {
-        let mut st = self.state.lock();
         let priority = match &item {
             RouterTxItem::Broadcast(data) => Self::router_item_priority(data)?,
             RouterTxItem::ToSide { data, .. } => Self::router_item_priority(data)?,
+            RouterTxItem::ReliableReplay { bytes, .. } => {
+                let ty = serialize::peek_envelope(bytes.as_ref())?.ty;
+                Self::router_item_priority_bumped(ty)
+            }
         };
+        self.tx_queue_item_with_priority(item, ignore_local, priority)
+    }
+
+    #[inline]
+    fn tx_queue_item_with_priority(
+        &self,
+        item: RouterTxItem,
+        ignore_local: bool,
+        priority: u8,
+    ) -> TelemetryResult<()> {
+        let mut st = self.state.lock();
         st.transmit_queue.push_back_prioritized(
             TxQueued {
                 item,
@@ -3510,6 +3565,42 @@ impl Router {
         self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(error_pkt)))
     }
 
+    fn handle_internal_reliable_packet(
+        &self,
+        pkt: &Packet,
+        src: Option<RouterSideId>,
+    ) -> TelemetryResult<bool> {
+        if !matches!(
+            pkt.data_type(),
+            DataType::ReliableAck | DataType::ReliablePacketRequest
+        ) {
+            return Ok(false);
+        }
+
+        let Some(src) = src else {
+            return Ok(false);
+        };
+
+        let vals = pkt.data_as_u32()?;
+        if vals.len() != 2 {
+            return Err(TelemetryError::Deserialize("bad reliable control payload"));
+        }
+        let ty = DataType::try_from_u32(vals[0]).ok_or(TelemetryError::InvalidType)?;
+        let seq = vals[1];
+
+        match pkt.data_type() {
+            DataType::ReliableAck => {
+                self.handle_reliable_ack(src, ty, seq);
+                Ok(true)
+            }
+            DataType::ReliablePacketRequest => {
+                self.queue_reliable_retransmit(src, ty, seq)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Core receive function handling both Packet and Serialized items.
     ///
     /// Relay mode: if a destination endpoint has no matching local handler and the packet has
@@ -3519,8 +3610,7 @@ impl Router {
         if let Some(src) = item.src {
             self.ensure_side_ingress_enabled(src)?;
         }
-        let mut skip_dedupe = false;
-
+        let mut released_buffered: Vec<Arc<[u8]>> = Vec::new();
         if let (Some(src), RouterItem::Serialized(bytes)) = (item.src, &item.data) {
             let (opts, handler_is_serialized) = {
                 let st = self.state.lock();
@@ -3541,40 +3631,28 @@ impl Router {
                                 && is_reliable_type(frame.envelope.ty)
                                 && let Some(hdr) = frame.reliable
                             {
-                                if (hdr.flags & serialize::RELIABLE_FLAG_ACK_ONLY) != 0 {
-                                    return Ok(());
-                                }
-
                                 let unordered =
                                     (hdr.flags & serialize::RELIABLE_FLAG_UNORDERED) != 0;
                                 let unsequenced =
                                     (hdr.flags & serialize::RELIABLE_FLAG_UNSEQUENCED) != 0;
 
                                 if !unsequenced {
-                                    if unordered {
-                                        let ack = {
-                                            let mut st = self.state.lock();
-                                            let rx_state = self.reliable_rx_state_mut(
-                                                &mut st,
-                                                src,
-                                                frame.envelope.ty,
-                                            );
-                                            rx_state.last_ack
-                                        };
-                                        let _ = self.send_reliable_ack(src, frame.envelope.ty, ack);
+                                    let requested = if unordered {
+                                        hdr.seq
                                     } else {
-                                        let expected = {
-                                            let mut st = self.state.lock();
-                                            let rx_state = self.reliable_rx_state_mut(
-                                                &mut st,
-                                                src,
-                                                frame.envelope.ty,
-                                            );
-                                            rx_state.expected_seq
-                                        };
-                                        let ack = expected.saturating_sub(1);
-                                        let _ = self.send_reliable_ack(src, frame.envelope.ty, ack);
-                                    }
+                                        let mut st = self.state.lock();
+                                        let rx_state = self.reliable_rx_state_mut(
+                                            &mut st,
+                                            src,
+                                            frame.envelope.ty,
+                                        );
+                                        rx_state.expected_seq.min(hdr.seq)
+                                    };
+                                    self.queue_reliable_packet_request(
+                                        src,
+                                        frame.envelope.ty,
+                                        requested,
+                                    )?;
                                 }
                             }
                             return Ok(());
@@ -3585,50 +3663,63 @@ impl Router {
                 if is_reliable_type(frame.envelope.ty)
                     && let Some(hdr) = frame.reliable
                 {
-                    if (hdr.flags & serialize::RELIABLE_FLAG_ACK_ONLY) != 0 {
-                        self.handle_reliable_ack(src, frame.envelope.ty, hdr.ack);
-                        return Ok(());
-                    }
-                    self.handle_reliable_ack(src, frame.envelope.ty, hdr.ack);
-
                     let unordered = (hdr.flags & serialize::RELIABLE_FLAG_UNORDERED) != 0;
                     let unsequenced = (hdr.flags & serialize::RELIABLE_FLAG_UNSEQUENCED) != 0;
 
                     if !unsequenced {
                         if unordered {
+                            self.queue_reliable_ack(src, frame.envelope.ty, hdr.seq)?;
+                        } else {
+                            let mut release: Vec<Arc<[u8]>> = Vec::new();
+                            let mut last_delivered = None;
+                            let mut ack_old = None;
+                            let mut request_missing = None;
                             {
                                 let mut st = self.state.lock();
                                 let rx_state =
                                     self.reliable_rx_state_mut(&mut st, src, frame.envelope.ty);
-                                rx_state.last_ack = hdr.seq;
+                                if hdr.seq < rx_state.expected_seq {
+                                    ack_old = Some(rx_state.expected_seq.saturating_sub(1));
+                                } else if hdr.seq > rx_state.expected_seq {
+                                    if rx_state.buffered.len() < RELIABLE_MAX_PENDING {
+                                        rx_state
+                                            .buffered
+                                            .entry(hdr.seq)
+                                            .or_insert_with(|| bytes.clone());
+                                    }
+                                    request_missing = Some(rx_state.expected_seq);
+                                } else {
+                                    release.push(bytes.clone());
+                                    last_delivered = Some(hdr.seq);
+                                    let mut next_expected = hdr.seq.wrapping_add(1);
+                                    while let Some(buf) = rx_state.buffered.remove(&next_expected) {
+                                        release.push(buf);
+                                        last_delivered = Some(next_expected);
+                                        let next = next_expected.wrapping_add(1);
+                                        next_expected = if next == 0 { 1 } else { next };
+                                    }
+                                    rx_state.expected_seq = next_expected;
+                                }
                             }
-                            let _ = self.send_reliable_ack(src, frame.envelope.ty, hdr.seq);
-                        } else {
-                            let expected = {
-                                let mut st = self.state.lock();
-                                let rx_state =
-                                    self.reliable_rx_state_mut(&mut st, src, frame.envelope.ty);
-                                rx_state.expected_seq
-                            };
 
-                            if hdr.seq != expected {
-                                let ack = expected.saturating_sub(1);
-                                let _ = self.send_reliable_ack(src, frame.envelope.ty, ack);
+                            if let Some(ack_seq) = ack_old {
+                                self.queue_reliable_ack(src, frame.envelope.ty, ack_seq)?;
+                                return Ok(());
+                            }
+                            if let Some(request_seq) = request_missing {
+                                self.queue_reliable_packet_request(
+                                    src,
+                                    frame.envelope.ty,
+                                    request_seq,
+                                )?;
                                 return Ok(());
                             }
 
-                            {
-                                let mut st = self.state.lock();
-                                let rx_state =
-                                    self.reliable_rx_state_mut(&mut st, src, frame.envelope.ty);
-                                let next = rx_state.expected_seq.wrapping_add(1);
-                                rx_state.expected_seq = if next == 0 { 1 } else { next };
-                                rx_state.last_ack = expected;
+                            if let Some(ack_seq) = last_delivered {
+                                self.queue_reliable_ack(src, frame.envelope.ty, ack_seq)?;
                             }
 
-                            let ack = expected;
-                            let _ = self.send_reliable_ack(src, frame.envelope.ty, ack);
-                            skip_dedupe = true;
+                            released_buffered.extend(release.into_iter().skip(1));
                         }
                     }
                 }
@@ -3650,13 +3741,40 @@ impl Router {
             }
         }
 
-        if !skip_dedupe && self.is_duplicate_pkt(&item.data)? {
+        if self.is_duplicate_pkt(&item.data)? {
             return Ok(());
         }
 
+        self.dispatch_rx_data(item, called_from_queue)?;
+
+        for release_bytes in released_buffered {
+            let release_data = RouterItem::Serialized(release_bytes.clone());
+            if self.is_duplicate_pkt(&release_data)? {
+                continue;
+            }
+            let release_item = RouterRxItem {
+                src: item.src,
+                priority: Self::router_item_priority(&release_data)?,
+                data: release_data,
+            };
+            self.dispatch_rx_data(&release_item, called_from_queue)?;
+        }
+
+        Ok(())
+    }
+
+    fn dispatch_rx_data(
+        &self,
+        item: &RouterRxItem,
+        called_from_queue: bool,
+    ) -> TelemetryResult<()> {
         match &item.data {
             RouterItem::Packet(pkt) => {
                 pkt.validate()?;
+
+                if self.handle_internal_reliable_packet(pkt, item.src)? {
+                    return Ok(());
+                }
 
                 #[cfg(feature = "timesync")]
                 if matches!(
@@ -3703,10 +3821,7 @@ impl Router {
                 };
 
                 for dest in eps {
-                    let mut any_matched = false;
-
                     for h in self.cfg.handlers.iter().filter(|h| h.endpoint == dest) {
-                        any_matched = true;
                         match (&h.handler, &bytes_opt) {
                             (EndpointHandlerFn::Serialized(_), Some(bytes)) => {
                                 let _ = self.call_handler_with_retries(
@@ -3733,8 +3848,6 @@ impl Router {
                             }
                         }
                     }
-
-                    let _ = any_matched;
                 }
 
                 if has_remote {
@@ -3744,9 +3857,18 @@ impl Router {
 
                 Ok(())
             }
-
             RouterItem::Serialized(bytes) => {
                 let env = serialize::peek_envelope(bytes.as_ref())?;
+
+                if matches!(
+                    env.ty,
+                    DataType::ReliableAck | DataType::ReliablePacketRequest
+                ) {
+                    let pkt = serialize::deserialize_packet(bytes.as_ref())?;
+                    pkt.validate()?;
+                    let _ = self.handle_internal_reliable_packet(&pkt, item.src)?;
+                    return Ok(());
+                }
 
                 #[cfg(feature = "timesync")]
                 if matches!(
@@ -3799,10 +3921,7 @@ impl Router {
                 };
 
                 for dest in eps {
-                    let mut any_matched = false;
-
                     for h in self.cfg.handlers.iter().filter(|h| h.endpoint == dest) {
-                        any_matched = true;
                         match &h.handler {
                             EndpointHandlerFn::Serialized(_) => {
                                 let _ = self.call_handler_with_retries(
@@ -3830,8 +3949,6 @@ impl Router {
                             }
                         }
                     }
-
-                    let _ = any_matched;
                 }
 
                 if has_remote {
@@ -4067,6 +4184,27 @@ impl Router {
                         }
                     }
                     return Err(TelemetryError::HandlerError("tx handler failed"));
+                }
+            }
+            RouterTxItem::ReliableReplay { dst, bytes } => {
+                let frame = serialize::peek_frame_info(bytes.as_ref())?;
+                let ty = frame.envelope.ty;
+                let Some(hdr) = frame.reliable else {
+                    return Ok(());
+                };
+                {
+                    let mut st = self.state.lock();
+                    let tx_state = self.reliable_tx_state_mut(&mut st, dst, ty);
+                    if !tx_state.sent.contains_key(&hdr.seq) {
+                        return Ok(());
+                    }
+                }
+                self.send_reliable_raw_to_side(dst, bytes.clone())?;
+                let mut st = self.state.lock();
+                let tx_state = self.reliable_tx_state_mut(&mut st, dst, ty);
+                if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
+                    sent.last_send_ms = self.clock.now_ms();
+                    sent.queued = false;
                 }
             }
         }

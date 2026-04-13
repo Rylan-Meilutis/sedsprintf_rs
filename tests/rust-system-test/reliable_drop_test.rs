@@ -103,7 +103,7 @@ mod reliable_drop_tests {
         }
 
         let mut dropped_data_once = false;
-        let mut dropped_ack_once = false;
+        let mut dropped_control_once = false;
 
         for _ in 0..200 {
             router_a
@@ -131,13 +131,17 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&b_to_a) {
                 let info = serialize::peek_frame_info(&frame).expect("peek ack failed");
-                if info.ack_only()
-                    && let Some(hdr) = info.reliable
-                    && hdr.ack == 1
-                    && !dropped_ack_once
+                if matches!(
+                    info.envelope.ty,
+                    DataType::ReliableAck | DataType::ReliablePacketRequest
+                ) && !dropped_control_once
                 {
-                    dropped_ack_once = true;
-                    continue; // drop first ack for seq=1
+                    let pkt = serialize::deserialize_packet(&frame).expect("decode control failed");
+                    let vals = pkt.data_as_u32().expect("control payload decode failed");
+                    if vals.first().copied() == Some(DataType::GpsData as u32) {
+                        dropped_control_once = true;
+                        continue; // drop first control packet for the reliable stream
+                    }
                 }
                 router_a
                     .rx_serialized_queue_from_side(&frame, a_side)
@@ -162,7 +166,7 @@ mod reliable_drop_tests {
         let expected: Vec<u32> = (0..TOTAL).collect();
 
         assert!(dropped_data_once, "test did not drop a data frame");
-        assert!(dropped_ack_once, "test did not drop an ack frame");
+        assert!(dropped_control_once, "test did not drop a reliable control frame");
         assert_eq!(got, expected, "reliable delivery should recover from drops");
     }
 

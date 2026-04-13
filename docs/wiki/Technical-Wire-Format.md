@@ -48,16 +48,18 @@ the wire format includes a fixed 9‑byte
 reliable header between the sender bytes and payload:
 
 - `REL_FLAGS`:
-    - `ACK_ONLY` (0x01): ACK-only control frame (no payload).
     - `UNORDERED` (0x02): reliable delivery without ordering (ACK/retransmit enabled).
     - `UNSEQUENCED` (0x80): best‑effort frame without ordering/ACK semantics.
 - `SEQ`: sequence number used for reliable delivery.
-- `ACK`: acknowledgement of received reliable sequence(s).
+- `ACK`: reserved for compatibility and currently written as `0`.
 
-`ACK_ONLY` frames are used internally by the router’s reliable layer and are not valid `Packet`s.
+Reliable acknowledgements and retransmit requests now travel as built-in internal packet types:
 
-For ordered mode, `ACK` is cumulative (last in-order sequence). For unordered mode, `ACK` acknowledges the specific
-received `SEQ`.
+- `RELIABLE_ACK`: payload `[data_type_u32, seq_u32]`
+- `RELIABLE_PACKET_REQUEST`: payload `[data_type_u32, seq_u32]`
+
+These packets are router/relay-internal control traffic like discovery and time sync; applications should not attach
+endpoint handlers to them or treat them as user data.
 
 ## Endpoint bitmap
 
@@ -105,12 +107,12 @@ This ensures dedupe works even when one side compresses and the other does not.
 
 ## CRC32 trailer
 
-Every serialized frame ends with a 4-byte CRC32 (little-endian) computed over all preceding bytes in the frame. This
-includes reliable ACK-only frames.
+Every serialized frame ends with a 4-byte CRC32 (little-endian) computed over all preceding bytes in the frame.
 
 Receivers validate CRC32 before decoding fields. If the checksum is invalid:
 
-- Reliable modes trigger a retransmit request (ACK of last good / expected-1), and the corrupt frame is dropped.
+- Reliable modes trigger an internal `RELIABLE_PACKET_REQUEST` for the missing sequence, and the corrupt frame is
+  dropped.
 - Non-reliable modes drop the frame silently.
 
 ## Error handling during decode

@@ -1,5 +1,18 @@
 # Changelogs
 
+## Version 3.10.0 highlights
+
+- Reliable delivery in both `Router` and `Relay` now uses built-in internal
+  `RELIABLE_ACK` and `RELIABLE_PACKET_REQUEST` packet types instead of wire-only ACK-only frames.
+- Reliable senders no longer stall a side/type stream on one inflight packet. New reliable packets
+  can keep flowing while ordered gaps are requested and retransmitted.
+- Ordered reliable RX now buffers out-of-order frames, requests the exact missing sequence, and
+  releases buffered packets once the gap is filled.
+- Retransmits are requeued with elevated priority rather than monopolizing the stream, improving
+  mixed-traffic behavior and multi-board fanout recovery.
+- Added router, relay, and system-style regression coverage for non-blocking reliable send and the
+  new internal reliable control flow.
+
 ## Version 3.9.1 highlights
 
 - Router-internal control endpoints:

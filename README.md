@@ -69,86 +69,48 @@ environments.
 
 ---
 
-## Version 3.5.0 highlights
+## Recent changelog milestones
 
-- Endpoint routing no longer depends on schema `broadcast_mode`; discovery state and link-local scope now decide whether
-  traffic stays local, targets discovered remote sides, or falls back to relay flooding during bootstrap.
-- Older telemetry schemas are upgraded automatically during code generation, so legacy `broadcast_mode` configs continue
-  to build while migrating to the newer `link_local_only` model.
-- `build.rs` now regenerates the public C header with the current ABI wrappers, avoiding drift between exported Rust
-  symbols and `C-Headers/sedsprintf.h`.
-- `build.py` now has a dedicated `check` mode for strict clippy validation, and `build.py test` now includes that lint
-  coverage before running the broader test/build checks.
-- The generated C and Python stubs, plus the C telemetry examples, were refreshed to match the current logging and
-  discovery API surface.
+## Version 3.10.0 highlights
+
+- Reliable delivery in both `Router` and `Relay` now uses built-in internal
+  `RELIABLE_ACK` and `RELIABLE_PACKET_REQUEST` packet types instead of wire-only ACK-only frames.
+- Reliable streams no longer block on one missing reliable packet. Ordered gaps are requested
+  explicitly, out-of-order packets are buffered, and retransmits are requeued with elevated
+  priority.
+- This improves recovery on asymmetric links and multi-destination fanout where different boards
+  progress at different rates.
 - Full changelog: [CHANGELOG.md](./CHANGELOG.md)
 
-## Version 3.4.2 highlights
+## Version 3.9.1 highlights
 
-- Time sync producers now participate in leader election instead of always serving unconditionally.
-- Routers now keep per-remote-source time state, and non-winning producers follow the elected
-  leader.
-- Failover now uses monotonic holdover plus slew, so network time stays continuous while
-  converging toward the new leader.
-- Same-priority producers now resolve leadership deterministically, and consumers can optionally
-  self-promote when no producers remain but a usable network clock is still available.
-- C callers can now force a discovery announce or poll for due discovery traffic on both routers
-  and relays through the public ABI.
-- Wiki docs now keep GitHub `source` links in-repo, and the wiki sync script rewrites them to the
-  target GitLab repo path when publishing there.
-- Full changelog: [v3.4.1...v3.4.2](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.4.1...v3.4.2)
+- Reserved the built-in `DISCOVERY` and `TIME_SYNC` endpoints for router-owned control traffic.
+- User handlers can no longer shadow internal discovery or time-sync behavior through Rust or C
+  configuration APIs.
+- Queue timeout handling was tightened so TX/RX work shares nonzero budgets more predictably.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
 
-## Version 3.4.1 highlights
+## Version 3.0.0 highlights
 
-- Discovery can now advertise reachable time source sender IDs in addition to endpoint reachability.
-- `TIME_SYNC` routing now prefers the exact discovered path to the selected source instead of sending requests to every
-  side that merely exposes `TIME_SYNC`.
-- Same-priority time source failover now keeps standby sources active so backup selection can happen immediately when
-  the current winner times out.
-- Source-side time sync responses now return to the requesting ingress side, reducing unnecessary traffic.
-- Full changelog: [v3.4.0...v3.4.1](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.4.0...v3.4.1)
+- Introduced internal router-side tracking so most applications can use the plain RX APIs and only
+  opt into side-aware ingress when they actually need it.
+- Added TCP-like reliable delivery for schema types marked `reliable` or `reliable_mode`, with
+  ACKs, retransmits, and optional ordering.
+- This established the modern router/reliability model that later releases expanded.
+- Full changelog: [v2.4.0...v3.0.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v2.4.0...v3.0.0)
 
-## Version 3.4.0 highlights
+## Version 2.0.0 highlights
 
-- Time sync is now router-managed: `TIME_SYNC` packets are consumed internally, routers maintain a
-  separate internal network clock, and packet timestamps prefer that clock when available.
-- Added merged partial network time support, so routers can combine date, time-of-day, and
-  subsecond precision from different sources.
-- Added local/master network time setter APIs across Rust, C, and Python for date-only, HMS,
-  millisecond, and nanosecond precision updates.
-- On `std` builds, routers now use an internal monotonic clock by default; explicit clock hooks
-  moved to `Router::new_with_clock(...)` and remain available for tests, simulation, and
-  `no_std`.
-- C and Python constructors now treat the router clock callback as optional on `std` builds, and
-  C system-test handling was hardened to prevent indefinite hangs on regressions.
-- Full changelog: [v3.3.0...v3.4.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.3.0...v3.4.0)
+- Added `RouterMode` with distinct `Relay` vs `Sink` behavior.
+- Fixed packet-hash handling so already-seen packets are not processed twice.
+- This was the release where the router/relay behavior became an explicit part of the public model.
+- Full changelog: [v1.5.2...v2.0.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v1.5.2...v2.0.0)
 
----
+## Version 1.0.0 highlights
 
-## Version 3.3.0 highlights
-
-- Added built-in discovery/routing control traffic for routers and relays, including learned endpoint reachability,
-  selective forwarding, adaptive discovery cadence, and topology export.
-- Added link-local/software-bus endpoint support for IPC, including routing restrictions so link-local traffic stays on
-  link-local sides and is hidden from normal network discovery advertisements.
-- Added board-local IPC schema overlays via `SEDSPRINTF_RS_IPC_SCHEMA_PATH`, so shared telemetry schemas can stay fixed
-  while per-board IPC endpoints/types are merged at build time.
-- Updated the telemetry config editor to manage split base/IPC schema files independently, including external IPC
-  overlay paths for CMake or `.cargo/config.toml` driven builds.
-- Added regression coverage for discovery routing, link-local routing boundaries, IPC overlay schema merging, and the
-  split-file editor path flow.
-- Full changelog: [v3.2.3...v3.3.0](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.2.3...v3.3.0)
-
----
-
-## Version 3.2.3 highlights
-
-- Compression backend is now `zstd-safe` (single backend), with bounded output buffers in the compression path and
-  no compression-level build option.
-- Queueing and re-entrancy behavior was hardened for RTOS-like usage, with added stress tests for deadlock scenarios.
-- Time sync system coverage expanded with multi-node C tests, including grandmaster/consumer topologies and failover.
-- C system test builds on macOS now enforce a consistent deployment target to avoid linker target-mismatch warnings.
-- Full changelog: [v3.2.2...v3.2.3](https://github.com/Rylan-Meilutis/sedsprintf_rs/compare/v3.2.2...v3.2.3)
+- First stable release with routing, serialization, and packet creation across Rust, C, and Python.
+- Marked the API as stable and established the base wire-format and packet model the later versions
+  built on.
 
 ---
 
