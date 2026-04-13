@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.10.0
+
+- Reworked reliable delivery in both `Router` and `Relay` to use built-in internal
+  `RELIABLE_ACK` and `RELIABLE_PACKET_REQUEST` packet types instead of wire-only ACK-only frames.
+- Reliable senders no longer block a side/type lane on one inflight packet. New reliable packets can
+  continue sending while missing ordered packets are requested and retransmitted.
+- Ordered reliable receive paths now buffer out-of-order frames, request the specific missing
+  sequence, and release buffered packets once the gap is filled.
+- Retransmits are now requeued with temporarily elevated priority instead of being sent as an
+  exclusive inflight retry path, which improves recovery under mixed traffic and multi-destination
+  fanout.
+- Added regression coverage for non-blocking reliable send, router and relay retransmit recovery,
+  and the new internal reliable control flow in both unit and system-style tests.
+- Updated README and technical docs to describe the new internal reliable control packets and
+  non-blocking retransmit behavior.
+
 ## 3.9.1
 
 - Reserved the built-in `DISCOVERY` and `TIME_SYNC` endpoints for router-owned control traffic so

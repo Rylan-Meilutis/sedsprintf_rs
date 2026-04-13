@@ -53,7 +53,7 @@ Reliable delivery (`reliable: true` / `reliable_mode` in the schema) is only app
 
 - the router config enables reliable (`RouterConfig::with_reliable_enabled(true)`), and
 - the side is marked reliable (`RouterSideOptions { reliable_enabled: true }`), and
-- the side handler is **serialized** (ACK control frames are wire-level bytes).
+- the side handler is **serialized** (internal reliable control packets travel on the wire).
 
 `RouterSideOptions` defaults to `reliable_enabled: false`, so reliability is opt-in per side.
 
@@ -82,7 +82,8 @@ Discovery advertisements are adaptive:
 ## Receive pipeline (rx*)
 
 1) Bytes or packets are accepted immediately or queued.
-2) For reliable types, sequence/ACK headers are processed first (ACK-only frames are consumed here).
+2) For reliable types, sequence headers are processed first and internal `RELIABLE_ACK` /
+   `RELIABLE_PACKET_REQUEST` control packets are consumed here.
 3) Packet ID is computed for dedupe (unreliable / unsequenced frames).
     - Serialized bytes use `packet_id_from_wire` when possible.
     - If wire parsing fails, raw bytes are hashed as fallback.
@@ -159,6 +160,9 @@ Reliable delivery in the router is per side. With discovery enabled, a reliable 
 currently known candidate side for its endpoints. That improves reachability across the known topology, but it is not an
 end-to-end proof that every remote application endpoint consumed the packet. If you need that guarantee, add an
 application-level acknowledgement on top of the transport-level reliable mode.
+
+Reliable TX no longer blocks a side/type stream on one inflight frame. The router keeps recent sent history per
+side/type, requests missing ordered sequences explicitly, and requeues retransmits with elevated priority.
 
 ## Router modes
 

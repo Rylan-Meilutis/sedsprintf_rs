@@ -844,10 +844,19 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
             "Time sync source discovery advertisement (dynamic list of sender IDs).".to_string(),
         ));
     }
+    ty_entries.push((
+        syn::Ident::new("ReliableAck", Span::call_site()),
+        "Internal reliable-delivery acknowledgement (type, seq).".to_string(),
+    ));
+    ty_entries.push((
+        syn::Ident::new("ReliablePacketRequest", Span::call_site()),
+        "Internal reliable-delivery retransmit request (type, seq).".to_string(),
+    ));
 
     let max_ty_value = cfg.types.len() as u32
         + if timesync_enabled { 3 } else { 0 }
-        + if discovery_enabled { 2 } else { 0 };
+        + if discovery_enabled { 2 } else { 0 }
+        + 2;
 
     let ty_variants = ty_entries
         .iter()
@@ -872,6 +881,20 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
         let endpoints_tokens: Vec<proc_macro2::TokenStream> =
             vec![quote!(DataEndpoint::TelemetryError)];
         quote! {
+            DataType::ReliableAck => MessageMeta {
+                name: "RELIABLE_ACK",
+                element: MessageElement::Static(2, MessageDataType::UInt32, MessageClass::Data),
+                endpoints: &[#(#endpoints_tokens),*],
+                reliable: crate::ReliableMode::None,
+                priority: 250,
+            },
+            DataType::ReliablePacketRequest => MessageMeta {
+                name: "RELIABLE_PACKET_REQUEST",
+                element: MessageElement::Static(2, MessageDataType::UInt32, MessageClass::Data),
+                endpoints: &[#(#endpoints_tokens),*],
+                reliable: crate::ReliableMode::None,
+                priority: 250,
+            },
             DataType::TelemetryError => MessageMeta {
                 name: "TELEMETRY_ERROR",
                 element: MessageElement::Dynamic(MessageDataType::String, MessageClass::Error),
