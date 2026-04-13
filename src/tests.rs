@@ -3975,9 +3975,10 @@ mod router_tests {
 
     use crate::config::{DataEndpoint, DataType};
     use crate::packet::Packet;
-    use crate::router::{EndpointHandler, Router, RouterConfig};
+    use crate::router::{EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use crate::tests::timeout_tests::StepClock;
     use crate::{serialize, TelemetryResult};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "discovery")]
@@ -3998,7 +3999,6 @@ mod router_tests {
     /// cause the router to forward it by default.
     #[test]
     fn relay_mode_retransmits_when_remote_endpoint_present() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         static TX_CALLS: AtomicUsize = AtomicUsize::new(0);
 
         fn transmit(_bytes: &[u8]) -> TelemetryResult<()> {
@@ -4033,11 +4033,66 @@ mod router_tests {
         assert_eq!(TX_CALLS.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn queued_serialized_ingress_retries_side_tx_and_relays_between_router_sides() {
+        #[derive(Default)]
+        struct TxState {
+            attempts: AtomicUsize,
+            delivered: Mutex<Vec<Vec<u8>>>,
+        }
+
+        let router = Router::new_with_clock(RouterConfig::default(), StepClock::new_default_box());
+        let tx_state = Arc::new(TxState::default());
+        let tx_state_c = tx_state.clone();
+
+        let side_a = router.add_side_serialized_with_options(
+            "can",
+            |_bytes| Ok(()),
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+        router.add_side_serialized_with_options(
+            "uart",
+            move |bytes: &[u8]| -> TelemetryResult<()> {
+                let attempt = tx_state_c.attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    return Err(crate::TelemetryError::Io("busy"));
+                }
+                tx_state_c.delivered.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 2.0, 3.0],
+            &[DataEndpoint::Radio],
+            7,
+        )
+        .unwrap();
+        let wire = serialize::serialize_packet(&pkt);
+
+        router
+            .rx_serialized_queue_from_side(wire.as_ref(), side_a)
+            .unwrap();
+        router.process_all_queues_with_timeout(0).unwrap();
+
+        let delivered = tx_state.delivered.lock().unwrap().clone();
+        assert_eq!(tx_state.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(delivered.len(), 1);
+        assert!(!delivered[0].is_empty());
+    }
+
     /// Explicit route disables should suppress remote forwarding.
     #[test]
     fn disabled_route_prevents_retransmit_on_receive() {
         use crate::router::RouterConfig;
-        use std::sync::atomic::{AtomicUsize, Ordering};
 
         static TX_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -4070,7 +4125,6 @@ mod router_tests {
     #[test]
     fn receive_dedupes_identical_serialized_frames() {
         use crate::router::RouterConfig;
-        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_c = hits.clone();

@@ -2980,6 +2980,7 @@ mod tests {
     use crate::discovery::{build_discovery_announce, DISCOVERY_FAST_INTERVAL_MS};
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     struct TestClock {
         now_ms: Arc<AtomicU64>,
@@ -2997,6 +2998,37 @@ mod tests {
         }
         let hits = unsafe { &*(user as *const AtomicUsize) };
         hits.fetch_add(1, Ordering::SeqCst);
+        status_from_result_code(SedsResult::SedsOk)
+    }
+
+    #[derive(Default)]
+    struct SerializedTxState {
+        attempts: AtomicUsize,
+        delivered: Mutex<Vec<Vec<u8>>>,
+    }
+
+    extern "C" fn serialized_retry_once_cb(
+        bytes: *const u8,
+        len: usize,
+        user: *mut c_void,
+    ) -> i32 {
+        if bytes.is_null() || user.is_null() {
+            return status_from_result_code(SedsResult::SedsErr);
+        }
+        let state = unsafe { &*(user as *const SerializedTxState) };
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            return status_from_result_code(SedsResult::SedsErr);
+        }
+        let slice = unsafe { core::slice::from_raw_parts(bytes, len) };
+        state.delivered.lock().unwrap().push(slice.to_vec());
+        status_from_result_code(SedsResult::SedsOk)
+    }
+
+    extern "C" fn serialized_ok_cb(bytes: *const u8, _len: usize, _user: *mut c_void) -> i32 {
+        if bytes.is_null() {
+            return status_from_result_code(SedsResult::SedsErr);
+        }
         status_from_result_code(SedsResult::SedsOk)
     }
 
@@ -3067,6 +3099,63 @@ mod tests {
         assert!(did_queue);
         assert_eq!(seds_router_process_tx_queue(router), 0);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        seds_router_free(router);
+    }
+
+    #[test]
+    fn router_c_abi_queued_serialized_ingress_retries_side_tx_and_relays() {
+        let side_name_a = b"can";
+        let side_name_b = b"uart";
+        let tx_state = SerializedTxState::default();
+
+        let router = seds_router_new(1, None, ptr::null_mut(), ptr::null(), 0);
+        assert!(!router.is_null());
+
+        let side_a = seds_router_add_side_serialized(
+            router,
+            side_name_a.as_ptr() as *const c_char,
+            side_name_a.len(),
+            Some(serialized_ok_cb),
+            ptr::null_mut(),
+            true,
+        );
+        assert!(side_a >= 0);
+
+        let side_b = seds_router_add_side_serialized(
+            router,
+            side_name_b.as_ptr() as *const c_char,
+            side_name_b.len(),
+            Some(serialized_retry_once_cb),
+            (&tx_state as *const SerializedTxState).cast_mut().cast(),
+            true,
+        );
+        assert!(side_b >= 0);
+
+        let pkt = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 2.0, 3.0],
+            &[DataEndpoint::Radio],
+            33,
+        )
+        .unwrap();
+        let wire = serialize_packet(&pkt);
+
+        assert_eq!(
+            seds_router_rx_serialized_packet_to_queue_from_side(
+                router,
+                side_a as u32,
+                wire.as_ptr(),
+                wire.len(),
+            ),
+            0
+        );
+        assert_eq!(seds_router_process_all_queues_with_timeout(router, 0), 0);
+
+        assert_eq!(tx_state.attempts.load(Ordering::SeqCst), 2);
+        let delivered = tx_state.delivered.lock().unwrap().clone();
+        assert_eq!(delivered.len(), 1);
+        assert!(!delivered[0].is_empty());
 
         seds_router_free(router);
     }

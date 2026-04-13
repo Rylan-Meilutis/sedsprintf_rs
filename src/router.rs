@@ -2237,17 +2237,22 @@ impl Router {
                 let mut v = bytes.to_vec();
                 if !serialize::rewrite_reliable_header(&mut v, flags, seq, 0)? {
                     let started_ms = self.clock.now_ms();
-                    f(bytes.as_ref())?;
-                    self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
-                    return Ok(());
+                    let result = self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()));
+                    if result.is_ok() {
+                        self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+                    }
+                    return result;
                 }
                 Arc::from(v)
             }
         };
 
         let started_ms = self.clock.now_ms();
-        f(bytes.as_ref())?;
-        self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+        let result = self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()));
+        if result.is_ok() {
+            self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+        }
+        result?;
 
         {
             let mut st = self.state.lock();
@@ -2274,7 +2279,7 @@ impl Router {
         data: &RouterItem,
     ) -> TelemetryResult<()> {
         let started_ms = self.clock.now_ms();
-        let result = match (handler, data) {
+        let result = self.retry(MAX_HANDLER_RETRIES, || match (handler, data) {
             (RouterTxHandlerFn::Serialized(f), RouterItem::Serialized(bytes)) => f(bytes.as_ref()),
             (RouterTxHandlerFn::Packet(f), RouterItem::Packet(pkt)) => f(pkt),
             (RouterTxHandlerFn::Serialized(f), RouterItem::Packet(pkt)) => {
@@ -2285,7 +2290,7 @@ impl Router {
                 let pkt = serialize::deserialize_packet(bytes.as_ref())?;
                 f(&pkt)
             }
-        };
+        });
         if result.is_ok()
             && let Ok(bytes) = Self::router_item_wire_len(data)
         {
