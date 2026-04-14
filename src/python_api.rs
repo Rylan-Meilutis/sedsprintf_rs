@@ -288,6 +288,116 @@ fn vectorize_data<T: LeBytes + Copy>(
     Ok(())
 }
 
+#[cfg(feature = "discovery")]
+fn topology_snapshot_to_pydict(
+    py: Python<'_>,
+    snap: crate::discovery::TopologySnapshot,
+) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item(
+        "advertised_endpoints",
+        snap.advertised_endpoints
+            .iter()
+            .map(|ep| *ep as u32)
+            .collect::<Vec<u32>>(),
+    )?;
+    out.set_item(
+        "advertised_timesync_sources",
+        snap.advertised_timesync_sources,
+    )?;
+
+    let routers = PyList::empty(py);
+    for board in snap.routers {
+        let item = PyDict::new(py);
+        item.set_item("sender_id", board.sender_id)?;
+        item.set_item(
+            "reachable_endpoints",
+            board
+                .reachable_endpoints
+                .iter()
+                .map(|ep| *ep as u32)
+                .collect::<Vec<u32>>(),
+        )?;
+        item.set_item(
+            "reachable_timesync_sources",
+            board.reachable_timesync_sources,
+        )?;
+        item.set_item("connections", board.connections)?;
+        routers.append(item)?;
+    }
+    out.set_item("routers", routers)?;
+
+    let routes = PyList::empty(py);
+    for route in snap.routes {
+        let route_dict = PyDict::new(py);
+        route_dict.set_item("side_id", route.side_id)?;
+        route_dict.set_item("side_name", route.side_name)?;
+        route_dict.set_item(
+            "reachable_endpoints",
+            route
+                .reachable_endpoints
+                .iter()
+                .map(|ep| *ep as u32)
+                .collect::<Vec<u32>>(),
+        )?;
+        route_dict.set_item(
+            "reachable_timesync_sources",
+            route.reachable_timesync_sources,
+        )?;
+        let announcers = PyList::empty(py);
+        for announcer in route.announcers {
+            let announcer_dict = PyDict::new(py);
+            announcer_dict.set_item("sender_id", announcer.sender_id)?;
+            announcer_dict.set_item(
+                "reachable_endpoints",
+                announcer
+                    .reachable_endpoints
+                    .iter()
+                    .map(|ep| *ep as u32)
+                    .collect::<Vec<u32>>(),
+            )?;
+            announcer_dict.set_item(
+                "reachable_timesync_sources",
+                announcer.reachable_timesync_sources,
+            )?;
+            let announcer_routers = PyList::empty(py);
+            for board in announcer.routers {
+                let board_dict = PyDict::new(py);
+                board_dict.set_item("sender_id", board.sender_id)?;
+                board_dict.set_item(
+                    "reachable_endpoints",
+                    board
+                        .reachable_endpoints
+                        .iter()
+                        .map(|ep| *ep as u32)
+                        .collect::<Vec<u32>>(),
+                )?;
+                board_dict.set_item(
+                    "reachable_timesync_sources",
+                    board.reachable_timesync_sources,
+                )?;
+                board_dict.set_item("connections", board.connections)?;
+                announcer_routers.append(board_dict)?;
+            }
+            announcer_dict.set_item("routers", announcer_routers)?;
+            announcer_dict.set_item("last_seen_ms", announcer.last_seen_ms)?;
+            announcer_dict.set_item("age_ms", announcer.age_ms)?;
+            announcers.append(announcer_dict)?;
+        }
+        route_dict.set_item("announcers", announcers)?;
+        route_dict.set_item("last_seen_ms", route.last_seen_ms)?;
+        route_dict.set_item("age_ms", route.age_ms)?;
+        routes.append(route_dict)?;
+    }
+    out.set_item("routes", routes)?;
+    out.set_item(
+        "current_announce_interval_ms",
+        snap.current_announce_interval_ms,
+    )?;
+    out.set_item("next_announce_ms", snap.next_announce_ms)?;
+    Ok(out.unbind())
+}
+
 // ============================================================================
 //  Packet (PyPacket)
 // ============================================================================
@@ -1083,6 +1193,15 @@ impl PyRouter {
         rtr.poll_discovery().map_err(py_err_from)
     }
 
+    #[cfg(feature = "discovery")]
+    fn export_topology(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        topology_snapshot_to_pydict(py, rtr.export_topology())
+    }
+
     #[cfg(feature = "timesync")]
     fn network_time_ms(&self) -> PyResult<Option<u64>> {
         let rtr = self
@@ -1712,6 +1831,11 @@ impl PyRelay {
     #[cfg(feature = "discovery")]
     fn poll_discovery(&self) -> PyResult<bool> {
         self.inner.poll_discovery().map_err(py_err_from)
+    }
+
+    #[cfg(feature = "discovery")]
+    fn export_topology(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        topology_snapshot_to_pydict(py, self.inner.export_topology())
     }
 }
 

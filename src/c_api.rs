@@ -309,6 +309,166 @@ unsafe fn write_str_to_buf(s: &str, buf: *mut c_char, buf_len: usize) -> i32 {
     status_from_result_code(SedsResult::SedsOk)
 }
 
+#[cfg(feature = "discovery")]
+fn json_push_escaped(out: &mut String, s: &str) {
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = core::fmt::Write::write_fmt(out, format_args!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+#[cfg(feature = "discovery")]
+fn topology_snapshot_to_json(snap: &crate::discovery::TopologySnapshot) -> String {
+    fn push_u32_array(out: &mut String, vals: &[u32]) {
+        out.push('[');
+        for (idx, val) in vals.iter().enumerate() {
+            if idx != 0 {
+                out.push(',');
+            }
+            let _ = core::fmt::Write::write_fmt(out, format_args!("{val}"));
+        }
+        out.push(']');
+    }
+
+    fn push_string_array(out: &mut String, vals: &[String]) {
+        out.push('[');
+        for (idx, val) in vals.iter().enumerate() {
+            if idx != 0 {
+                out.push(',');
+            }
+            json_push_escaped(out, val);
+        }
+        out.push(']');
+    }
+
+    fn push_board(out: &mut String, board: &crate::discovery::TopologyBoardNode) {
+        out.push('{');
+        out.push_str("\"sender_id\":");
+        json_push_escaped(out, &board.sender_id);
+        out.push_str(",\"reachable_endpoints\":");
+        push_u32_array(
+            out,
+            &board
+                .reachable_endpoints
+                .iter()
+                .map(|ep| *ep as u32)
+                .collect::<Vec<u32>>(),
+        );
+        out.push_str(",\"reachable_timesync_sources\":");
+        push_string_array(out, &board.reachable_timesync_sources);
+        out.push_str(",\"connections\":");
+        push_string_array(out, &board.connections);
+        out.push('}');
+    }
+
+    let mut out = String::new();
+    out.push('{');
+    out.push_str("\"advertised_endpoints\":");
+    push_u32_array(
+        &mut out,
+        &snap
+            .advertised_endpoints
+            .iter()
+            .map(|ep| *ep as u32)
+            .collect::<Vec<u32>>(),
+    );
+    out.push_str(",\"advertised_timesync_sources\":");
+    push_string_array(&mut out, &snap.advertised_timesync_sources);
+    out.push_str(",\"routers\":[");
+    for (idx, board) in snap.routers.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        push_board(&mut out, board);
+    }
+    out.push(']');
+    out.push_str(",\"routes\":[");
+    for (route_idx, route) in snap.routes.iter().enumerate() {
+        if route_idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        let _ =
+            core::fmt::Write::write_fmt(&mut out, format_args!("\"side_id\":{},", route.side_id));
+        out.push_str("\"side_name\":");
+        json_push_escaped(&mut out, route.side_name);
+        out.push_str(",\"reachable_endpoints\":");
+        push_u32_array(
+            &mut out,
+            &route
+                .reachable_endpoints
+                .iter()
+                .map(|ep| *ep as u32)
+                .collect::<Vec<u32>>(),
+        );
+        out.push_str(",\"reachable_timesync_sources\":");
+        push_string_array(&mut out, &route.reachable_timesync_sources);
+        out.push_str(",\"announcers\":[");
+        for (ann_idx, announcer) in route.announcers.iter().enumerate() {
+            if ann_idx != 0 {
+                out.push(',');
+            }
+            out.push('{');
+            out.push_str("\"sender_id\":");
+            json_push_escaped(&mut out, &announcer.sender_id);
+            out.push_str(",\"reachable_endpoints\":");
+            push_u32_array(
+                &mut out,
+                &announcer
+                    .reachable_endpoints
+                    .iter()
+                    .map(|ep| *ep as u32)
+                    .collect::<Vec<u32>>(),
+            );
+            out.push_str(",\"reachable_timesync_sources\":");
+            push_string_array(&mut out, &announcer.reachable_timesync_sources);
+            out.push_str(",\"routers\":[");
+            for (board_idx, board) in announcer.routers.iter().enumerate() {
+                if board_idx != 0 {
+                    out.push(',');
+                }
+                push_board(&mut out, board);
+            }
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "],\"last_seen_ms\":{},\"age_ms\":{}",
+                    announcer.last_seen_ms, announcer.age_ms
+                ),
+            );
+            out.push('}');
+        }
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "],\"last_seen_ms\":{},\"age_ms\":{}",
+                route.last_seen_ms, route.age_ms
+            ),
+        );
+        out.push('}');
+    }
+    let _ = core::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            "],\"current_announce_interval_ms\":{},\"next_announce_ms\":{}",
+            snap.current_announce_interval_ms, snap.next_announce_ms
+        ),
+    );
+    out.push('}');
+    out
+}
+
 /// Validate that a width is one of the allowed sizes.
 #[inline]
 fn width_is_valid(width: usize) -> bool {
@@ -1325,6 +1485,58 @@ pub extern "C" fn seds_relay_poll_discovery(r: *mut SedsRelay, out_did_queue: *m
         }
         Err(e) => status_from_err(e),
     }
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_export_topology_len(r: *mut SedsRouter) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let json = topology_snapshot_to_json(&router.export_topology());
+    (json.len() + 1) as i32
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_export_topology(
+    r: *mut SedsRouter,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let json = topology_snapshot_to_json(&router.export_topology());
+    unsafe { write_str_to_buf(&json, buf, buf_len) }
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_export_topology_len(r: *mut SedsRelay) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let json = topology_snapshot_to_json(&relay.export_topology());
+    (json.len() + 1) as i32
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_export_topology(
+    r: *mut SedsRelay,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let json = topology_snapshot_to_json(&relay.export_topology());
+    unsafe { write_str_to_buf(&json, buf, buf_len) }
 }
 
 #[unsafe(no_mangle)]
@@ -3007,11 +3219,7 @@ mod tests {
         delivered: Mutex<Vec<Vec<u8>>>,
     }
 
-    extern "C" fn serialized_retry_once_cb(
-        bytes: *const u8,
-        len: usize,
-        user: *mut c_void,
-    ) -> i32 {
+    extern "C" fn serialized_retry_once_cb(bytes: *const u8, len: usize, user: *mut c_void) -> i32 {
         if bytes.is_null() || user.is_null() {
             return status_from_result_code(SedsResult::SedsErr);
         }
@@ -3092,13 +3300,13 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         now_ms.store(DISCOVERY_FAST_INTERVAL_MS, Ordering::SeqCst);
         assert_eq!(seds_router_poll_discovery(router, &mut did_queue), 0);
         assert!(did_queue);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
 
         seds_router_free(router);
     }
@@ -3205,7 +3413,7 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         seds_router_free(router);
     }
@@ -3260,7 +3468,7 @@ mod tests {
 
         assert_eq!(seds_relay_announce_discovery(relay), 0);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         seds_relay_free(relay);
     }
@@ -3306,7 +3514,7 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         seds_router_free(router);
     }
@@ -3512,7 +3720,7 @@ mod tests {
         assert!(side_id >= 0);
 
         assert_eq!(seds_router_periodic_no_timesync(router, 0), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
 
         seds_router_free(router);
     }
@@ -3566,13 +3774,13 @@ mod tests {
 
         assert_eq!(seds_relay_announce_discovery(relay), 0);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 2);
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 4);
 
         now_ms.store(DISCOVERY_FAST_INTERVAL_MS, Ordering::SeqCst);
         assert_eq!(seds_relay_poll_discovery(relay, &mut did_queue), 0);
         assert!(did_queue);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 4);
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 8);
 
         seds_relay_free(relay);
     }
@@ -3621,7 +3829,7 @@ mod tests {
         assert_eq!(seds_relay_periodic(relay, 0), 0);
         let hits_after_learning = hits.load(Ordering::SeqCst);
         assert_eq!(seds_relay_periodic(relay, 0), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 2);
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 4);
 
         seds_relay_free(relay);
     }

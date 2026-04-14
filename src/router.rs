@@ -13,7 +13,8 @@ use crate::config::{
 };
 #[cfg(feature = "discovery")]
 use crate::discovery::{
-    self, DiscoveryCadenceState, TopologySideRoute, TopologySnapshot, DISCOVERY_ROUTE_TTL_MS,
+    self, DiscoveryCadenceState, TopologyAnnouncerRoute, TopologyBoardNode, TopologySideRoute,
+    TopologySnapshot, DISCOVERY_ROUTE_TTL_MS,
 };
 use crate::packet::hash_bytes_u64;
 use crate::queue::{BoundedDeque, ByteCost};
@@ -190,6 +191,7 @@ struct ReliableReturnRouteState {
 struct DiscoverySenderState {
     reachable: Vec<DataEndpoint>,
     reachable_timesync_sources: Vec<String>,
+    topology_boards: Vec<TopologyBoardNode>,
     last_seen_ms: u64,
 }
 
@@ -854,7 +856,7 @@ fn is_internal_control_type(ty: DataType) -> bool {
     }
 
     #[cfg(feature = "discovery")]
-    if matches!(ty, DataType::DiscoveryAnnounce) {
+    if discovery::is_discovery_type(ty) {
         return true;
     }
 
@@ -1210,19 +1212,21 @@ impl Router {
             if !self.route_allowed_locked(st, None, Some(ty), side) {
                 continue;
             }
-            for (sender, sender_state) in route.announcers.iter() {
-                if !Self::is_end_to_end_destination_sender(sender) {
-                    continue;
-                }
+            for sender_state in route.announcers.values() {
                 if now_ms.saturating_sub(sender_state.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
                     continue;
                 }
-                if eps
-                    .iter()
-                    .copied()
-                    .any(|ep| sender_state.reachable.contains(&ep))
-                {
-                    out.insert(Self::sender_hash(sender), side);
+                for board in sender_state.topology_boards.iter() {
+                    if !Self::is_end_to_end_destination_sender(&board.sender_id) {
+                        continue;
+                    }
+                    if eps
+                        .iter()
+                        .copied()
+                        .any(|ep| board.reachable_endpoints.contains(&ep))
+                    {
+                        out.insert(Self::sender_hash(&board.sender_id), side);
+                    }
                 }
             }
         }
@@ -1749,6 +1753,39 @@ impl Router {
     }
 
     #[cfg(feature = "discovery")]
+    fn sender_topology_board_mut<'a>(
+        sender_state: &'a mut DiscoverySenderState,
+        sender_id: &str,
+    ) -> &'a mut TopologyBoardNode {
+        if let Some(idx) = sender_state
+            .topology_boards
+            .iter()
+            .position(|board| board.sender_id == sender_id)
+        {
+            return &mut sender_state.topology_boards[idx];
+        }
+        sender_state.topology_boards.push(TopologyBoardNode {
+            sender_id: sender_id.to_string(),
+            reachable_endpoints: Vec::new(),
+            reachable_timesync_sources: Vec::new(),
+            connections: Vec::new(),
+        });
+        sender_state
+            .topology_boards
+            .last_mut()
+            .expect("board inserted above")
+    }
+
+    #[cfg(feature = "discovery")]
+    fn refresh_sender_topology_state(sender_state: &mut DiscoverySenderState) {
+        discovery::normalize_topology_boards(&mut sender_state.topology_boards);
+        let (reachable, reachable_timesync_sources) =
+            discovery::summarize_topology_boards(&sender_state.topology_boards);
+        sender_state.reachable = reachable;
+        sender_state.reachable_timesync_sources = reachable_timesync_sources;
+    }
+
+    #[cfg(feature = "discovery")]
     fn recompute_discovery_side_state(route: &mut DiscoverySideState) {
         let mut reachable = Vec::new();
         let mut reachable_timesync_sources = Vec::new();
@@ -1765,6 +1802,82 @@ impl Router {
         route.reachable = reachable;
         route.reachable_timesync_sources = reachable_timesync_sources;
         route.last_seen_ms = last_seen_ms;
+    }
+
+    #[cfg(feature = "discovery")]
+    fn local_discovery_topology_board(
+        &self,
+        st: &RouterInner,
+        now_ms: u64,
+        link_local_enabled: bool,
+    ) -> TopologyBoardNode {
+        let mut reachable_endpoints = self.local_discovery_endpoints();
+        if !link_local_enabled {
+            reachable_endpoints.retain(|ep| !ep.is_link_local_only());
+        }
+        let mut connections = Vec::new();
+        for route in st.discovery_routes.values() {
+            if now_ms.saturating_sub(route.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                continue;
+            }
+            for (sender, sender_state) in route.announcers.iter() {
+                if now_ms.saturating_sub(sender_state.last_seen_ms) <= DISCOVERY_ROUTE_TTL_MS {
+                    connections.push(sender.clone());
+                }
+            }
+        }
+        connections.sort_unstable();
+        connections.dedup();
+        TopologyBoardNode {
+            sender_id: self.sender.to_string(),
+            reachable_endpoints,
+            reachable_timesync_sources: self.local_discovery_timesync_sources(now_ms),
+            connections,
+        }
+    }
+
+    #[cfg(feature = "discovery")]
+    fn advertised_discovery_topology_for_link_locked(
+        &self,
+        st: &RouterInner,
+        now_ms: u64,
+        link_local_enabled: bool,
+    ) -> Vec<TopologyBoardNode> {
+        let mut boards = vec![self.local_discovery_topology_board(st, now_ms, link_local_enabled)];
+        for route in st.discovery_routes.values() {
+            if now_ms.saturating_sub(route.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                continue;
+            }
+            for (announcer, sender_state) in route.announcers.iter() {
+                if now_ms.saturating_sub(sender_state.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                    continue;
+                }
+                let mut sender_boards = sender_state.topology_boards.clone();
+                if sender_boards.is_empty() {
+                    sender_boards.push(TopologyBoardNode {
+                        sender_id: announcer.clone(),
+                        reachable_endpoints: sender_state.reachable.clone(),
+                        reachable_timesync_sources: sender_state.reachable_timesync_sources.clone(),
+                        connections: vec![self.sender.to_string()],
+                    });
+                } else if let Some(board) = sender_boards
+                    .iter_mut()
+                    .find(|board| board.sender_id == *announcer)
+                {
+                    board.connections.push(self.sender.to_string());
+                }
+                if !link_local_enabled {
+                    for board in sender_boards.iter_mut() {
+                        board
+                            .reachable_endpoints
+                            .retain(|ep| !ep.is_link_local_only());
+                    }
+                }
+                discovery::merge_topology_boards(&mut boards, &sender_boards);
+            }
+        }
+        discovery::normalize_topology_boards(&mut boards);
+        boards
     }
 
     #[cfg(feature = "discovery")]
@@ -1787,23 +1900,16 @@ impl Router {
         now_ms: u64,
         link_local_enabled: bool,
     ) -> Vec<DataEndpoint> {
-        let mut eps = self.local_discovery_endpoints();
-        if !link_local_enabled {
-            eps.retain(|ep| !ep.is_link_local_only());
-        }
-        for route in st.discovery_routes.values() {
-            if now_ms.saturating_sub(route.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
-                continue;
-            }
-            eps.extend(route.reachable.iter().copied());
-        }
-        eps.retain(|ep| {
-            !discovery::is_discovery_endpoint(*ep)
-                && (link_local_enabled || !ep.is_link_local_only())
-        });
-        eps.sort_unstable();
-        eps.dedup();
-        eps
+        let (reachable_endpoints, _) = discovery::summarize_topology_boards(
+            &self.advertised_discovery_topology_for_link_locked(st, now_ms, link_local_enabled),
+        );
+        reachable_endpoints
+            .into_iter()
+            .filter(|ep| {
+                !discovery::is_discovery_endpoint(*ep)
+                    && (link_local_enabled || !ep.is_link_local_only())
+            })
+            .collect()
     }
 
     #[cfg(feature = "discovery")]
@@ -1812,15 +1918,9 @@ impl Router {
         st: &RouterInner,
         now_ms: u64,
     ) -> Vec<String> {
-        let mut sources = self.local_discovery_timesync_sources(now_ms);
-        for route in st.discovery_routes.values() {
-            if now_ms.saturating_sub(route.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
-                continue;
-            }
-            sources.extend(route.reachable_timesync_sources.iter().cloned());
-        }
-        sources.sort_unstable();
-        sources.dedup();
+        let (_, sources) = discovery::summarize_topology_boards(
+            &self.advertised_discovery_topology_for_link_locked(st, now_ms, true),
+        );
         sources
     }
 
@@ -1857,11 +1957,16 @@ impl Router {
                     );
                     let timesync_sources =
                         self.advertised_discovery_timesync_sources_for_link_locked(&st, now_ms);
-                    Some((side_id, endpoints, timesync_sources))
+                    let topology = self.advertised_discovery_topology_for_link_locked(
+                        &st,
+                        now_ms,
+                        side.opts.link_local_enabled,
+                    );
+                    Some((side_id, endpoints, timesync_sources, topology))
                 })
                 .collect::<Vec<_>>()
         };
-        for (side_id, endpoints, timesync_sources) in per_side {
+        for (side_id, endpoints, timesync_sources, topology) in per_side {
             if !endpoints.is_empty() {
                 let pkt =
                     discovery::build_discovery_announce(self.sender, now_ms, endpoints.as_slice())?;
@@ -1880,6 +1985,17 @@ impl Router {
                     now_ms,
                     timesync_sources.as_slice(),
                 )?;
+                self.tx_queue_item_with_flags(
+                    RouterTxItem::ToSide {
+                        src: None,
+                        dst: side_id,
+                        data: RouterItem::Packet(pkt),
+                    },
+                    true,
+                )?;
+            }
+            if !topology.is_empty() {
+                let pkt = discovery::build_discovery_topology(self.sender, now_ms, &topology)?;
                 self.tx_queue_item_with_flags(
                     RouterTxItem::ToSide {
                         src: None,
@@ -1920,6 +2036,13 @@ impl Router {
                     .is_empty()
                     || !self
                         .advertised_discovery_timesync_sources_for_link_locked(&st, now_ms)
+                        .is_empty()
+                    || !self
+                        .advertised_discovery_topology_for_link_locked(
+                            &st,
+                            now_ms,
+                            side.opts.link_local_enabled,
+                        )
                         .is_empty()
             });
             if st.sides.is_empty() || !has_any {
@@ -1969,14 +2092,32 @@ impl Router {
                 if !side_link_local_enabled {
                     reachable.retain(|ep| !ep.is_link_local_only());
                 }
-                let changed = sender_state.reachable != reachable;
-                sender_state.reachable = reachable;
+                let board = Self::sender_topology_board_mut(&mut sender_state, pkt.sender());
+                let changed = board.reachable_endpoints != reachable;
+                board.reachable_endpoints = reachable;
+                Self::refresh_sender_topology_state(&mut sender_state);
                 changed
             }
             DataType::DiscoveryTimeSyncSources => {
                 let sources = discovery::decode_discovery_timesync_sources(pkt)?;
-                let changed = sender_state.reachable_timesync_sources != sources;
-                sender_state.reachable_timesync_sources = sources;
+                let board = Self::sender_topology_board_mut(&mut sender_state, pkt.sender());
+                let changed = board.reachable_timesync_sources != sources;
+                board.reachable_timesync_sources = sources;
+                Self::refresh_sender_topology_state(&mut sender_state);
+                changed
+            }
+            DataType::DiscoveryTopology => {
+                let mut boards = discovery::decode_discovery_topology(pkt)?;
+                if !side_link_local_enabled {
+                    for board in boards.iter_mut() {
+                        board
+                            .reachable_endpoints
+                            .retain(|ep| !ep.is_link_local_only());
+                    }
+                }
+                let changed = sender_state.topology_boards != boards;
+                sender_state.topology_boards = boards;
+                Self::refresh_sender_topology_state(&mut sender_state);
                 changed
             }
             _ => false,
@@ -2239,7 +2380,12 @@ impl Router {
                     let started_ms = self.clock.now_ms();
                     let result = self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()));
                     if result.is_ok() {
-                        self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+                        self.record_side_tx_sample(
+                            side,
+                            bytes.len(),
+                            started_ms,
+                            self.clock.now_ms(),
+                        );
                     }
                     return result;
                 }
@@ -3434,16 +3580,30 @@ impl Router {
             .iter()
             .filter_map(|(&side_id, route)| {
                 let side = st.sides.get(side_id)?.as_ref()?;
+                let announcers = route
+                    .announcers
+                    .iter()
+                    .map(|(sender_id, sender_state)| TopologyAnnouncerRoute {
+                        sender_id: sender_id.clone(),
+                        reachable_endpoints: sender_state.reachable.clone(),
+                        reachable_timesync_sources: sender_state.reachable_timesync_sources.clone(),
+                        routers: sender_state.topology_boards.clone(),
+                        last_seen_ms: sender_state.last_seen_ms,
+                        age_ms: now_ms.saturating_sub(sender_state.last_seen_ms),
+                    })
+                    .collect();
                 Some(TopologySideRoute {
                     side_id,
                     side_name: side.name,
                     reachable_endpoints: route.reachable.clone(),
                     reachable_timesync_sources: route.reachable_timesync_sources.clone(),
+                    announcers,
                     last_seen_ms: route.last_seen_ms,
                     age_ms: now_ms.saturating_sub(route.last_seen_ms),
                 })
             })
             .collect();
+        let routers = self.advertised_discovery_topology_for_link_locked(&st, now_ms, true);
         let advertised_endpoints =
             self.advertised_discovery_endpoints_for_link_locked(&st, now_ms, true);
         let advertised_timesync_sources =
@@ -3451,6 +3611,7 @@ impl Router {
         TopologySnapshot {
             advertised_endpoints,
             advertised_timesync_sources,
+            routers,
             routes,
             current_announce_interval_ms: st.discovery_cadence.current_interval_ms,
             next_announce_ms: st.discovery_cadence.next_announce_ms,

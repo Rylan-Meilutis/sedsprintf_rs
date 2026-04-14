@@ -129,6 +129,15 @@ an immediate announce. Relays now expose `seds_relay_periodic(...)` for the norm
 alongside the lower-level `seds_relay_poll_discovery(...)` and `seds_relay_announce_discovery(...)`
 functions.
 
+Topology export is also available in the C ABI:
+
+- `seds_router_export_topology_len(...)` / `seds_router_export_topology(...)`
+- `seds_relay_export_topology_len(...)` / `seds_relay_export_topology(...)`
+
+These return a JSON snapshot. The top-level `routers` array contains each discovered router, the
+endpoints/time-sync source IDs it owns, and its connections. Per-side route entries also include
+their upstream announcer detail.
+
 ## Sending and receiving
 
 Common calls:

@@ -208,6 +208,22 @@ SedsResult seds_router_announce_discovery(SedsRouter * r);
 SedsResult seds_router_poll_discovery(SedsRouter * r, bool * out_did_queue);
 
 /**
+ * @brief Return the required buffer length for the router topology export JSON.
+ *
+ * The returned size includes the trailing NUL byte.
+ * Requires a build with the `discovery` feature.
+ */
+int32_t seds_router_export_topology_len(SedsRouter * r);
+
+/**
+ * @brief Export the current router discovery topology as JSON.
+ *
+ * Use `seds_router_export_topology_len()` to size the destination buffer.
+ * Requires a build with the `discovery` feature.
+ */
+SedsResult seds_router_export_topology(SedsRouter * r, char * buf, size_t buf_len);
+
+/**
  * @brief Run one router maintenance cycle.
  *
  * This polls time sync, polls discovery when enabled in the build, and then
@@ -630,6 +646,22 @@ SedsResult seds_relay_announce_discovery(SedsRelay * r);
  * Requires a build with the `discovery` feature.
  */
 SedsResult seds_relay_poll_discovery(SedsRelay * r, bool * out_did_queue);
+
+/**
+ * @brief Return the required buffer length for the relay topology export JSON.
+ *
+ * The returned size includes the trailing NUL byte.
+ * Requires a build with the `discovery` feature.
+ */
+int32_t seds_relay_export_topology_len(SedsRelay * r);
+
+/**
+ * @brief Export the current relay discovery topology as JSON.
+ *
+ * Use `seds_relay_export_topology_len()` to size the destination buffer.
+ * Requires a build with the `discovery` feature.
+ */
+SedsResult seds_relay_export_topology(SedsRelay * r, char * buf, size_t buf_len);
 
 /**
  * @brief Run one relay maintenance cycle.

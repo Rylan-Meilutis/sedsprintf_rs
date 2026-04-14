@@ -463,7 +463,10 @@ fn is_discovery_type(ty: &JsonType) -> bool {
         (ty.rust.as_str(), ty.name.as_str()),
         ("DiscoveryAnnounce", _)
             | (_, "DISCOVERY_ANNOUNCE")
+            | ("DiscoveryTimeSyncSources", _)
             | (_, "DISCOVERY_TIMESYNC_SOURCES")
+            | ("DiscoveryTopology", _)
+            | (_, "DISCOVERY_TOPOLOGY")
     )
 }
 
@@ -853,6 +856,11 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
             syn::Ident::new("DiscoveryTimeSyncSources", Span::call_site()),
             "Time sync source discovery advertisement (dynamic list of sender IDs).".to_string(),
         ));
+        ty_entries.push((
+            syn::Ident::new("DiscoveryTopology", Span::call_site()),
+            "Full board-topology discovery advertisement (boards, endpoints, and connections)."
+                .to_string(),
+        ));
     }
     ty_entries.push((
         syn::Ident::new("ReliableAck", Span::call_site()),
@@ -865,7 +873,7 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
 
     let max_ty_value = cfg.types.len() as u32
         + if timesync_enabled { 3 } else { 0 }
-        + if discovery_enabled { 2 } else { 0 }
+        + if discovery_enabled { 3 } else { 0 }
         + 2;
 
     let ty_variants = ty_entries
@@ -996,6 +1004,13 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
             },
             DataType::DiscoveryTimeSyncSources => MessageMeta {
                 name: "DISCOVERY_TIMESYNC_SOURCES",
+                element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
+                endpoints: &[DataEndpoint::Discovery],
+                reliable: crate::ReliableMode::None,
+                priority: 240,
+            },
+            DataType::DiscoveryTopology => MessageMeta {
+                name: "DISCOVERY_TOPOLOGY",
                 element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
                 endpoints: &[DataEndpoint::Discovery],
                 reliable: crate::ReliableMode::None,

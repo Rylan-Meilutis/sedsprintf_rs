@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.11.1
+
+- Discovery now carries a full transitive router graph with the built-in
+  `DISCOVERY_TOPOLOGY` control packet instead of exporting only flattened side reachability.
+- Routers and relays now preserve which sender IDs own which endpoints, which time-sync source IDs
+  belong to which router, and which routers are connected to each other when that topology is
+  forwarded across the network.
+- `export_topology()` now exposes:
+  - a top-level `routers` list with per-router endpoints, time-sync source IDs, and connections
+  - per-side announcer detail so applications can see which upstream router advertised each
+    portion of the graph
+- Added client-facing topology export parity:
+  - Python `Router.export_topology()` / `Relay.export_topology()`
+  - C `seds_router_export_topology[_len]` / `seds_relay_export_topology[_len]` JSON exports
+- Updated discovery, time-sync, Rust, Python, and C/C++ documentation to describe the richer
+  topology model and export surfaces.
+
 ## 3.11.0
 
 - Removed `RouterMode` from the active router model and moved router forwarding fully onto the

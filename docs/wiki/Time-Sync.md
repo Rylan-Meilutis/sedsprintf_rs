@@ -37,6 +37,8 @@ All payload fields are `u64` values in little-endian order. Timestamps are in mi
 
 With the `discovery` feature enabled, discovery also adds a built-in
 `DISCOVERY_TIMESYNC_SOURCES` control packet that advertises concrete time source sender IDs.
+The richer `DISCOVERY_TOPOLOGY` packet then attributes those source IDs to specific remote routers
+and carries their inter-router connections.
 
 `t4_ms` is captured locally when the response is received; it is not part of the packet payload.
 
@@ -99,7 +101,9 @@ With both `timesync` and `discovery` enabled:
 
 - discovery advertisements include `TIME_SYNC` endpoint reachability
 - routers and relays also advertise reachable time source sender IDs
-- `export_topology()` includes both reachable endpoints and reachable time source IDs per side
+- `export_topology()` includes both reachable endpoints and reachable time source IDs per side,
+  plus a top-level `routers` graph showing which router owns each source ID and how routers are
+  connected
 - a consumer can route requests toward the exact side that leads to its selected source instead of
   sending requests to every side that merely exposes `TIME_SYNC`
 

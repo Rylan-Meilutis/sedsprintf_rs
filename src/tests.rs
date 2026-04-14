@@ -4180,8 +4180,8 @@ mod router_tests {
     #[cfg(feature = "discovery")]
     mod discovery_tests {
         use crate::discovery::{
-            build_discovery_announce, build_discovery_timesync_sources, DISCOVERY_FAST_INTERVAL_MS,
-            DISCOVERY_ROUTE_TTL_MS,
+            build_discovery_announce, build_discovery_timesync_sources, build_discovery_topology,
+            TopologyBoardNode, DISCOVERY_FAST_INTERVAL_MS, DISCOVERY_ROUTE_TTL_MS,
         };
         use crate::relay::Relay;
         use crate::router::{Clock, EndpointHandler, RouterConfig};
@@ -4790,10 +4790,17 @@ mod router_tests {
 
             assert!(seen_a.lock().unwrap().is_empty());
             let b_pkts = seen_b.lock().unwrap().clone();
-            assert_eq!(b_pkts.len(), 1);
-            assert_eq!(b_pkts[0].data_type(), DataType::DiscoveryAnnounce);
-            let eps = crate::discovery::decode_discovery_announce(&b_pkts[0]).unwrap();
+            let announce = b_pkts
+                .iter()
+                .find(|pkt| pkt.data_type() == DataType::DiscoveryAnnounce)
+                .unwrap();
+            let eps = crate::discovery::decode_discovery_announce(announce).unwrap();
             assert_eq!(eps, vec![DataEndpoint::SdCard]);
+            assert!(
+                b_pkts
+                    .iter()
+                    .any(|pkt| pkt.data_type() == DataType::DiscoveryTopology)
+            );
         }
 
         #[test]
@@ -4829,6 +4836,53 @@ mod router_tests {
             let snap_after = router.export_topology();
             assert_eq!(snap_after.next_announce_ms, DISCOVERY_FAST_INTERVAL_MS);
             assert!(snap_after.current_announce_interval_ms >= DISCOVERY_FAST_INTERVAL_MS);
+        }
+
+        #[test]
+        fn router_exports_board_graph_and_tracks_transitive_endpoint_holders() {
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
+            let side_a =
+                router.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            let topology = vec![
+                TopologyBoardNode {
+                    sender_id: "REMOTE_A".to_string(),
+                    reachable_endpoints: vec![DataEndpoint::SdCard],
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["SENSOR_B".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "SENSOR_B".to_string(),
+                    reachable_endpoints: vec![DataEndpoint::Radio],
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["REMOTE_A".to_string()],
+                },
+            ];
+            let topology_pkt = build_discovery_topology("REMOTE_A", 0, &topology).unwrap();
+            router.rx_from_side(&topology_pkt, side_a).unwrap();
+
+            let snap = router.export_topology();
+            assert_eq!(snap.routes.len(), 1);
+            assert_eq!(snap.routes[0].announcers.len(), 1);
+            assert_eq!(snap.routes[0].announcers[0].sender_id, "REMOTE_A");
+            assert!(
+                snap.routes[0].announcers[0]
+                    .routers
+                    .iter()
+                    .any(|board| board.sender_id == "SENSOR_B"
+                        && board.reachable_endpoints == vec![DataEndpoint::Radio])
+            );
+            assert!(
+                snap.routers
+                    .iter()
+                    .any(|board| board.sender_id == "SENSOR_B"
+                        && board.connections.contains(&"REMOTE_A".to_string()))
+            );
+
+            assert!(
+                snap.advertised_endpoints.contains(&DataEndpoint::Radio),
+                "transitive endpoint holders should contribute to exported reachability"
+            );
         }
 
         #[test]
@@ -4909,10 +4963,17 @@ mod router_tests {
 
             assert!(seen_a.lock().unwrap().is_empty());
             let b_pkts = seen_b.lock().unwrap().clone();
-            assert_eq!(b_pkts.len(), 1);
-            assert_eq!(b_pkts[0].data_type(), DataType::DiscoveryAnnounce);
-            let eps = crate::discovery::decode_discovery_announce(&b_pkts[0]).unwrap();
+            let announce = b_pkts
+                .iter()
+                .find(|pkt| pkt.data_type() == DataType::DiscoveryAnnounce)
+                .unwrap();
+            let eps = crate::discovery::decode_discovery_announce(announce).unwrap();
             assert_eq!(eps, vec![DataEndpoint::Radio]);
+            assert!(
+                b_pkts
+                    .iter()
+                    .any(|pkt| pkt.data_type() == DataType::DiscoveryTopology)
+            );
         }
 
         #[test]
@@ -5831,9 +5892,16 @@ mod router_tests {
             router.process_tx_queue().unwrap();
 
             let pkts = seen.lock().unwrap().clone();
-            assert_eq!(pkts.len(), 2);
-            assert_eq!(pkts[0].data_type(), DataType::DiscoveryAnnounce);
-            assert_eq!(pkts[1].data_type(), DataType::GpsData);
+            let gps_idx = pkts
+                .iter()
+                .position(|pkt| pkt.data_type() == DataType::GpsData)
+                .unwrap();
+            assert!(gps_idx > 0);
+            assert!(
+                pkts[..gps_idx]
+                    .iter()
+                    .all(|pkt| crate::discovery::is_discovery_type(pkt.data_type()))
+            );
         }
 
         #[test]
@@ -6167,10 +6235,16 @@ mod router_tests {
 
             let net = seen_net.lock().unwrap().clone();
             let ll = seen_ll.lock().unwrap().clone();
-            assert_eq!(net.len(), 1);
-            assert_eq!(ll.len(), 1);
-            let net_eps = crate::discovery::decode_discovery_announce(&net[0]).unwrap();
-            let ll_eps = crate::discovery::decode_discovery_announce(&ll[0]).unwrap();
+            let net_announce = net
+                .iter()
+                .find(|pkt| pkt.data_type() == DataType::DiscoveryAnnounce)
+                .unwrap();
+            let ll_announce = ll
+                .iter()
+                .find(|pkt| pkt.data_type() == DataType::DiscoveryAnnounce)
+                .unwrap();
+            let net_eps = crate::discovery::decode_discovery_announce(net_announce).unwrap();
+            let ll_eps = crate::discovery::decode_discovery_announce(ll_announce).unwrap();
             assert!(!net_eps.contains(&software_bus));
             assert!(net_eps.contains(&DataEndpoint::Radio));
             assert!(ll_eps.contains(&software_bus));
