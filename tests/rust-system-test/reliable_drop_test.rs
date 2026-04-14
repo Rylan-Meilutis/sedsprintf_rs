@@ -644,9 +644,7 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&r_to_a) {
                 let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::GpsData
-                    && !info.ack_only()
-                    && a_ack_seen_by_relay
+                if info.envelope.ty == DataType::GpsData && !info.ack_only() && a_ack_seen_by_relay
                 {
                     forwarded_a_after_ack += 1;
                 }
@@ -728,5 +726,4 @@ mod reliable_drop_tests {
             "unacknowledged destination should keep receiving end-to-end retransmits"
         );
     }
-
 }

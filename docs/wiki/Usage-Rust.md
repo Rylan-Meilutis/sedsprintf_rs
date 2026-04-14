@@ -84,6 +84,8 @@ through which sides.
 - unknown paths still fall back to flood/bootstrap behavior
 - link-local-only endpoints stay on sides marked `link_local_enabled`
 - local plus source-side route rules still gate what discovery is allowed to use
+- discovery also carries a transitive router graph, so exported topology keeps sender ownership and
+  router-to-router connections instead of only flattening reachability per side
 
 When discovery reports multiple candidate paths:
 
@@ -160,6 +162,16 @@ The common maintenance calls are:
 - `periodic(timeout_ms)`
 - `periodic_no_timesync(timeout_ms)` when `timesync` is enabled but you want to skip it for one
   loop
+
+## Topology export
+
+With discovery enabled, `export_topology()` returns the router's current learned view.
+
+- `topology.routers` contains the top-level discovered router graph
+- each router entry includes the sender ID, owned endpoints, owned time-sync source IDs, and
+  connected routers
+- each side route also includes `announcers`, so you can see which upstream router advertised the
+  exported topology
 
 ## Reserved internal endpoints
 

@@ -64,9 +64,11 @@ With the `discovery` feature enabled, the router has a built-in internal control
 
 - `DISCOVERY` endpoint and `DISCOVERY_ANNOUNCE` type are built in.
 - When `timesync` is also enabled, `DISCOVERY_TIMESYNC_SOURCES` is also built in.
+- `DISCOVERY_TOPOLOGY` is also built in and carries the transitive router graph.
 - Discovery packets are handled internally, not through user endpoint handlers.
 - The router keeps soft-state reachability data per side:
-  reachable endpoints, reachable time source sender IDs, and last-seen timestamp.
+  reachable endpoints, reachable time source sender IDs, per-announcer router graphs, and
+  last-seen timestamps.
 - Unknown or expired routes fall back to ordinary flood behavior.
 
 Discovery advertisements are adaptive:
@@ -123,7 +125,7 @@ With discovery enabled, forwarding also consults the learned side map:
 - `announce_discovery()` queues a discovery advertisement immediately.
 - `poll_discovery()` queues one only when the adaptive cadence says it is due.
 - `export_topology()` snapshots the current learned route map and announce cadence, including
-  discovered time source IDs when available.
+  discovered time source IDs, the top-level `routers` graph, and per-side announcer detail.
 
 ## Queue variants and processing
 

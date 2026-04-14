@@ -6,7 +6,7 @@
 // Therefore, if you are trying to optimize
 // this routine, and it fails (it most surely will),
 // please increase this counter as a warning for the next person:
-// total hours wasted on this project = 1542
+// total hours wasted on this project = 1582
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(unused_doc_comments)]

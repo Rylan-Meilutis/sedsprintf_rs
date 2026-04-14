@@ -71,6 +71,17 @@ environments.
 
 ## Recent changelog milestones
 
+## Version 3.11.1 highlights
+
+- Discovery now propagates a full router graph with `DISCOVERY_TOPOLOGY`, so routers and relays
+  keep track of which sender IDs own which endpoints and how remote routers connect to each other.
+- `export_topology()` now includes router-level topology plus per-side announcer detail instead of
+  only aggregated reachable endpoint lists.
+- Topology export is now available to clients across all supported surfaces:
+  Rust `export_topology()`, Python `Router.export_topology()` / `Relay.export_topology()`, and C
+  JSON exports via `seds_router_export_topology*` / `seds_relay_export_topology*`.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
+
 ## Version 3.11.0 highlights
 
 - Removed `RouterMode` from the active router model. Routers now use the same runtime routing-rule

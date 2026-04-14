@@ -1,5 +1,22 @@
 # Changelogs
 
+## Version 3.11.1 highlights
+
+- Discovery topology fidelity:
+    - Added built-in `DISCOVERY_TOPOLOGY` advertisements so routers and relays can propagate
+      router identity, endpoint ownership, time-sync source ownership, and inter-router
+      connections.
+    - Discovery no longer loses router-level attribution after one hop by collapsing everything
+      into only side-level endpoint sets.
+- Topology export parity:
+    - `export_topology()` now includes a top-level `routers` graph plus per-side announcer detail.
+    - Python now exposes `Router.export_topology()` and `Relay.export_topology()` directly.
+    - C now exposes `seds_router_export_topology[_len]` and
+      `seds_relay_export_topology[_len]`, returning JSON snapshots.
+- Documentation refresh:
+    - Updated the README plus Rust, Python, C/C++, router-detail, and time-sync docs to describe
+      the richer exported topology model.
+
 ## Version 3.11.0 highlights
 
 - Router model cleanup:

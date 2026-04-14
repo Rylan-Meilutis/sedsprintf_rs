@@ -71,8 +71,17 @@ Use `None` for `src_side_id` when controlling locally-originated traffic.
 With `discovery` enabled:
 
 - routers and relays learn endpoint reachability per side
+- discovery also propagates a transitive router graph, not just flattened endpoint sets
 - normal traffic defaults to adaptive discovered-path load balancing
 - reliable traffic still fans out across all known discovered candidates
+
+`export_topology()` is available on both `Router` and `Relay`.
+
+- it returns a Python `dict`
+- the top-level `routers` key lists each discovered router, the endpoints/source IDs it owns, and
+  its connections
+- each route entry also includes `announcers` so you can see which upstream router advertised each
+  piece of topology
 
 Reliable delivery is enabled on a per-side basis with `reliable_enabled=True` for serialized
 sides.

@@ -522,7 +522,12 @@ fn is_timesync_type(ty: &JsonType) -> bool {
 fn is_discovery_type(ty: &JsonType) -> bool {
     matches!(
         (ty.rust.as_str(), ty.name.as_str()),
-        ("DiscoveryAnnounce", _) | (_, "DISCOVERY_ANNOUNCE") | (_, "DISCOVERY_TIMESYNC_SOURCES")
+        ("DiscoveryAnnounce", _)
+            | (_, "DISCOVERY_ANNOUNCE")
+            | ("DiscoveryTimeSyncSources", _)
+            | (_, "DISCOVERY_TIMESYNC_SOURCES")
+            | ("DiscoveryTopology", _)
+            | (_, "DISCOVERY_TOPOLOGY")
     )
 }
 
@@ -598,6 +603,21 @@ fn append_discovery_builtins(cfg: &mut TelemetryConfig) {
         name: "DISCOVERY_TIMESYNC_SOURCES".to_string(),
         doc: Some(
             "Time sync source discovery advertisement (dynamic list of sender IDs).".to_string(),
+        ),
+        _reliable: Some(false),
+        element: JsonElement::Dynamic {
+            data_type: "UInt8".to_string(),
+        },
+        class: "Data".to_string(),
+        endpoints: vec!["Discovery".to_string()],
+    });
+
+    cfg.types.push(JsonType {
+        rust: "DiscoveryTopology".to_string(),
+        name: "DISCOVERY_TOPOLOGY".to_string(),
+        doc: Some(
+            "Full board-topology discovery advertisement (boards, endpoints, and connections)."
+                .to_string(),
         ),
         _reliable: Some(false),
         element: JsonElement::Dynamic {
