@@ -80,7 +80,7 @@ strum = { version = "0.28.0", default-features = false }
 crc32fast = { version = "1.5.0", default-features = false }
 
 # Optional dependencies enabled by features
-pyo3 = { version = "0.28.2", optional = true, features = ["auto-initialize", "extension-module", "multiple-pymethods"] }
+pyo3 = { version = "0.28.3", optional = true, features = ["auto-initialize", "extension-module", "multiple-pymethods"] }
 zstd-safe = { version = "7.2.4", optional = true, default-features = false }
 
 # Build dependencies for code generation in build.rs
