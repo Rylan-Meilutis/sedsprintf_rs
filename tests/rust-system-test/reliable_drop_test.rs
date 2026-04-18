@@ -12,6 +12,8 @@ mod reliable_drop_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
+    type SharedBusFrameQueue = Arc<Mutex<VecDeque<(usize, Vec<u8>)>>>;
+
     fn shared_clock(now: Arc<AtomicU64>) -> Box<dyn Clock + Send + Sync> {
         Box::new(move || now.load(Ordering::SeqCst))
     }
@@ -433,7 +435,7 @@ mod reliable_drop_tests {
     }
 
     struct SharedBus {
-        frames: Arc<Mutex<VecDeque<(usize, Vec<u8>)>>>,
+        frames: SharedBusFrameQueue,
     }
 
     impl SharedBus {
@@ -1706,6 +1708,410 @@ mod reliable_drop_tests {
             actuator_hits.lock().unwrap().as_slice(),
             &[7],
             "shared-bus reliable forwarding should retry until the missed listener receives the frame; src->gw data frames={source_to_gateway_data_frames}, src->gw seqs={source_to_gateway_seqs:?}, gw->bus data frames={gateway_to_bus_data_frames}"
+        );
+    }
+
+    #[test]
+    fn mixed_first_hop_reliable_modes_still_reach_final_node() {
+        let now = Arc::new(AtomicU64::new(0));
+        let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_sink = delivered.clone();
+
+        let source = Router::new_with_clock(
+            RouterConfig::default().with_sender("GS"),
+            shared_clock(now.clone()),
+        );
+        let relay = Relay::new(shared_clock(now.clone()));
+        let dest = Router::new_with_clock(
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                move |pkt| {
+                    let vals = pkt.data_as_f32()?;
+                    if let Some(first) = vals.first() {
+                        delivered_sink.lock().unwrap().push(*first as u32);
+                    }
+                    Ok(())
+                },
+            )])
+            .with_sender("AB"),
+            shared_clock(now.clone()),
+        );
+
+        let s_to_r: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let r_to_s: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let r_to_d: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let d_to_r: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+        let source_side = source.add_side_serialized_with_options(
+            "relay",
+            {
+                let q = s_to_r.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            },
+        );
+        let relay_source_side = relay.add_side_serialized_with_options(
+            "source_old_fw",
+            {
+                let q = r_to_s.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RelaySideOptions {
+                reliable_enabled: false,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            },
+        );
+        let relay_dest_side = relay.add_side_serialized_with_options(
+            "dest",
+            {
+                let q = r_to_d.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RelaySideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            },
+        );
+        let dest_side = dest.add_side_serialized_with_options(
+            "relay",
+            {
+                let q = d_to_r.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        relay
+            .rx_from_side(
+                relay_dest_side,
+                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+            )
+            .unwrap();
+        relay.announce_discovery().unwrap();
+        relay.process_all_queues().unwrap();
+        for frame in drain_queue(&r_to_s) {
+            source
+                .rx_serialized_queue_from_side(&frame, source_side)
+                .unwrap();
+        }
+        source.process_all_queues_with_timeout(0).unwrap();
+
+        source
+            .tx(
+                Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[21.0, 0.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    21,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        for _ in 0..32 {
+            source.process_all_queues_with_timeout(0).unwrap();
+            relay.process_all_queues().unwrap();
+            dest.process_all_queues_with_timeout(0).unwrap();
+
+            for frame in drain_queue(&s_to_r) {
+                relay
+                    .rx_serialized_from_side(relay_source_side, &frame)
+                    .unwrap();
+            }
+            for frame in drain_queue(&r_to_d) {
+                dest.rx_serialized_queue_from_side(&frame, dest_side).unwrap();
+            }
+            for frame in drain_queue(&d_to_r) {
+                relay.rx_serialized_from_side(relay_dest_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&r_to_s) {
+                source
+                    .rx_serialized_queue_from_side(&frame, source_side)
+                    .unwrap();
+            }
+
+            if delivered.lock().unwrap().as_slice() == [21] {
+                break;
+            }
+            now.fetch_add(RELIABLE_RETRANSMIT_MS, Ordering::SeqCst);
+        }
+
+        assert_eq!(
+            delivered.lock().unwrap().as_slice(),
+            &[21],
+            "mixed reliable/non-reliable first hop should still deliver the command"
+        );
+    }
+
+    #[test]
+    fn delayed_intermediate_rx_processing_only_delays_reliable_delivery() {
+        let now = Arc::new(AtomicU64::new(0));
+        let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let delivered_sink = delivered.clone();
+
+        let source = Router::new_with_clock(
+            RouterConfig::default().with_sender("GS"),
+            shared_clock(now.clone()),
+        );
+        let relay = Relay::new(shared_clock(now.clone()));
+        let dest = Router::new_with_clock(
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                move |pkt| {
+                    let vals = pkt.data_as_f32()?;
+                    if let Some(first) = vals.first() {
+                        delivered_sink.lock().unwrap().push(*first as u32);
+                    }
+                    Ok(())
+                },
+            )])
+            .with_sender("AB"),
+            shared_clock(now.clone()),
+        );
+
+        let s_to_r: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let r_to_s: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let r_to_d: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let d_to_r: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+        let source_side = source.add_side_serialized_with_options(
+            "relay",
+            {
+                let q = s_to_r.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            },
+        );
+        let relay_source_side = relay.add_side_serialized_with_options(
+            "source",
+            {
+                let q = r_to_s.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RelaySideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            },
+        );
+        let relay_dest_side = relay.add_side_serialized_with_options(
+            "dest",
+            {
+                let q = r_to_d.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RelaySideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            },
+        );
+        let dest_side = dest.add_side_serialized_with_options(
+            "relay",
+            {
+                let q = d_to_r.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        relay
+            .rx_from_side(
+                relay_dest_side,
+                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+            )
+            .unwrap();
+        relay.announce_discovery().unwrap();
+        relay.process_all_queues().unwrap();
+        for frame in drain_queue(&r_to_s) {
+            source
+                .rx_serialized_queue_from_side(&frame, source_side)
+                .unwrap();
+        }
+        source.process_all_queues_with_timeout(0).unwrap();
+
+        source
+            .tx(
+                Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[33.0, 0.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    33,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let mut delayed_first_hop_frames = Vec::new();
+        for tick in 0..40 {
+            source.process_all_queues_with_timeout(0).unwrap();
+            relay.process_all_queues().unwrap();
+            dest.process_all_queues_with_timeout(0).unwrap();
+
+            delayed_first_hop_frames.extend(drain_queue(&s_to_r));
+
+            if tick >= 4 {
+                for frame in delayed_first_hop_frames.drain(..) {
+                    relay
+                        .rx_serialized_from_side(relay_source_side, &frame)
+                        .unwrap();
+                }
+            }
+
+            for frame in drain_queue(&r_to_d) {
+                dest.rx_serialized_queue_from_side(&frame, dest_side).unwrap();
+            }
+            for frame in drain_queue(&d_to_r) {
+                relay.rx_serialized_from_side(relay_dest_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&r_to_s) {
+                source
+                    .rx_serialized_queue_from_side(&frame, source_side)
+                    .unwrap();
+            }
+
+            if delivered.lock().unwrap().as_slice() == [33] {
+                break;
+            }
+            now.fetch_add(RELIABLE_RETRANSMIT_MS, Ordering::SeqCst);
+        }
+
+        assert_eq!(
+            delivered.lock().unwrap().as_slice(),
+            &[33],
+            "slow intermediate RX processing should delay but not prevent delivery"
+        );
+    }
+
+    #[test]
+    fn reflected_duplicate_ordered_frames_do_not_confuse_final_receiver() {
+        let now = Arc::new(AtomicU64::new(0));
+        let received: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let recv_sink = received.clone();
+
+        let receiver = Router::new_with_clock(
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                move |pkt| {
+                    let vals = pkt.data_as_f32()?;
+                    if let Some(first) = vals.first() {
+                        recv_sink.lock().unwrap().push(*first as u32);
+                    }
+                    Ok(())
+                },
+            )])
+            .with_sender("AB"),
+            shared_clock(now.clone()),
+        );
+        let echoed_frames: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let side = receiver.add_side_serialized_with_options(
+            "echoed_bus",
+            {
+                let q = echoed_frames.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        let pkt1 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        let pkt2 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[2.0, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+        let seq1 = serialize::serialize_packet_with_reliable(
+            &pkt1,
+            serialize::ReliableHeader {
+                flags: 0,
+                seq: 1,
+                ack: 0,
+            },
+        );
+        let seq2 = serialize::serialize_packet_with_reliable(
+            &pkt2,
+            serialize::ReliableHeader {
+                flags: 0,
+                seq: 2,
+                ack: 0,
+            },
+        );
+
+        receiver.rx_serialized_queue_from_side(&seq1, side).unwrap();
+        receiver.process_all_queues_with_timeout(0).unwrap();
+        receiver.rx_serialized_queue_from_side(&seq1, side).unwrap();
+        receiver.process_all_queues_with_timeout(0).unwrap();
+        receiver.rx_serialized_queue_from_side(&seq2, side).unwrap();
+        receiver.process_all_queues_with_timeout(0).unwrap();
+        receiver.rx_serialized_queue_from_side(&seq1, side).unwrap();
+        receiver.process_all_queues_with_timeout(0).unwrap();
+        receiver.rx_serialized_queue_from_side(&seq2, side).unwrap();
+        receiver.process_all_queues_with_timeout(0).unwrap();
+
+        assert_eq!(
+            received.lock().unwrap().as_slice(),
+            &[1, 2],
+            "reflected duplicates should not break ordered reliable delivery"
+        );
+        assert!(
+            !drain_queue(&echoed_frames).is_empty(),
+            "receiver should still emit ACK/control traffic for the ordered stream"
         );
     }
 }
