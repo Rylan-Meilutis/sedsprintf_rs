@@ -1712,6 +1712,218 @@ mod reliable_drop_tests {
     }
 
     #[test]
+    fn reliable_multidrop_forwarding_disables_hop_reliable_on_shared_side() {
+        let now = Arc::new(AtomicU64::new(0));
+        let gw_bus = SharedBus::new();
+        let src_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let gw_to_src: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+        let actuator_hits: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let actuator_seen = actuator_hits.clone();
+
+        let source = Router::new_with_clock(
+            RouterConfig::default().with_sender("GS"),
+            shared_clock(now.clone()),
+        );
+        let gateway = Relay::new(shared_clock(now.clone()));
+        let actuator = Router::new_with_clock(
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::Radio,
+                move |pkt| {
+                    let vals = pkt.data_as_f32()?;
+                    if let Some(first) = vals.first() {
+                        actuator_seen.lock().unwrap().push(*first as u32);
+                    }
+                    Ok(())
+                },
+            )])
+            .with_sender("AB"),
+            shared_clock(now.clone()),
+        );
+        let valve = Router::new_with_clock(
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::SdCard,
+                |_pkt| Ok(()),
+            )])
+            .with_sender("VB"),
+            shared_clock(now.clone()),
+        );
+        let daq = Router::new_with_clock(
+            RouterConfig::default().with_sender("DAQ"),
+            shared_clock(now.clone()),
+        );
+
+        let relay_side_opts = RelaySideOptions {
+            reliable_enabled: true,
+            link_local_enabled: false,
+            ..RelaySideOptions::default()
+        };
+        let side_opts = RouterSideOptions {
+            reliable_enabled: true,
+            link_local_enabled: false,
+            ..RouterSideOptions::default()
+        };
+
+        let source_uplink = source.add_side_serialized_with_options(
+            "gw",
+            {
+                let q = src_to_gw.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            side_opts,
+        );
+        let uplink = gateway.add_side_serialized_with_options(
+            "uplink",
+            {
+                let q = gw_to_src.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            relay_side_opts,
+        );
+        let gw_child = gateway.add_side_serialized_with_options(
+            "gw_bus",
+            gw_bus.tx_handler(0),
+            relay_side_opts,
+        );
+        let actuator_side =
+            actuator.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(1), side_opts);
+        let valve_side =
+            valve.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(2), side_opts);
+        let daq_side = daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
+
+        gateway
+            .rx_from_side(
+                gw_child,
+                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+            )
+            .unwrap();
+        gateway
+            .rx_from_side(
+                gw_child,
+                build_discovery_announce("VB", 0, &[DataEndpoint::SdCard]).unwrap(),
+            )
+            .unwrap();
+        gateway
+            .rx_from_side(gw_child, build_discovery_announce("DAQ", 0, &[]).unwrap())
+            .unwrap();
+        for _ in 0..6 {
+            gateway.process_all_queues().unwrap();
+            gateway.announce_discovery().unwrap();
+            gateway.process_all_queues().unwrap();
+            for frame in drain_queue(&gw_to_src) {
+                source
+                    .rx_serialized_queue_from_side(&frame, source_uplink)
+                    .unwrap();
+            }
+            source.process_all_queues_with_timeout(0).unwrap();
+            now.fetch_add(25, Ordering::SeqCst);
+        }
+        assert!(
+            source.export_topology().routers.iter().any(|board| board.sender_id == "AB"),
+            "source should learn that AB is reachable behind GW before the command is sent"
+        );
+
+        source
+            .tx(
+                Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[11.0, 0.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    11,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let mut saw_reliable_source_frame = false;
+        let mut saw_shared_side_data_frame = false;
+        let mut shared_side_frame_flags = None;
+        let mut saw_shared_side_control_frame = false;
+        for _ in 0..24 {
+            source.process_all_queues_with_timeout(0).unwrap();
+            gateway.process_all_queues().unwrap();
+            actuator.process_all_queues_with_timeout(0).unwrap();
+            valve.process_all_queues_with_timeout(0).unwrap();
+            daq.process_all_queues_with_timeout(0).unwrap();
+
+            for frame in drain_queue(&src_to_gw) {
+                let info = serialize::peek_frame_info(&frame).unwrap();
+                if info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                    saw_reliable_source_frame = info.reliable.is_some();
+                }
+                gateway.rx_serialized_from_side(uplink, &frame).unwrap();
+            }
+
+            for (src, frame) in gw_bus.drain() {
+                let info = serialize::peek_frame_info(&frame).unwrap();
+                if src == 0
+                    && matches!(
+                        info.envelope.ty,
+                        DataType::ReliableAck | DataType::ReliablePacketRequest
+                    )
+                {
+                    saw_shared_side_control_frame = true;
+                }
+                if src == 0 && info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                    saw_shared_side_data_frame = true;
+                    shared_side_frame_flags = info.reliable.map(|hdr| hdr.flags);
+                }
+                if src != 0 {
+                    gateway.rx_serialized_from_side(gw_child, &frame).unwrap();
+                }
+                if src != 1 {
+                    actuator
+                        .rx_serialized_queue_from_side(&frame, actuator_side)
+                        .unwrap();
+                }
+                if src != 2 {
+                    valve
+                        .rx_serialized_queue_from_side(&frame, valve_side)
+                        .unwrap();
+                }
+                if src != 3 {
+                    daq.rx_serialized_queue_from_side(&frame, daq_side).unwrap();
+                }
+            }
+
+            actuator.process_all_queues_with_timeout(0).unwrap();
+            valve.process_all_queues_with_timeout(0).unwrap();
+            daq.process_all_queues_with_timeout(0).unwrap();
+
+            if actuator_hits.lock().unwrap().as_slice() == [11] {
+                break;
+            }
+
+            now.fetch_add(RELIABLE_RETRANSMIT_MS / 2, Ordering::SeqCst);
+        }
+
+        assert!(
+            saw_reliable_source_frame,
+            "source->gateway hop should still use reliable framing"
+        );
+        assert!(
+            saw_shared_side_data_frame,
+            "gateway never forwarded the application packet onto the shared child side"
+        );
+        assert!(
+            !saw_shared_side_control_frame,
+            "gateway should not emit hop-level reliable control frames onto a shared serialized side with multiple announcers"
+        );
+        assert_eq!(
+            shared_side_frame_flags,
+            Some(serialize::RELIABLE_FLAG_UNSEQUENCED),
+            "gateway should rewrite the forwarded shared-side application frame as unsequenced instead of using hop-level ACK sequencing"
+        );
+        assert_eq!(actuator_hits.lock().unwrap().as_slice(), &[11]);
+    }
+
+    #[test]
     fn mixed_first_hop_reliable_modes_still_reach_final_node() {
         let now = Arc::new(AtomicU64::new(0));
         let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
