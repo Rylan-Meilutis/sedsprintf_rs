@@ -110,6 +110,36 @@ for a more complete example. Time sync is demonstrated in c-example-code/src/tim
 ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/c-example-code/src/timesync_example.c)).
 See [Time-Sync](Time-Sync) for the time sync packet flow and roles.
 
+## Side reliability
+
+Side-level reliability in the C API is controlled by the `reliable_enabled` argument passed to:
+
+- `seds_router_add_side_serialized`
+- `seds_router_add_side_packet`
+- `seds_relay_add_side_serialized`
+- `seds_relay_add_side_packet`
+
+That flag is per hop, not global. It controls what the router/relay does on the connection between
+itself and that specific side callback.
+
+What it means in practice:
+
+- reliable schema types only use the router/relay's hop-level reliable layer on sides where
+  `reliable_enabled == true`
+- on serialized sides, that hop-level layer adds sequence numbers, ACKs, packet requests, and
+  retransmits
+- on sides where `reliable_enabled == false`, the router/relay sends the application packet once
+  without that hop-level reliable wrapper
+- packet-view side callbacks do not preserve the serialized hop-level wrapper, so the most complete
+  router/relay-managed reliable behavior is on serialized sides
+
+For routers, this side setting is separate from router-wide and end-to-end reliability:
+
+- `RouterConfig::with_reliable_enabled(false)` on the Rust side disables the router-managed
+  hop-level reliable layer entirely
+- otherwise, the source router can still track reliable packets end-to-end across the network even
+  if one particular egress side does not use hop-level reliable framing
+
 With `timesync` enabled, the router owns an internal network clock and handles `TIME_SYNC`
 packets internally. Use `seds_router_get_network_time_ms` / `seds_router_get_network_time` to
 read the current synthesized network time. Source/master nodes can seed that clock directly with
@@ -147,6 +177,22 @@ Common calls:
 - `seds_router_receive_serialized`: receive bytes immediately.
 - `seds_router_rx_serialized_packet_to_queue`: enqueue for later processing.
 - `seds_router_process_all_queues`: process queued RX/TX.
+
+Immediate vs queued variants:
+
+- `receive*` / `transmit*` act immediately in the current call
+- `*_to_queue*` only enqueue work for a later queue drain
+- `*_from_side*` variants tag the traffic with an explicit ingress side id
+- non-`from_side` variants treat the traffic as locally-originated
+
+Main-loop guidance:
+
+- `seds_router_periodic(...)` is the normal router loop entry point because it polls time sync,
+  polls discovery, and drains queues
+- `seds_router_periodic_no_timesync(...)` does the same but skips time sync for that iteration
+- `seds_relay_periodic(...)` is the normal relay loop entry point
+- `seds_router_process_*` and `seds_relay_process_*` are lower-level phase helpers when you need
+  manual control
 
 As of v3.0.0, most applications should call the plain receive APIs above. Side IDs are tracked
 internally by the router. If you need to explicitly override ingress (custom relay or bridge),
@@ -196,6 +242,16 @@ traffic on the default routing policy.
 - `Seds_RSM_Fanout`: send to all eligible paths.
 - `Seds_RSM_Weighted`: send one packet on one eligible path using weighted round-robin.
 - `Seds_RSM_Failover`: send only on the lowest-priority eligible path.
+
+The routing parameters mean:
+
+- `src_side_id`: the ingress side that traffic arrived from; pass `-1` for locally-originated
+  router/relay traffic
+- `dst_side_id`: the candidate egress side being allowed, blocked, weighted, or prioritized
+- `ty`: the `DataType` affected by a typed-route override
+- `enabled`: whether that route is allowed
+- `weight`: relative share used by `Seds_RSM_Weighted`
+- `priority`: lower values win in `Seds_RSM_Failover`
 
 ## Payload layout expectations
 

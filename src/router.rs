@@ -33,7 +33,7 @@ use crate::{
         DataEndpoint, DataType, DEVICE_IDENTIFIER, MAX_HANDLER_RETRIES, RELIABLE_MAX_PENDING,
         RELIABLE_MAX_RETRIES, RELIABLE_RETRANSMIT_MS,
     }, get_needed_message_size, impl_letype_num, is_reliable_type,
-    lock::RouterMutex,
+    lock::{ReentryGate, RouterMutex},
     message_meta, message_priority, packet::Packet,
     reliable_mode,
     serialize, MessageElement,
@@ -298,9 +298,22 @@ impl Debug for RouterTxHandlerFn {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RouterSideOptions {
+    /// Enables the router's per-link reliable transport layer on this side.
+    ///
+    /// When `true` and the side uses a serialized TX handler, reliable schema types gain
+    /// sequence numbers, ACKs, packet requests, and retransmits on this specific hop.
+    /// When `false`, the router strips the reliable framing for that side and sends only the
+    /// application packet payload once.
+    ///
+    /// This setting only affects the hop between this router and the side's TX callback. It does
+    /// not change whether a schema `DataType` is defined as reliable, and it does not disable the
+    /// router's end-to-end reliable tracking for packets originated elsewhere in the network.
     pub reliable_enabled: bool,
+    /// Marks the side as eligible for link-local-only endpoints and discovery routes.
     pub link_local_enabled: bool,
+    /// Allows packets received from this side to enter router processing.
     pub ingress_enabled: bool,
+    /// Allows the router to transmit packets toward this side.
     pub egress_enabled: bool,
 }
 
@@ -762,6 +775,7 @@ pub struct Router {
     cfg: RouterConfig,
     state: RouterMutex<RouterInner>,
     isr_rx_queue: IsrRxQueue,
+    side_tx_gate: ReentryGate,
     clock: Box<dyn Clock + Send + Sync>,
     #[cfg(feature = "timesync")]
     timesync: RouterMutex<TimeSyncRuntime>,
@@ -1305,6 +1319,39 @@ impl Router {
         };
         side_ref.opts.reliable_enabled
             && matches!(side_ref.tx_handler, RouterTxHandlerFn::Serialized(_))
+    }
+
+    #[cfg(feature = "discovery")]
+    fn side_has_multiple_announcers_locked(
+        &self,
+        st: &RouterInner,
+        side: RouterSideId,
+        now_ms: u64,
+    ) -> bool {
+        st.discovery_routes
+            .get(&side)
+            .map(|route| {
+                route
+                    .announcers
+                    .values()
+                    .filter(|sender| {
+                        now_ms.saturating_sub(sender.last_seen_ms) <= DISCOVERY_ROUTE_TTL_MS
+                    })
+                    .take(2)
+                    .count()
+                    > 1
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(feature = "discovery"))]
+    fn side_has_multiple_announcers_locked(
+        &self,
+        _st: &RouterInner,
+        _side: RouterSideId,
+        _now_ms: u64,
+    ) -> bool {
+        false
     }
 
     fn queue_end_to_end_reliable_ack(&self, pkt: &Packet) -> TelemetryResult<()> {
@@ -2302,6 +2349,9 @@ impl Router {
             side_ref.tx_handler.clone()
         };
 
+        let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+            return Err(TelemetryError::Io("side tx busy"));
+        };
         let started_ms = self.clock.now_ms();
         let result = match handler {
             RouterTxHandlerFn::Serialized(f) => self
@@ -2320,18 +2370,24 @@ impl Router {
     }
 
     fn send_reliable_to_side(&self, side: RouterSideId, data: RouterItem) -> TelemetryResult<()> {
-        let (handler, opts) = {
+        let (handler, opts, hop_reliable_enabled) = {
             let st = self.state.lock();
             let side_ref = Self::side_ref(&st, side)?;
-            (side_ref.tx_handler.clone(), side_ref.opts)
+            let opts = side_ref.opts;
+            let hop_reliable_enabled = opts.reliable_enabled
+                && self.cfg.reliable_enabled()
+                && !self.side_has_multiple_announcers_locked(&st, side, self.clock.now_ms());
+            (side_ref.tx_handler.clone(), opts, hop_reliable_enabled)
         };
 
         let RouterTxHandlerFn::Serialized(f) = &handler else {
             return self.call_side_tx_handler(side, &handler, &data);
         };
 
-        if !opts.reliable_enabled || !self.cfg.reliable_enabled() {
-            if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
+        if !hop_reliable_enabled {
+            let mut adjusted_opts = opts;
+            adjusted_opts.reliable_enabled = false;
+            if let Some(adjusted) = self.adjust_reliable_for_side(adjusted_opts, data)? {
                 return self.call_side_tx_handler(side, &handler, &adjusted);
             }
             return Ok(());
@@ -2377,6 +2433,9 @@ impl Router {
             RouterItem::Serialized(bytes) => {
                 let mut v = bytes.to_vec();
                 if !serialize::rewrite_reliable_header(&mut v, flags, seq, 0)? {
+                    let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+                        return Err(TelemetryError::Io("side tx busy"));
+                    };
                     let started_ms = self.clock.now_ms();
                     let result = self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()));
                     if result.is_ok() {
@@ -2393,6 +2452,9 @@ impl Router {
             }
         };
 
+        let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+            return Err(TelemetryError::Io("side tx busy"));
+        };
         let started_ms = self.clock.now_ms();
         let result = self.retry(MAX_HANDLER_RETRIES, || f(bytes.as_ref()));
         if result.is_ok() {
@@ -2424,6 +2486,9 @@ impl Router {
         handler: &RouterTxHandlerFn,
         data: &RouterItem,
     ) -> TelemetryResult<()> {
+        let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+            return Err(TelemetryError::Io("side tx busy"));
+        };
         let started_ms = self.clock.now_ms();
         let result = self.retry(MAX_HANDLER_RETRIES, || match (handler, data) {
             (RouterTxHandlerFn::Serialized(f), RouterItem::Serialized(bytes)) => f(bytes.as_ref()),
@@ -2476,7 +2541,15 @@ impl Router {
                 }
                 Ok(Some(RouterItem::Serialized(bytes)))
             }
-            other => Ok(Some(other)),
+            RouterItem::Packet(pkt) => {
+                if matches!(
+                    pkt.data_type(),
+                    DataType::ReliableAck | DataType::ReliablePacketRequest
+                ) {
+                    return Ok(None);
+                }
+                Ok(Some(RouterItem::Packet(pkt)))
+            }
         }
     }
 
@@ -3236,13 +3309,21 @@ impl Router {
                 discovery_cadence: DiscoveryCadenceState::default(),
             }),
             isr_rx_queue: IsrRxQueue::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
+            side_tx_gate: ReentryGate::new(),
             clock,
             #[cfg(feature = "timesync")]
             timesync: RouterMutex::new(TimeSyncRuntime::new(timesync_cfg)),
         }
     }
 
-    /// Add a new side with a **serialized handler**.
+    /// Register a side whose TX callback consumes serialized packet bytes.
+    ///
+    /// `name` is exported in topology/debug views and does not affect routing semantics.
+    /// `tx` is called whenever the router decides to send a packet toward this side.
+    ///
+    /// The default options disable the router's per-link reliable framing on this side. Use
+    /// [`Router::add_side_serialized_with_options`] when this hop should participate in router
+    /// reliable ACK/retransmit behavior.
     pub fn add_side_serialized<F>(&self, name: &'static str, tx: F) -> RouterSideId
     where
         F: Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static,
@@ -3250,7 +3331,14 @@ impl Router {
         self.add_side_serialized_with_options(name, tx, RouterSideOptions::default())
     }
 
-    /// Adds a serialized-output side with explicit reliability and link-local options.
+    /// Register a serialized-output side with explicit side options.
+    ///
+    /// `opts.reliable_enabled` enables the router's per-hop reliable framing on this side only.
+    /// That means reliable schema traffic on this side uses router-managed ACKs, packet requests,
+    /// and retransmits before the bytes reach `tx`.
+    ///
+    /// `opts.link_local_enabled` allows link-local-only endpoints and discovery routes to use this
+    /// side. `ingress_enabled` and `egress_enabled` set the initial directional policy.
     pub fn add_side_serialized_with_options<F>(
         &self,
         name: &'static str,
@@ -3272,7 +3360,10 @@ impl Router {
         id
     }
 
-    /// Add a new side with a **packet handler**.
+    /// Register a side whose TX callback receives decoded [`Packet`] values.
+    ///
+    /// Packet-output sides do not preserve the serialized reliable hop framing, so
+    /// `RouterSideOptions::reliable_enabled` only has effect for serialized sides.
     pub fn add_side_packet<F>(&self, name: &'static str, tx: F) -> RouterSideId
     where
         F: Fn(&Packet) -> TelemetryResult<()> + Send + Sync + 'static,
@@ -3280,7 +3371,11 @@ impl Router {
         self.add_side_packet_with_options(name, tx, RouterSideOptions::default())
     }
 
-    /// Adds a packet-output side with explicit reliability and link-local options.
+    /// Register a packet-output side with explicit side options.
+    ///
+    /// `opts.reliable_enabled` still records the operator's intent for this side, but packet-based
+    /// callbacks receive decoded packets rather than the router's serialized reliable hop framing.
+    /// For router-managed per-link reliable sequencing and ACKs, use a serialized side instead.
     pub fn add_side_packet_with_options<F>(
         &self,
         name: &'static str,
@@ -3303,6 +3398,9 @@ impl Router {
     }
 
     /// Remove a side while keeping existing side IDs stable.
+    ///
+    /// `side` must be an id returned earlier by one of the `add_side_*` calls. Removed side IDs
+    /// are tombstoned rather than renumbered so cached IDs for the remaining sides stay valid.
     pub fn remove_side(&self, side: RouterSideId) -> TelemetryResult<()> {
         let now_ms = self.clock.now_ms();
         {
@@ -3345,6 +3443,10 @@ impl Router {
         Ok(())
     }
 
+    /// Enable or disable ingress processing for a registered side.
+    ///
+    /// When `enabled` is `false`, packets tagged as arriving from `side` are rejected before local
+    /// delivery, discovery learning, or forwarding.
     pub fn set_side_ingress_enabled(
         &self,
         side: RouterSideId,
@@ -3363,6 +3465,9 @@ impl Router {
         Ok(())
     }
 
+    /// Enable or disable egress toward a registered side.
+    ///
+    /// When `enabled` is `false`, the router keeps the side but stops routing packets toward it.
     pub fn set_side_egress_enabled(
         &self,
         side: RouterSideId,
@@ -3389,6 +3494,11 @@ impl Router {
         Ok(())
     }
 
+    /// Set the route-selection policy for traffic originating from `src`.
+    ///
+    /// `src == None` targets locally-originated router TX. `src == Some(side)` targets traffic
+    /// that was received from a specific ingress side. `mode` only matters when more than one
+    /// destination side is currently eligible.
     pub fn set_source_route_mode(
         &self,
         src: Option<RouterSideId>,
@@ -3410,10 +3520,15 @@ impl Router {
         Ok(())
     }
 
+    /// Clear any source-specific route-selection override for `src`.
     pub fn clear_source_route_mode(&self, src: Option<RouterSideId>) -> TelemetryResult<()> {
         self.set_source_route_mode(src, RouteSelectionMode::Fanout)
     }
 
+    /// Set the weighted-routing weight from `src` toward `dst`.
+    ///
+    /// Higher `weight` values make `dst` more likely to be chosen when the source route mode is
+    /// [`RouteSelectionMode::Weighted`]. `src == None` applies to locally-originated TX.
     pub fn set_route_weight(
         &self,
         src: Option<RouterSideId>,
@@ -3433,6 +3548,7 @@ impl Router {
         Ok(())
     }
 
+    /// Clear a previously configured weighted-routing weight override.
     pub fn clear_route_weight(
         &self,
         src: Option<RouterSideId>,
@@ -3451,6 +3567,10 @@ impl Router {
         Ok(())
     }
 
+    /// Set the failover priority from `src` toward `dst`.
+    ///
+    /// Lower numeric `priority` wins when the source route mode is
+    /// [`RouteSelectionMode::Failover`]. `src == None` applies to locally-originated TX.
     pub fn set_route_priority(
         &self,
         src: Option<RouterSideId>,
@@ -3469,6 +3589,7 @@ impl Router {
         Ok(())
     }
 
+    /// Clear a previously configured failover priority override.
     pub fn clear_route_priority(
         &self,
         src: Option<RouterSideId>,
@@ -3486,6 +3607,10 @@ impl Router {
         Ok(())
     }
 
+    /// Allow or block routing from `src` toward `dst`.
+    ///
+    /// `src == None` controls locally-originated router TX. `enabled == false` is the sink-like
+    /// building block for disabling specific directions without changing router construction mode.
     pub fn set_route(
         &self,
         src: Option<RouterSideId>,
@@ -3504,6 +3629,10 @@ impl Router {
         Ok(())
     }
 
+    /// Allow or block routing for a specific `DataType` from `src` toward `dst`.
+    ///
+    /// Typed route rules act as allowlists once any rule exists for the `(src, ty)` pair.
+    /// `src == None` targets locally-originated router TX.
     pub fn set_typed_route(
         &self,
         src: Option<RouterSideId>,
@@ -3524,6 +3653,7 @@ impl Router {
         Ok(())
     }
 
+    /// Clear a typed route override for the `(src, ty, dst)` triple.
     pub fn clear_typed_route(
         &self,
         src: Option<RouterSideId>,
@@ -3542,6 +3672,7 @@ impl Router {
         Ok(())
     }
 
+    /// Clear a non-typed route override so the router falls back to default behavior.
     pub fn clear_route(&self, src: Option<RouterSideId>, dst: RouterSideId) -> TelemetryResult<()> {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
@@ -3981,6 +4112,16 @@ impl Router {
         self.tx_queue_item_with_flags(item, false)
     }
 
+    #[inline]
+    fn try_enter_side_tx(&self) -> Option<crate::lock::ReentryGuard<'_>> {
+        self.side_tx_gate.try_enter()
+    }
+
+    #[inline]
+    fn side_tx_active(&self) -> bool {
+        self.side_tx_gate.is_active()
+    }
+
     // ---------- PUBLIC API: RX queue ----------
 
     /// Drain the receive queue fully.
@@ -3989,7 +4130,7 @@ impl Router {
         self.process_rx_queue_with_timeout(0)
     }
 
-    /// Enqueue serialized bytes for RX processing (local source).
+    /// Enqueue serialized bytes for RX processing as locally-originated input.
     #[inline]
     pub fn rx_serialized_queue(&self, bytes: &[u8]) -> TelemetryResult<()> {
         let data = RouterItem::Serialized(Arc::from(bytes));
@@ -4021,7 +4162,7 @@ impl Router {
         })
     }
 
-    /// Enqueue a packet for RX processing (local source).
+    /// Enqueue a decoded packet for RX processing as locally-originated input.
     #[inline]
     pub fn rx_queue(&self, pkt: Packet) -> TelemetryResult<()> {
         pkt.validate()?;
@@ -4055,7 +4196,7 @@ impl Router {
         })
     }
 
-    /// Enqueue a packet for RX processing with explicit source side.
+    /// Enqueue a decoded packet for RX processing with an explicit ingress side.
     #[inline]
     pub fn rx_queue_from_side(&self, pkt: Packet, side: RouterSideId) -> TelemetryResult<()> {
         self.ensure_side_ingress_enabled(side)?;
@@ -4091,7 +4232,7 @@ impl Router {
         })
     }
 
-    /// Enqueue serialized bytes for RX processing with explicit source side.
+    /// Enqueue serialized bytes for RX processing with an explicit ingress side.
     #[inline]
     pub fn rx_serialized_queue_from_side(
         &self,
@@ -4359,16 +4500,24 @@ impl Router {
         }
         let mut released_buffered: Vec<Arc<[u8]>> = Vec::new();
         if let (Some(src), RouterItem::Serialized(bytes)) = (item.src, &item.data) {
-            let (opts, handler_is_serialized) = {
+            let (_opts, handler_is_serialized, hop_reliable_enabled) = {
                 let st = self.state.lock();
                 let side_ref = Self::side_ref(&st, src)?;
+                let opts = side_ref.opts;
                 (
-                    side_ref.opts,
+                    opts,
                     matches!(side_ref.tx_handler, RouterTxHandlerFn::Serialized(_)),
+                    opts.reliable_enabled
+                        && self.cfg.reliable_enabled()
+                        && !self.side_has_multiple_announcers_locked(
+                            &st,
+                            src,
+                            self.clock.now_ms(),
+                        ),
                 )
             };
 
-            if opts.reliable_enabled && handler_is_serialized && self.cfg.reliable_enabled() {
+            if hop_reliable_enabled && handler_is_serialized {
                 let frame = match serialize::peek_frame_info(bytes.as_ref()) {
                     Ok(frame) => frame,
                     Err(e) => {
@@ -5035,9 +5184,15 @@ impl Router {
 
     // ---------- PUBLIC API: RX immediate ----------
 
-    /// Receive serialized bytes (local source).
+    /// Process serialized bytes immediately as locally-originated input.
+    ///
+    /// If this call occurs while a side TX callback is already on the stack, the bytes are queued
+    /// instead of being processed re-entrantly.
     #[inline]
     pub fn rx_serialized(&self, bytes: &[u8]) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.rx_serialized_queue(bytes);
+        }
         let data = RouterItem::Serialized(Arc::from(bytes));
         let item = RouterRxItem {
             src: None,
@@ -5047,9 +5202,15 @@ impl Router {
         self.rx_item(&item, false)
     }
 
-    /// Receive a packet (local source).
+    /// Process a decoded packet immediately as locally-originated input.
+    ///
+    /// If this call occurs while a side TX callback is already on the stack, the packet is queued
+    /// instead of being processed re-entrantly.
     #[inline]
     pub fn rx(&self, pkt: &Packet) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.rx_queue(pkt.clone());
+        }
         let data = RouterItem::Packet(pkt.clone());
         let item = RouterRxItem {
             src: None,
@@ -5059,9 +5220,15 @@ impl Router {
         self.rx_item(&item, false)
     }
 
-    /// Receive a packet with explicit ingress side.
+    /// Process a decoded packet immediately with an explicit ingress side id.
+    ///
+    /// If this call occurs while a side TX callback is already on the stack, the packet is queued
+    /// instead of being processed re-entrantly.
     #[inline]
     pub fn rx_from_side(&self, pkt: &Packet, side: RouterSideId) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.rx_queue_from_side(pkt.clone(), side);
+        }
         self.ensure_side_ingress_enabled(side)?;
         let data = RouterItem::Packet(pkt.clone());
         let item = RouterRxItem {
@@ -5072,9 +5239,15 @@ impl Router {
         self.rx_item(&item, false)
     }
 
-    /// Receive serialized bytes with explicit ingress side.
+    /// Process serialized bytes immediately with an explicit ingress side id.
+    ///
+    /// If this call occurs while a side TX callback is already on the stack, the bytes are queued
+    /// instead of being processed re-entrantly.
     #[inline]
     pub fn rx_serialized_from_side(&self, bytes: &[u8], side: RouterSideId) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.rx_serialized_queue_from_side(bytes, side);
+        }
         self.ensure_side_ingress_enabled(side)?;
         let data = RouterItem::Serialized(Arc::from(bytes));
         let item = RouterRxItem {
@@ -5087,27 +5260,39 @@ impl Router {
 
     // ---------- PUBLIC API: TX immediate ----------
 
-    /// Transmit a packet immediately (broadcast to all sides).
+    /// Transmit a decoded packet immediately.
+    ///
+    /// The router delivers locally where appropriate and forwards toward eligible sides. If called
+    /// from inside a side TX callback, the packet is queued instead of being sent re-entrantly.
     #[inline]
     pub fn tx(&self, pkt: Packet) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)));
+        }
         self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
     }
 
-    /// Transmit serialized bytes immediately (broadcast to all sides).
+    /// Transmit serialized bytes immediately.
+    ///
+    /// If called from inside a side TX callback, the bytes are queued instead of being sent
+    /// re-entrantly.
     #[inline]
     pub fn tx_serialized(&self, pkt: Arc<[u8]>) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Serialized(pkt)));
+        }
         self.tx_item(RouterTxItem::Broadcast(RouterItem::Serialized(pkt)))
     }
 
     // ---------- PUBLIC API: TX queue ----------
 
-    /// Queue a packet for later TX (broadcast to all sides).
+    /// Queue a decoded packet for later transmission.
     #[inline]
     pub fn tx_queue(&self, pkt: Packet) -> TelemetryResult<()> {
         self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
     }
 
-    /// Queue serialized bytes for later TX (broadcast to all sides).
+    /// Queue serialized bytes for later transmission.
     #[inline]
     pub fn tx_serialized_queue(&self, data: Arc<[u8]>) -> TelemetryResult<()> {
         self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Serialized(data)))
@@ -5115,15 +5300,21 @@ impl Router {
 
     // ---------- PUBLIC API: logging ----------
 
-    /// Build a packet then send immediately.
+    /// Build a packet from typed elements and send it immediately.
+    ///
+    /// `ty` selects the schema message type and `data` must match that type's expected element
+    /// width and count. If called from inside a side TX callback, the built packet is queued.
     #[inline]
     pub fn log<T: LeBytes>(&self, ty: DataType, data: &[T]) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.log_queue(ty, data);
+        }
         log_raw(self.sender, ty, data, self.packet_timestamp_ms(), |pkt| {
             self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
         })
     }
 
-    /// Build a packet and queue it for later TX.
+    /// Build a packet from typed elements and queue it for later transmission.
     #[inline]
     pub fn log_queue<T: LeBytes>(&self, ty: DataType, data: &[T]) -> TelemetryResult<()> {
         log_raw(self.sender, ty, data, self.packet_timestamp_ms(), |pkt| {
@@ -5131,7 +5322,7 @@ impl Router {
         })
     }
 
-    /// Build a packet with a specific timestamp then send immediately.
+    /// Build a packet with an explicit timestamp and send it immediately.
     #[inline]
     pub fn log_ts<T: LeBytes>(
         &self,
@@ -5139,12 +5330,15 @@ impl Router {
         timestamp: u64,
         data: &[T],
     ) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return self.log_queue_ts(ty, timestamp, data);
+        }
         log_raw(self.sender, ty, data, timestamp, |pkt| {
             self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
         })
     }
 
-    /// Build a packet with a specific timestamp and queue it for later TX.
+    /// Build a packet with an explicit timestamp and queue it for later transmission.
     #[inline]
     pub fn log_queue_ts<T: LeBytes>(
         &self,

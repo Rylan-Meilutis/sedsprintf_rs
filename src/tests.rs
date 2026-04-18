@@ -3049,6 +3049,49 @@ mod relay_tests {
             "expected {total_frames} relayed frames"
         );
     }
+
+    #[test]
+    fn relay_side_tx_reentry_defers_recursive_queue_drains() {
+        let relay = Arc::new(Relay::new(zero_clock()));
+        let remaining = Arc::new(AtomicUsize::new(6));
+        let ingress = relay.add_side_serialized("INGRESS", move |_bytes| Ok(()));
+
+        let relay_c = relay.clone();
+        let remaining_c = remaining.clone();
+        let loop_hits = Arc::new(AtomicUsize::new(0));
+        let loop_hits_c = loop_hits.clone();
+        let in_tx = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reentered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let in_tx_c = in_tx.clone();
+        let reentered_c = reentered.clone();
+        relay.add_side_serialized("LOOP", move |bytes| {
+            loop_hits_c.fetch_add(1, Ordering::SeqCst);
+            if in_tx_c.swap(true, Ordering::SeqCst) {
+                reentered_c.store(true, Ordering::SeqCst);
+            }
+            if remaining_c
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                relay_c.rx_serialized_from_side(ingress, bytes)?;
+                relay_c.process_all_queues()?;
+            }
+            in_tx_c.store(false, Ordering::SeqCst);
+            Ok(())
+        });
+
+        relay
+            .rx_serialized_from_side(ingress, wire_for_value(1).as_ref())
+            .unwrap();
+        relay.process_all_queues().unwrap();
+        for _ in 0..8 {
+            relay.process_all_queues().unwrap();
+        }
+
+        assert!(!reentered.load(Ordering::SeqCst));
+        assert!(remaining.load(Ordering::SeqCst) < 6);
+        assert!(loop_hits.load(Ordering::SeqCst) > 0);
+    }
 }
 
 #[cfg(test)]
@@ -6436,6 +6479,138 @@ mod router_tests {
                     .count(),
                 0
             );
+        }
+
+        #[test]
+        fn immediate_cross_wired_router_reentry_falls_back_to_queue() {
+            let Some(ipc_message) = datatype_by_name("IPC_MESSAGE") else {
+                return;
+            };
+
+            let remaining = Arc::new(AtomicUsize::new(6));
+            let sequence = Arc::new(AtomicUsize::new(1));
+            let a_slot = Arc::new(Mutex::new(None::<Arc<Router>>));
+            let b_slot = Arc::new(Mutex::new(None::<Arc<Router>>));
+
+            let a_remaining = remaining.clone();
+            let a_sequence = sequence.clone();
+            let a_router = a_slot.clone();
+            let router_a = Arc::new(Router::new_with_clock(
+                RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                    DataEndpoint::Radio,
+                    move |_pkt: &Packet| {
+                        if a_remaining
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        let seq = a_sequence.fetch_add(1, Ordering::SeqCst) as u64;
+                        let pkt = Packet::new(
+                            ipc_message,
+                            &[DataEndpoint::SdCard],
+                            "A_NODE",
+                            seq,
+                            Arc::<[u8]>::from(b"bounce-a".as_slice()),
+                        )?;
+                        a_router
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .expect("router A initialized")
+                            .tx(pkt)
+                    },
+                )])
+                .with_sender("A_NODE"),
+                StepClock::new_default_box(),
+            ));
+
+            let b_remaining = remaining.clone();
+            let b_sequence = sequence.clone();
+            let b_router = b_slot.clone();
+            let router_b = Arc::new(Router::new_with_clock(
+                RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                    DataEndpoint::SdCard,
+                    move |_pkt: &Packet| {
+                        if b_remaining
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        let seq = b_sequence.fetch_add(1, Ordering::SeqCst) as u64;
+                        let pkt = Packet::new(
+                            ipc_message,
+                            &[DataEndpoint::Radio],
+                            "B_NODE",
+                            seq,
+                            Arc::<[u8]>::from(b"bounce-b".as_slice()),
+                        )?;
+                        b_router
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .expect("router B initialized")
+                            .tx(pkt)
+                    },
+                )])
+                .with_sender("B_NODE"),
+                StepClock::new_default_box(),
+            ));
+
+            *a_slot.lock().unwrap() = Some(router_a.clone());
+            *b_slot.lock().unwrap() = Some(router_b.clone());
+
+            let a_in_tx = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let a_reentered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let b_in_tx = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let b_reentered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let router_b_for_side = router_b.clone();
+            let a_in_tx_flag = a_in_tx.clone();
+            let a_reentered_flag = a_reentered.clone();
+            let side_a = router_a.add_side_packet("A_TO_B", move |pkt: &Packet| {
+                if a_in_tx_flag.swap(true, Ordering::SeqCst) {
+                    a_reentered_flag.store(true, Ordering::SeqCst);
+                }
+                let result = router_b_for_side.rx_from_side(pkt, 0);
+                a_in_tx_flag.store(false, Ordering::SeqCst);
+                result
+            });
+
+            let router_a_for_side = router_a.clone();
+            let b_in_tx_flag = b_in_tx.clone();
+            let b_reentered_flag = b_reentered.clone();
+            let side_b = router_b.add_side_packet("B_TO_A", move |pkt: &Packet| {
+                if b_in_tx_flag.swap(true, Ordering::SeqCst) {
+                    b_reentered_flag.store(true, Ordering::SeqCst);
+                }
+                let result = router_a_for_side.rx_from_side(pkt, 0);
+                b_in_tx_flag.store(false, Ordering::SeqCst);
+                result
+            });
+
+            assert_eq!(side_a, 0);
+            assert_eq!(side_b, 0);
+
+            let first = Packet::new(
+                ipc_message,
+                &[DataEndpoint::SdCard],
+                "START",
+                0,
+                Arc::<[u8]>::from(b"start".as_slice()),
+            )
+            .unwrap();
+            router_a.tx(first).unwrap();
+
+            for _ in 0..8 {
+                router_a.process_all_queues().unwrap();
+                router_b.process_all_queues().unwrap();
+            }
+
+            assert!(!a_reentered.load(Ordering::SeqCst));
+            assert!(!b_reentered.load(Ordering::SeqCst));
+            assert!(remaining.load(Ordering::SeqCst) < 6);
         }
     }
 

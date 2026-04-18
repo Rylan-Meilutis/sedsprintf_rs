@@ -13,7 +13,7 @@ use crate::serialize;
 use crate::{is_reliable_type, message_meta, message_priority, reliable_mode};
 use crate::{
     router::Clock,
-    {lock::RouterMutex, RouteSelectionMode, TelemetryError, TelemetryResult},
+    {lock::{ReentryGate, ReentryGuard, RouterMutex}, RouteSelectionMode, TelemetryError, TelemetryResult},
 };
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
@@ -38,9 +38,17 @@ pub enum RelayTxHandlerFn {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RelaySideOptions {
+    /// Enables the relay's per-link reliable transport layer on this side.
+    ///
+    /// When `true` and the side uses a serialized TX handler, reliable schema traffic on this hop
+    /// gains relay-managed sequence numbers, ACKs, packet requests, and retransmits.
+    /// Packet-output sides still receive decoded packets rather than serialized reliable framing.
     pub reliable_enabled: bool,
+    /// Marks the side as eligible for link-local-only endpoints and discovery routes.
     pub link_local_enabled: bool,
+    /// Allows packets received from this side to enter relay processing.
     pub ingress_enabled: bool,
+    /// Allows the relay to transmit packets toward this side.
     pub egress_enabled: bool,
 }
 
@@ -258,6 +266,7 @@ struct RelayInner {
 /// - Uses a Clock for the *_with_timeout APIs, same style as Router.
 pub struct Relay {
     state: RouterMutex<RelayInner>,
+    side_tx_gate: ReentryGate,
     clock: Box<dyn Clock + Send + Sync>,
 }
 
@@ -387,8 +396,19 @@ impl Relay {
                 #[cfg(feature = "discovery")]
                 discovery_cadence: DiscoveryCadenceState::default(),
             }),
+            side_tx_gate: ReentryGate::new(),
             clock,
         }
+    }
+
+    #[inline]
+    fn try_enter_side_tx(&self) -> Option<ReentryGuard<'_>> {
+        self.side_tx_gate.try_enter()
+    }
+
+    #[inline]
+    fn side_tx_active(&self) -> bool {
+        self.side_tx_gate.is_active()
     }
 
     #[inline]
@@ -823,6 +843,9 @@ impl Relay {
             side_ref.tx_handler.clone()
         };
 
+        let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+            return Err(TelemetryError::Io("side tx busy"));
+        };
         let started_ms = self.clock.now_ms();
         let result = match handler {
             RelayTxHandlerFn::Serialized(f) => f(bytes.as_ref()),
@@ -838,18 +861,24 @@ impl Relay {
     }
 
     fn send_reliable_to_side(&self, side: RelaySideId, data: RelayItem) -> TelemetryResult<()> {
-        let (handler, opts) = {
+        let (handler, opts, hop_reliable_enabled) = {
             let st = self.state.lock();
             let side_ref = Self::side_ref(&st, side)?;
-            (side_ref.tx_handler.clone(), side_ref.opts)
+            let opts = side_ref.opts;
+            let hop_reliable_enabled =
+                opts.reliable_enabled
+                    && !self.side_has_multiple_announcers_locked(&st, side, self.clock.now_ms());
+            (side_ref.tx_handler.clone(), opts, hop_reliable_enabled)
         };
 
         let RelayTxHandlerFn::Serialized(f) = &handler else {
             return self.call_tx_handler(side, &handler, &data);
         };
 
-        if !opts.reliable_enabled {
-            if let Some(adjusted) = self.adjust_reliable_for_side(opts, data)? {
+        if !hop_reliable_enabled {
+            let mut adjusted_opts = opts;
+            adjusted_opts.reliable_enabled = false;
+            if let Some(adjusted) = self.adjust_reliable_for_side(adjusted_opts, data)? {
                 return self.call_tx_handler(side, &handler, &adjusted);
             }
             return Ok(());
@@ -898,6 +927,9 @@ impl Relay {
             RelayItem::Serialized(bytes) => {
                 let mut v = bytes.to_vec();
                 if !serialize::rewrite_reliable_header(&mut v, flags, seq, 0)? {
+                    let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+                        return Err(TelemetryError::Io("side tx busy"));
+                    };
                     let started_ms = self.clock.now_ms();
                     f(bytes.as_ref())?;
                     self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
@@ -907,6 +939,9 @@ impl Relay {
             }
         };
 
+        let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+            return Err(TelemetryError::Io("side tx busy"));
+        };
         let started_ms = self.clock.now_ms();
         f(bytes.as_ref())?;
         self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
@@ -1191,6 +1226,39 @@ impl Relay {
             }
         }
         Ok(filtered)
+    }
+
+    #[cfg(feature = "discovery")]
+    fn side_has_multiple_announcers_locked(
+        &self,
+        st: &RelayInner,
+        side: RelaySideId,
+        now_ms: u64,
+    ) -> bool {
+        st.discovery_routes
+            .get(&side)
+            .map(|route| {
+                route
+                    .announcers
+                    .values()
+                    .filter(|sender| {
+                        now_ms.saturating_sub(sender.last_seen_ms) <= DISCOVERY_ROUTE_TTL_MS
+                    })
+                    .take(2)
+                    .count()
+                    > 1
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(feature = "discovery"))]
+    fn side_has_multiple_announcers_locked(
+        &self,
+        _st: &RelayInner,
+        _side: RelaySideId,
+        _now_ms: u64,
+    ) -> bool {
+        false
     }
 
     #[cfg(feature = "discovery")]
@@ -1741,8 +1809,29 @@ impl Relay {
         }
     }
 
-    /// Add a new side (e.g. "CAN", "UART", "RADIO") with a **serialized handler**.
-    /// Returns the side ID you use when enqueuing from that side.
+    fn should_forward_duplicate_reliable_item(&self, item: &RelayRxItem) -> TelemetryResult<bool> {
+        let (_, ty) = self.item_route_info(&item.data)?;
+        if !is_reliable_type(ty)
+            || matches!(
+                ty,
+                crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+            )
+        {
+            return Ok(false);
+        }
+
+        let RemoteSidePlan::Target(sides) = self.remote_side_plan(&item.data, item.src)?;
+        let st = self.state.lock();
+        let now_ms = self.clock.now_ms();
+        Ok(sides
+            .into_iter()
+            .any(|side| self.side_has_multiple_announcers_locked(&st, side, now_ms)))
+    }
+
+    /// Register a side whose TX callback consumes serialized packet bytes.
+    ///
+    /// Returns the side id later used for ingress APIs such as `rx_serialized_from_side`.
+    /// The default options disable the relay's per-link reliable framing on this side.
     pub fn add_side_serialized<F>(&self, name: &'static str, tx: F) -> RelaySideId
     where
         F: Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static,
@@ -1750,7 +1839,11 @@ impl Relay {
         self.add_side_serialized_with_options(name, tx, RelaySideOptions::default())
     }
 
-    /// Adds a serialized-output side with explicit reliability and link-local options.
+    /// Register a serialized-output side with explicit side options.
+    ///
+    /// `opts.reliable_enabled` enables relay-managed per-hop ACK/retransmit behavior on this side.
+    /// `opts.link_local_enabled` gates link-local-only forwarding and discovery use of this side.
+    /// `ingress_enabled` and `egress_enabled` set the initial directional policy.
     pub fn add_side_serialized_with_options<F>(
         &self,
         name: &'static str,
@@ -1772,8 +1865,10 @@ impl Relay {
         id
     }
 
-    /// Add a new side with a **packet handler**.
-    /// The handler receives a fully decoded Packet.
+    /// Register a side whose TX callback receives decoded [`Packet`] values.
+    ///
+    /// Packet-output sides do not preserve the relay's serialized reliable hop framing, so use a
+    /// serialized side when this hop should participate in relay-managed per-link reliability.
     pub fn add_side_packet<F>(&self, name: &'static str, tx: F) -> RelaySideId
     where
         F: Fn(&Packet) -> TelemetryResult<()> + Send + Sync + 'static,
@@ -1781,7 +1876,7 @@ impl Relay {
         self.add_side_packet_with_options(name, tx, RelaySideOptions::default())
     }
 
-    /// Adds a packet-output side with explicit reliability and link-local options.
+    /// Register a packet-output side with explicit side options.
     pub fn add_side_packet_with_options<F>(
         &self,
         name: &'static str,
@@ -1804,6 +1899,9 @@ impl Relay {
     }
 
     /// Remove a side while keeping existing side IDs stable.
+    ///
+    /// `side` must be an id returned by one of the `add_side_*` calls. Remaining side ids are not
+    /// renumbered.
     pub fn remove_side(&self, side: RelaySideId) -> TelemetryResult<()> {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
@@ -1839,6 +1937,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Enable or disable ingress processing for a registered side.
     pub fn set_side_ingress_enabled(
         &self,
         side: RelaySideId,
@@ -1857,6 +1956,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Enable or disable egress toward a registered side.
     pub fn set_side_egress_enabled(&self, side: RelaySideId, enabled: bool) -> TelemetryResult<()> {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
@@ -1875,6 +1975,9 @@ impl Relay {
         Ok(())
     }
 
+    /// Set the route-selection policy for traffic originating from `src`.
+    ///
+    /// `src == None` targets locally-originated relay traffic such as discovery output.
     pub fn set_source_route_mode(
         &self,
         src: Option<RelaySideId>,
@@ -1896,10 +1999,12 @@ impl Relay {
         Ok(())
     }
 
+    /// Clear a source-specific route-selection override.
     pub fn clear_source_route_mode(&self, src: Option<RelaySideId>) -> TelemetryResult<()> {
         self.set_source_route_mode(src, RouteSelectionMode::Fanout)
     }
 
+    /// Set the weighted-routing weight from `src` toward `dst`.
     pub fn set_route_weight(
         &self,
         src: Option<RelaySideId>,
@@ -1919,6 +2024,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Clear a previously configured weighted-routing weight override.
     pub fn clear_route_weight(
         &self,
         src: Option<RelaySideId>,
@@ -1937,6 +2043,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Set the failover priority from `src` toward `dst`.
     pub fn set_route_priority(
         &self,
         src: Option<RelaySideId>,
@@ -1955,6 +2062,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Clear a previously configured failover priority override.
     pub fn clear_route_priority(
         &self,
         src: Option<RelaySideId>,
@@ -1972,6 +2080,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Allow or block routing from `src` toward `dst`.
     pub fn set_route(
         &self,
         src: Option<RelaySideId>,
@@ -1990,6 +2099,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Allow or block routing for a specific `DataType` from `src` toward `dst`.
     pub fn set_typed_route(
         &self,
         src: Option<RelaySideId>,
@@ -2010,6 +2120,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Clear a typed route override for the `(src, ty, dst)` triple.
     pub fn clear_typed_route(
         &self,
         src: Option<RelaySideId>,
@@ -2028,6 +2139,7 @@ impl Relay {
         Ok(())
     }
 
+    /// Clear a non-typed route override so the relay falls back to default behavior.
     pub fn clear_route(&self, src: Option<RelaySideId>, dst: RelaySideId) -> TelemetryResult<()> {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
@@ -2133,7 +2245,7 @@ impl Relay {
         )
     }
 
-    /// Enqueue a full Packet that originated from `src` into the relay RX queue.
+    /// Enqueue a full packet that originated from `src` into the relay RX queue.
     ///
     /// The packet is wrapped in `Arc<Packet>` so fanout can clone the pointer cheaply.
     pub fn rx_from_side(&self, src: RelaySideId, packet: Packet) -> TelemetryResult<()> {
@@ -2195,12 +2307,19 @@ impl Relay {
         }
         let mut released_buffered: Vec<Arc<[u8]>> = Vec::new();
         if let RelayItem::Serialized(bytes) = &item.data {
-            let (opts, handler_is_serialized) = {
+            let (_opts, handler_is_serialized, hop_reliable_enabled) = {
                 let st = self.state.lock();
                 let side_ref = Self::side_ref(&st, item.src)?;
+                let opts = side_ref.opts;
                 (
-                    side_ref.opts,
+                    opts,
                     matches!(side_ref.tx_handler, RelayTxHandlerFn::Serialized(_)),
+                    opts.reliable_enabled
+                        && !self.side_has_multiple_announcers_locked(
+                            &st,
+                            item.src,
+                            self.clock.now_ms(),
+                        ),
                 )
             };
 
@@ -2208,7 +2327,7 @@ impl Relay {
                 Ok(frame) => frame,
                 Err(e) => {
                     if matches!(e, TelemetryError::Deserialize(msg) if msg == "crc32 mismatch")
-                        && opts.reliable_enabled
+                        && hop_reliable_enabled
                         && handler_is_serialized
                         && let Ok(frame) = serialize::peek_frame_info_unchecked(bytes.as_ref())
                     {
@@ -2244,7 +2363,7 @@ impl Relay {
                 }
             };
 
-            if opts.reliable_enabled
+            if hop_reliable_enabled
                 && handler_is_serialized
                 && is_reliable_type(frame.envelope.ty)
                 && let Some(hdr) = frame.reliable
@@ -2309,7 +2428,7 @@ impl Relay {
             }
         }
 
-        if self.is_duplicate_pkt(&item)? {
+        if self.is_duplicate_pkt(&item)? && !self.should_forward_duplicate_reliable_item(&item)? {
             // Already fanned out this packet recently; skip.
             return Ok(());
         }
@@ -2322,7 +2441,9 @@ impl Relay {
                 priority: Self::relay_item_priority(&RelayItem::Serialized(release_bytes.clone()))?,
                 data: RelayItem::Serialized(release_bytes),
             };
-            if self.is_duplicate_pkt(&release_item)? {
+            if self.is_duplicate_pkt(&release_item)?
+                && !self.should_forward_duplicate_reliable_item(&release_item)?
+            {
                 continue;
             }
             self.dispatch_relay_rx_item(&release_item)?;
@@ -2423,6 +2544,9 @@ impl Relay {
         handler: &RelayTxHandlerFn,
         data: &RelayItem,
     ) -> TelemetryResult<()> {
+        let Some(_side_tx_guard) = self.try_enter_side_tx() else {
+            return Err(TelemetryError::Io("side tx busy"));
+        };
         let started_ms = self.clock.now_ms();
         let result = match (handler, data) {
             // Fast paths
@@ -2481,7 +2605,15 @@ impl Relay {
                 }
                 Ok(Some(RelayItem::Serialized(bytes)))
             }
-            other => Ok(Some(other)),
+            RelayItem::Packet(pkt) => {
+                if matches!(
+                    pkt.data_type(),
+                    crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+                ) {
+                    return Ok(None);
+                }
+                Ok(Some(RelayItem::Packet(pkt)))
+            }
         }
     }
 
@@ -2491,7 +2623,10 @@ impl Relay {
         self.process_rx_queue_with_timeout(0)
     }
 
-    /// Drain the TX queue fully, invoking per-side tx_handler.
+    /// Drain the TX queue fully, invoking per-side TX handlers.
+    ///
+    /// If called from inside a side TX callback, this becomes a no-op so relay TX handlers cannot
+    /// recurse into nested queue drains on the same stack.
     #[inline]
     pub fn process_tx_queue(&self) -> TelemetryResult<()> {
         self.process_tx_queue_with_timeout(0)
@@ -2503,8 +2638,14 @@ impl Relay {
         self.process_all_queues_with_timeout(0)
     }
 
-    /// Process TX queue with timeout in ms (same style as Router).
+    /// Process the TX queue for up to `timeout_ms` milliseconds.
+    ///
+    /// `timeout_ms == 0` drains fully. If called from inside a side TX callback, this becomes a
+    /// no-op so relay TX handlers cannot recurse into nested queue drains on the same stack.
     pub fn process_tx_queue_with_timeout(&self, timeout_ms: u32) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return Ok(());
+        }
         let start = self.clock.now_ms();
         loop {
             self.process_reliable_timeouts()?;
@@ -2545,9 +2686,14 @@ impl Relay {
         Ok(())
     }
 
-    /// Process RX and TX queues interleaved, with timeout.
-    /// If timeout_ms == 0, drain fully (same semantics as Router).
+    /// Process RX and TX queues interleaved for up to `timeout_ms` milliseconds.
+    ///
+    /// `timeout_ms == 0` drains fully. If called from inside a side TX callback, this becomes a
+    /// no-op so relay TX handlers cannot recurse into nested queue drains on the same stack.
     pub fn process_all_queues_with_timeout(&self, timeout_ms: u32) -> TelemetryResult<()> {
+        if self.side_tx_active() {
+            return Ok(());
+        }
         let drain_fully = timeout_ms == 0;
         let start = if drain_fully { 0 } else { self.clock.now_ms() };
 

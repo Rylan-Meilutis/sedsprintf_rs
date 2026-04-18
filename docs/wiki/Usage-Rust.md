@@ -97,7 +97,13 @@ When discovery reports multiple candidate paths:
 
 ## Reliable delivery
 
-Reliable delivery is enabled per schema type and per serialized side.
+Reliable delivery has two switches:
+
+- the schema type itself must be marked reliable
+- the router/relay side must opt in with `reliable_enabled: true`
+
+That side option is per hop, not global. It controls what happens between the router/relay and
+that side's TX callback.
 
 ```rust
 use sedsprintf_rs::router::{Router, RouterConfig, RouterSideOptions};
@@ -116,6 +122,24 @@ router.add_side_serialized_with_options(
 
 If the underlying transport is already reliable, disable the router-level reliable layer with
 `RouterConfig::with_reliable_enabled(false)`.
+
+What `reliable_enabled` means on a side:
+
+- `reliable_enabled: true` on a serialized side wraps reliable schema traffic in the router/relay's
+  hop-level reliable framing for that side only
+- that hop-level framing adds sequence numbers, ACKs, packet requests, and retransmits
+- `reliable_enabled: false` sends the application packet once on that side without the router's
+  hop-level reliable wrapper
+- packet-output sides (`add_side_packet*`) receive decoded `Packet` values, so they cannot carry
+  the serialized hop-level reliable wrapper even if `reliable_enabled` is set
+
+For routers specifically:
+
+- hop-level side reliability is separate from the source router's end-to-end reliable tracking
+- a reliable packet can still be tracked end-to-end across the network even if one specific egress
+  side is configured without hop-level reliability
+- when discovery reports multiple candidate holders, reliable traffic still fans out across all of
+  them unless you explicitly restrict routes
 
 As of `3.11.0`, reliability has two layers:
 
@@ -147,6 +171,18 @@ Common receive APIs:
 - `rx(packet)`
 - `rx_queue(packet)`
 
+Meaning of the variants:
+
+- `rx_*` processes immediately in the current call
+- `rx_*_queue` only enqueues work for a later `process_*` / `periodic` call
+- `*_from_side(..., side_id)` tags the ingress with an explicit side id for route/discovery logic
+- the non-`from_side` variants treat the input as locally-originated rather than arriving from a
+  registered side
+
+If an immediate router receive/transmit API is called from inside a side TX callback, the router
+now defers that work onto its queue instead of recursively re-entering forwarding on the same
+stack.
+
 Use side-aware ingress only when you need to override the ingress side explicitly:
 
 - `rx_serialized_from_side(bytes, side_id)`
@@ -162,6 +198,20 @@ The common maintenance calls are:
 - `periodic(timeout_ms)`
 - `periodic_no_timesync(timeout_ms)` when `timesync` is enabled but you want to skip it for one
   loop
+
+What each one does:
+
+- `process_rx_queue()` drains queued receives only
+- `process_tx_queue()` drains queued transmits only
+- `process_all_queues()` drains both queues without a time budget
+- `process_*_with_timeout(timeout_ms)` runs the same phase with a millisecond budget; `0` means
+  drain fully
+- `periodic(timeout_ms)` is the normal main-loop entry point because it also polls built-in
+  discovery and, when enabled, time sync before draining queues
+
+For relays, nested `process_tx_queue*` / `process_all_queues*` calls made from inside a side TX
+callback are intentionally turned into no-ops so a side callback cannot recursively drive relay TX
+on the same stack.
 
 ## Topology export
 

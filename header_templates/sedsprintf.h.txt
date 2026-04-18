@@ -336,7 +336,22 @@ SedsResult seds_router_set_local_network_datetime_nanos(
    Router side registration
    ============================== */
 
-/** @brief Add a serialized TX side. Returns side id or negative SedsResult. */
+/**
+ * @brief Add a serialized router side.
+ *
+ * @param r                 Router handle.
+ * @param name              Optional UTF-8 side name used for topology/debug output.
+ * @param name_len          Length of @p name in bytes.
+ * @param tx                Side TX callback that receives serialized packet bytes.
+ * @param tx_user           Opaque pointer passed back into @p tx.
+ * @param reliable_enabled  Enable the router's hop-level reliable framing on this side.
+ *                          When true, reliable schema traffic on this serialized side uses
+ *                          router-managed sequence numbers, ACKs, packet requests, and retransmits.
+ *                          When false, the router sends the application packet once on this side
+ *                          without that hop-level reliable wrapper.
+ *
+ * @return Non-negative side id on success; negative SedsResult on failure.
+ */
 int32_t seds_router_add_side_serialized(
     SedsRouter * r,
     const char * name,
@@ -346,7 +361,21 @@ int32_t seds_router_add_side_serialized(
     bool reliable_enabled
 );
 
-/** @brief Add a packet-view TX side. Returns side id or negative SedsResult. */
+/**
+ * @brief Add a packet-view router side.
+ *
+ * @param r                 Router handle.
+ * @param name              Optional UTF-8 side name used for topology/debug output.
+ * @param name_len          Length of @p name in bytes.
+ * @param tx                Side TX callback that receives a decoded packet view.
+ * @param tx_user           Opaque pointer passed back into @p tx.
+ * @param reliable_enabled  Declares whether this side should be considered reliable-capable.
+ *                          Packet-view callbacks receive decoded packets rather than serialized
+ *                          hop-level reliable framing, so the router's per-hop reliable wrapper is
+ *                          most meaningful on serialized sides.
+ *
+ * @return Non-negative side id on success; negative SedsResult on failure.
+ */
 int32_t seds_router_add_side_packet(
     SedsRouter * r,
     const char * name,
@@ -356,7 +385,7 @@ int32_t seds_router_add_side_packet(
     bool reliable_enabled
 );
 
-/** @brief Remove a router side by its previously returned side id. */
+/** @brief Remove a router side by its previously returned side id. Remaining side ids do not move. */
 SedsResult seds_router_remove_side(SedsRouter * r, int32_t side_id);
 
 /** @brief Enable or disable packet ingress from a router side. */
@@ -367,23 +396,38 @@ SedsResult seds_router_set_side_egress_enabled(SedsRouter * r, int32_t side_id, 
 
 /**
  * @brief Override whether traffic from @p src_side_id may be routed to @p dst_side_id.
- * Pass -1 for @p src_side_id to target locally-originated router TX traffic.
+ *
+ * @param r            Router handle.
+ * @param src_side_id  Source/ingress side id. Pass -1 to target locally-originated router TX.
+ * @param dst_side_id  Candidate destination/egress side id.
+ * @param enabled      Whether this route is allowed.
  */
 SedsResult seds_router_set_route(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id, bool enabled);
 
 /**
  * @brief Clear a route override so the router falls back to its default routing behavior.
- * Pass -1 for @p src_side_id to target locally-originated router TX traffic.
+ *
+ * @param r            Router handle.
+ * @param src_side_id  Source/ingress side id. Pass -1 to target locally-originated router TX.
+ * @param dst_side_id  Candidate destination/egress side id.
  */
 SedsResult seds_router_clear_route(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
+/** @brief Set a per-DataType route override for traffic from @p src_side_id toward @p dst_side_id. */
 SedsResult seds_router_set_typed_route(SedsRouter * r, int32_t src_side_id, uint32_t ty, int32_t dst_side_id, bool enabled);
+/** @brief Clear a per-DataType route override for traffic from @p src_side_id toward @p dst_side_id. */
 SedsResult seds_router_clear_typed_route(SedsRouter * r, int32_t src_side_id, uint32_t ty, int32_t dst_side_id);
 
+/** @brief Set the multi-path selection mode used for traffic from @p src_side_id (-1 => local TX). */
 SedsResult seds_router_set_source_route_mode(SedsRouter * r, int32_t src_side_id, SedsRouteSelectionMode mode);
+/** @brief Clear the source-specific multi-path selection override for @p src_side_id (-1 => local TX). */
 SedsResult seds_router_clear_source_route_mode(SedsRouter * r, int32_t src_side_id);
+/** @brief Set the weighted-routing weight from @p src_side_id to @p dst_side_id. Used by Seds_RSM_Weighted. */
 SedsResult seds_router_set_route_weight(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id, uint32_t weight);
+/** @brief Clear a weighted-routing weight override. */
 SedsResult seds_router_clear_route_weight(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
+/** @brief Set the failover priority from @p src_side_id to @p dst_side_id. Lower numbers win in Seds_RSM_Failover. */
 SedsResult seds_router_set_route_priority(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id, uint32_t priority);
+/** @brief Clear a failover priority override. */
 SedsResult seds_router_clear_route_priority(SedsRouter * r, int32_t src_side_id, int32_t dst_side_id);
 
 /* ==============================
@@ -439,10 +483,10 @@ SedsResult seds_router_log_string_ex(SedsRouter * r,
    Legacy convenience (still supported)
    ============================== */
 
-/** @brief Receive serialized packet bytes immediately (non-queued). */
+/** @brief Receive serialized packet bytes immediately (non-queued, treated as locally-originated input). */
 SedsResult seds_router_receive_serialized(SedsRouter * r, const uint8_t * bytes, size_t len);
 
-/** @brief Receive a packet view immediately (non-queued). */
+/** @brief Receive a packet view immediately (non-queued, treated as locally-originated input). */
 SedsResult seds_router_receive(SedsRouter * r, const SedsPacketView * view);
 
 /** @brief Transmit a packet view immediately. */
@@ -682,7 +726,11 @@ SedsResult seds_relay_periodic(SedsRelay * r, uint32_t timeout_ms);
  * @param name_len  Length of @p name in bytes (0 if unused).
  * @param tx        TX callback for this side (must not be NULL).
  * @param tx_user   Opaque user pointer passed to @p tx.
- * @param reliable_enabled  Enable reliable ACK/ordering on this side.
+ * @param reliable_enabled  Enable the relay's hop-level reliable framing on this serialized side.
+ *                          When true, reliable schema traffic on this side uses relay-managed
+ *                          sequence numbers, ACKs, packet requests, and retransmits. When false,
+ *                          the relay sends the application packet once on this side without that
+ *                          hop-level reliable wrapper.
  *
  * @return On success: non-negative side ID.
  *         On error:   negative SedsResult error code.
@@ -706,7 +754,10 @@ int32_t seds_relay_add_side_serialized(SedsRelay * r,
  * @param name_len  Length of @p name in bytes (0 if unused).
  * @param tx        TX callback for this side (packet-based, must not be NULL).
  * @param tx_user   Opaque user pointer passed to @p tx.
- * @param reliable_enabled  Enable reliable ACK/ordering on this side.
+ * @param reliable_enabled  Declares whether this side should be considered reliable-capable.
+ *                          Packet-view callbacks receive decoded packets rather than serialized
+ *                          hop-level reliable framing, so the relay's per-hop reliable wrapper is
+ *                          most meaningful on serialized sides.
  *
  * @return On success: non-negative side ID.
  *         On error:   negative SedsResult error code.
@@ -718,18 +769,31 @@ int32_t seds_relay_add_side_packet(SedsRelay *r,
                                    void *tx_user,
                                    bool reliable_enabled);
 
+/** @brief Remove a relay side by its previously returned side id. Remaining side ids do not move. */
 SedsResult seds_relay_remove_side(SedsRelay * r, int32_t side_id);
+/** @brief Enable or disable packet ingress from a relay side. */
 SedsResult seds_relay_set_side_ingress_enabled(SedsRelay * r, int32_t side_id, bool enabled);
+/** @brief Enable or disable packet egress toward a relay side. */
 SedsResult seds_relay_set_side_egress_enabled(SedsRelay * r, int32_t side_id, bool enabled);
+/** @brief Allow or block routing from @p src_side_id toward @p dst_side_id (-1 => locally-originated relay TX). */
 SedsResult seds_relay_set_route(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, bool enabled);
+/** @brief Clear a route override so the relay falls back to its default routing behavior. */
 SedsResult seds_relay_clear_route(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
+/** @brief Set a per-DataType route override for traffic from @p src_side_id toward @p dst_side_id. */
 SedsResult seds_relay_set_typed_route(SedsRelay * r, int32_t src_side_id, uint32_t ty, int32_t dst_side_id, bool enabled);
+/** @brief Clear a per-DataType route override for traffic from @p src_side_id toward @p dst_side_id. */
 SedsResult seds_relay_clear_typed_route(SedsRelay * r, int32_t src_side_id, uint32_t ty, int32_t dst_side_id);
+/** @brief Set the multi-path selection mode used for traffic from @p src_side_id (-1 => local relay TX). */
 SedsResult seds_relay_set_source_route_mode(SedsRelay * r, int32_t src_side_id, SedsRouteSelectionMode mode);
+/** @brief Clear the source-specific multi-path selection override for @p src_side_id (-1 => local relay TX). */
 SedsResult seds_relay_clear_source_route_mode(SedsRelay * r, int32_t src_side_id);
+/** @brief Set the weighted-routing weight from @p src_side_id to @p dst_side_id. Used by Seds_RSM_Weighted. */
 SedsResult seds_relay_set_route_weight(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, uint32_t weight);
+/** @brief Clear a weighted-routing weight override. */
 SedsResult seds_relay_clear_route_weight(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
+/** @brief Set the failover priority from @p src_side_id to @p dst_side_id. Lower numbers win in Seds_RSM_Failover. */
 SedsResult seds_relay_set_route_priority(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id, uint32_t priority);
+/** @brief Clear a failover priority override. */
 SedsResult seds_relay_clear_route_priority(SedsRelay * r, int32_t src_side_id, int32_t dst_side_id);
 
 
@@ -778,6 +842,9 @@ SedsResult seds_relay_process_rx_queue(SedsRelay * r);
 
 /**
  * @brief Process all pending TX in the relay TX queue (invoke side TX callbacks).
+ *
+ * If called from inside a relay side TX callback, this becomes a no-op so a side callback cannot
+ * recursively drive nested relay TX on the same stack.
  */
 SedsResult seds_relay_process_tx_queue(SedsRelay * r);
 
@@ -804,6 +871,8 @@ SedsResult seds_relay_process_rx_queue_with_timeout(SedsRelay * r, uint32_t time
  * @brief Process TX queue until timeout (ms) or completion.
  *
  * If @p timeout_ms is 0, drains the queue fully.
+ * If called from inside a relay side TX callback, this becomes a no-op so a side callback cannot
+ * recursively drive nested relay TX on the same stack.
  */
 SedsResult seds_relay_process_tx_queue_with_timeout(SedsRelay * r, uint32_t timeout_ms);
 
@@ -811,6 +880,8 @@ SedsResult seds_relay_process_tx_queue_with_timeout(SedsRelay * r, uint32_t time
  * @brief Process RX and TX queues until timeout (ms) or completion.
  *
  * If @p timeout_ms is 0, drains both queues fully.
+ * If called from inside a relay side TX callback, this becomes a no-op so a side callback cannot
+ * recursively drive nested relay TX on the same stack.
  */
 SedsResult seds_relay_process_all_queues_with_timeout(SedsRelay * r, uint32_t timeout_ms);
 
