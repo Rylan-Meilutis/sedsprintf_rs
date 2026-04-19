@@ -132,6 +132,30 @@ fn get_handler(rx_count_c: Arc<AtomicUsize>) -> EndpointHandler {
     })
 }
 
+#[test]
+fn recent_rx_cache_preallocates_and_reserves_shared_budget() {
+    use crate::config::{MAX_QUEUE_BUDGET, MAX_RECENT_RX_IDS, RECENT_RX_QUEUE_BYTES};
+    use crate::router::{Router, RouterConfig};
+
+    let router = Router::new(RouterConfig::default());
+    let (capacity, max_bytes) = router.debug_recent_rx_capacity();
+
+    assert_eq!(max_bytes, RECENT_RX_QUEUE_BYTES.max(1));
+    assert_eq!(
+        capacity,
+        (RECENT_RX_QUEUE_BYTES.max(1) / core::mem::size_of::<u64>()).max(1)
+    );
+    assert!(capacity <= MAX_RECENT_RX_IDS.max(1));
+    assert!(
+        router.debug_shared_queue_bytes_used() <= MAX_QUEUE_BUDGET,
+        "reserved recent ID memory must fit inside the shared queue budget"
+    );
+    assert!(
+        router.debug_shared_queue_bytes_used() >= max_bytes,
+        "recent ID reservation should count against the shared queue budget immediately"
+    );
+}
+
 /// Build a handler for `SD_CARD` that:
 /// - asserts `GPS_DATA` element width is `4` (f32),
 /// - decodes the payload as little-endian `f32`,
@@ -2161,13 +2185,25 @@ mod tests_more {
             router.rx_queue(pkt).unwrap();
         }
 
+        let (queued_rx, queued_tx, _queued_recent) = router.debug_queue_lengths();
+        assert!(queued_tx <= N, "TX queue should be bounded");
+        assert!(queued_rx <= N, "RX queue should be bounded");
+        assert!(
+            router.debug_shared_queue_bytes_used() <= crate::config::MAX_QUEUE_BUDGET,
+            "shared queue budget should cap retained queued bytes"
+        );
+
         router.process_all_queues_with_timeout(0).unwrap();
 
-        assert_eq!(tx_count.load(Ordering::SeqCst), N, "all TX should flush");
+        assert_eq!(
+            tx_count.load(Ordering::SeqCst),
+            queued_tx,
+            "all retained TX should flush"
+        );
         assert_eq!(
             rx_count.load(Ordering::SeqCst),
-            2 * N,
-            "each TX local delivery + RX packet should invoke handler"
+            queued_tx + queued_rx,
+            "each retained TX local delivery + retained RX packet should invoke handler"
         );
     }
 }
@@ -3744,7 +3780,8 @@ mod reliable_tests {
     use crate::{packet::Packet, serialize, TelemetryResult};
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
 
     fn zero_clock() -> Box<dyn Clock + Send + Sync> {
         Box::new(|| 0u64)
@@ -3831,6 +3868,181 @@ mod reliable_tests {
         }
 
         assert_eq!(rx_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_side_tx_busy_is_queued_for_retry() {
+        let tx_hits = Arc::new(AtomicUsize::new(0));
+        let tx_hits_c = tx_hits.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let release_rx_c = release_rx.clone();
+
+        let router = Arc::new(Router::new_with_clock(
+            RouterConfig::default(),
+            zero_clock(),
+        ));
+        router.add_side_serialized("BUS", move |_bytes| -> TelemetryResult<()> {
+            let hit = tx_hits_c.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                entered_tx.send(()).unwrap();
+                release_rx_c.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        });
+
+        let first = Packet::from_f32_slice(
+            DataType::BatteryStatus,
+            &[1.0_f32, 2.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        let second = Packet::from_f32_slice(
+            DataType::BatteryStatus,
+            &[3.0_f32, 4.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+
+        let router_for_first = router.clone();
+        let first_handle = thread::spawn(move || router_for_first.tx(first));
+        entered_rx.recv().unwrap();
+
+        router.tx(second).unwrap();
+        assert_eq!(
+            tx_hits.load(Ordering::SeqCst),
+            1,
+            "second TX should be queued while the side callback is busy"
+        );
+
+        release_tx.send(()).unwrap();
+        first_handle.join().unwrap().unwrap();
+        router.process_tx_queue().unwrap();
+        assert_eq!(
+            tx_hits.load(Ordering::SeqCst),
+            2,
+            "queued TX should flush after the side callback becomes available"
+        );
+    }
+
+    #[test]
+    fn partial_ack_is_emitted_and_still_allows_requested_replay() {
+        let sent_frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sent_frames_c = sent_frames.clone();
+        let sender = Router::new_with_clock(
+            RouterConfig::default().with_reliable_enabled(true),
+            zero_clock(),
+        );
+        let sender_side = sender.add_side_serialized_with_options(
+            "to_receiver",
+            move |bytes: &[u8]| {
+                sent_frames_c.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        let pkt1 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0_f32, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        let pkt2 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[2.0_f32, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+        sender.tx(pkt1).unwrap();
+        sender.tx(pkt2).unwrap();
+
+        let frames = sent_frames.lock().unwrap().clone();
+        assert_eq!(frames.len(), 2);
+
+        let receiver_controls: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let receiver_controls_c = receiver_controls.clone();
+        let receiver = Router::new_with_clock(
+            RouterConfig::default().with_reliable_enabled(true),
+            zero_clock(),
+        );
+        let receiver_side = receiver.add_side_serialized_with_options(
+            "to_sender",
+            move |bytes: &[u8]| {
+                receiver_controls_c.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        receiver
+            .rx_serialized_from_side(&frames[1], receiver_side)
+            .unwrap();
+        receiver.process_tx_queue().unwrap();
+        let controls = receiver_controls.lock().unwrap().clone();
+        assert!(controls.iter().any(|frame| {
+            serialize::peek_envelope(frame)
+                .map(|env| env.ty == DataType::ReliablePartialAck)
+                .unwrap_or(false)
+        }));
+        assert!(controls.iter().any(|frame| {
+            serialize::peek_envelope(frame)
+                .map(|env| env.ty == DataType::ReliablePacketRequest)
+                .unwrap_or(false)
+        }));
+
+        let ack1 = Packet::new(
+            DataType::ReliableAck,
+            crate::message_meta(DataType::ReliableAck).endpoints,
+            "RX",
+            0,
+            crate::router::encode_slice_le(&[DataType::GpsData as u32, 1]),
+        )
+        .unwrap();
+        sender.rx_from_side(&ack1, sender_side).unwrap();
+        for control in controls.iter().filter(|frame| {
+            serialize::peek_envelope(frame)
+                .map(|env| env.ty == DataType::ReliablePartialAck)
+                .unwrap_or(false)
+        }) {
+            sender
+                .rx_serialized_from_side(control, sender_side)
+                .unwrap();
+        }
+
+        sent_frames.lock().unwrap().clear();
+        let request2 = Packet::new(
+            DataType::ReliablePacketRequest,
+            crate::message_meta(DataType::ReliablePacketRequest).endpoints,
+            "RX",
+            0,
+            crate::router::encode_slice_le(&[DataType::GpsData as u32, 2]),
+        )
+        .unwrap();
+        sender.rx_from_side(&request2, sender_side).unwrap();
+        sender.process_tx_queue_with_timeout(0).unwrap();
+        assert!(
+            sent_frames
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|frame| serialize::peek_frame_info(frame)
+                    .ok()
+                    .and_then(|info| info.reliable.map(|hdr| hdr.seq == 2))
+                    .unwrap_or(false)),
+            "requested packet should still retransmit"
+        );
     }
 
     #[test]
@@ -4222,6 +4434,10 @@ mod router_tests {
 
     #[cfg(feature = "discovery")]
     mod discovery_tests {
+        use crate::config::{
+            RELIABLE_MAX_END_TO_END_ACK_CACHE, RELIABLE_MAX_END_TO_END_PENDING,
+            RELIABLE_MAX_RETURN_ROUTES,
+        };
         use crate::discovery::{
             build_discovery_announce, build_discovery_timesync_sources, build_discovery_topology,
             TopologyBoardNode, DISCOVERY_FAST_INTERVAL_MS, DISCOVERY_ROUTE_TTL_MS,
@@ -4375,6 +4591,86 @@ mod router_tests {
             assert_eq!(
                 router.debug_end_to_end_pending_destination_count(packet_id),
                 None
+            );
+        }
+
+        #[test]
+        fn reliable_router_state_stays_bounded_under_unacked_traffic() {
+            let router = Router::new_with_clock(
+                RouterConfig::default().with_sender("SRC"),
+                StepClock::new_box(0, 0),
+            );
+            let side = router.add_side_serialized_with_options(
+                "link",
+                |_bytes| Ok(()),
+                crate::router::RouterSideOptions {
+                    reliable_enabled: true,
+                    ..crate::router::RouterSideOptions::default()
+                },
+            );
+
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_A", 0, &[DataEndpoint::Radio]).unwrap(),
+                    side,
+                )
+                .unwrap();
+
+            for idx in 0..(RELIABLE_MAX_END_TO_END_PENDING.max(1) + 4) {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[idx as f32, 0.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    idx as u64,
+                )
+                .unwrap();
+                let _ = router.tx(pkt);
+            }
+
+            assert!(
+                router.debug_end_to_end_tracked_count() <= RELIABLE_MAX_END_TO_END_PENDING.max(1)
+            );
+
+            for idx in 0..(RELIABLE_MAX_RETURN_ROUTES.max(1) + 4) {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[idx as f32, 1.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    (1000 + idx) as u64,
+                )
+                .unwrap();
+                router.rx_from_side(&pkt, side).unwrap();
+            }
+
+            assert!(
+                router.debug_reliable_return_route_count() <= RELIABLE_MAX_RETURN_ROUTES.max(1)
+            );
+        }
+
+        #[test]
+        fn discovery_topology_counts_against_shared_queue_budget() {
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
+            let side = router.add_side_serialized("link", |_bytes| Ok(()));
+
+            for idx in 0..128 {
+                let boards = vec![TopologyBoardNode {
+                    sender_id: format!("REMOTE_BOARD_{idx}_{}", "x".repeat(512)),
+                    reachable_endpoints: vec![DataEndpoint::Radio, DataEndpoint::SdCard],
+                    reachable_timesync_sources: vec![format!("TIME_{idx}_{}", "y".repeat(256))],
+                    connections: vec![format!("CONN_{idx}_{}", "z".repeat(512))],
+                }];
+                let pkt = build_discovery_topology(
+                    Box::leak(format!("SRC_{idx}").into_boxed_str()),
+                    idx as u64,
+                    &boards,
+                )
+                .unwrap();
+                router.rx_from_side(&pkt, side).unwrap();
+            }
+
+            assert!(
+                router.debug_shared_queue_bytes_used() <= crate::config::MAX_QUEUE_BUDGET,
+                "discovery topology state must be part of the shared queue budget"
             );
         }
 
@@ -6081,6 +6377,60 @@ mod router_tests {
             assert_eq!(
                 relay.debug_end_to_end_acked_destination_count(packet_id),
                 None
+            );
+        }
+
+        #[test]
+        fn reliable_relay_state_stays_bounded_under_unacked_traffic() {
+            let relay = Relay::new(zero_clock());
+            let side =
+                relay.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            for idx in 0..(RELIABLE_MAX_RETURN_ROUTES.max(1) + 4) {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[idx as f32, 2.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    idx as u64,
+                )
+                .unwrap();
+                relay.rx_from_side(side, pkt).unwrap();
+            }
+            assert!(relay.debug_reliable_return_route_count() <= RELIABLE_MAX_RETURN_ROUTES.max(1));
+
+            let packet_id = 123u64;
+            for idx in 0..(RELIABLE_MAX_END_TO_END_PENDING.max(1) + 4) {
+                let ack = Packet::new(
+                    DataType::ReliableAck,
+                    crate::message_meta(DataType::ReliableAck).endpoints,
+                    &format!("E2EACK:DEST_{idx}"),
+                    idx as u64,
+                    Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
+                )
+                .unwrap();
+                relay.rx_from_side(side, ack).unwrap();
+            }
+            assert!(
+                relay
+                    .debug_end_to_end_acked_destination_count(packet_id)
+                    .unwrap_or(0)
+                    <= RELIABLE_MAX_END_TO_END_PENDING.max(1)
+            );
+
+            for idx in 0..(RELIABLE_MAX_END_TO_END_ACK_CACHE.max(1) + 4) {
+                let ack = Packet::new(
+                    DataType::ReliableAck,
+                    crate::message_meta(DataType::ReliableAck).endpoints,
+                    "E2EACK:DEST_A",
+                    idx as u64,
+                    Arc::<[u8]>::from((10_000u64 + idx as u64).to_le_bytes().to_vec()),
+                )
+                .unwrap();
+                relay.rx_from_side(side, ack).unwrap();
+            }
+            assert!(
+                relay.debug_end_to_end_acked_packet_count()
+                    <= RELIABLE_MAX_END_TO_END_ACK_CACHE.max(1)
             );
         }
 

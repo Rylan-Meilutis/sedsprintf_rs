@@ -445,7 +445,10 @@ mod reliable_drop_tests {
             }
         }
 
-        fn tx_handler(&self, node_id: usize) -> impl Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static {
+        fn tx_handler(
+            &self,
+            node_id: usize,
+        ) -> impl Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static {
             let q = self.frames.clone();
             move |bytes: &[u8]| -> TelemetryResult<()> {
                 q.lock().unwrap().push_back((node_id, bytes.to_vec()));
@@ -1194,28 +1197,35 @@ mod reliable_drop_tests {
 
         let gs_topology = topo.gs.export_topology();
         assert!(
-            gs_topology.routers.iter().any(|board| board.sender_id == "DAQ"),
+            gs_topology
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "DAQ"),
             "DAQ should appear in GS topology export"
         );
         assert!(
-            gs_topology.routers.iter().any(|board| board.sender_id == "FC"),
+            gs_topology
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "FC"),
             "FC should appear in GS topology export"
         );
         assert!(
-            gs_topology.routers.iter().any(|board| board.sender_id == "AB"),
+            gs_topology
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "AB"),
             "AB should appear in GS topology export"
         );
 
         topo.gs
-            .tx(
-                Packet::from_f32_slice(
-                    DataType::GpsData,
-                    &[42.0, 1.0, 0.0],
-                    &[DataEndpoint::Radio],
-                    42,
-                )
-                .unwrap(),
+            .tx(Packet::from_f32_slice(
+                DataType::GpsData,
+                &[42.0, 1.0, 0.0],
+                &[DataEndpoint::Radio],
+                42,
             )
+            .unwrap())
             .unwrap();
 
         for _ in 0..80 {
@@ -1291,18 +1301,24 @@ mod reliable_drop_tests {
             ..RelaySideOptions::default()
         };
 
-        let gs_trunk = gs.add_side_serialized_with_options("trunk", trunk_bus.tx_handler(0), side_opts);
-        let gw_trunk = gw.add_side_serialized_with_options("trunk", trunk_bus.tx_handler(1), relay_side_opts);
-        let rf_trunk = rf.add_side_serialized_with_options("trunk", trunk_bus.tx_handler(2), relay_side_opts);
+        let gs_trunk =
+            gs.add_side_serialized_with_options("trunk", trunk_bus.tx_handler(0), side_opts);
+        let gw_trunk =
+            gw.add_side_serialized_with_options("trunk", trunk_bus.tx_handler(1), relay_side_opts);
+        let rf_trunk =
+            rf.add_side_serialized_with_options("trunk", trunk_bus.tx_handler(2), relay_side_opts);
 
-        let gw_child = gw.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(0), relay_side_opts);
+        let gw_child =
+            gw.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(0), relay_side_opts);
         let actuator_side =
             actuator.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(1), side_opts);
         let valve_side =
             valve.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(2), side_opts);
-        let daq_side = daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
+        let daq_side =
+            daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
 
-        let rf_child = rf.add_side_serialized_with_options("rf_bus", rf_bus.tx_handler(0), relay_side_opts);
+        let rf_child =
+            rf.add_side_serialized_with_options("rf_bus", rf_bus.tx_handler(0), relay_side_opts);
         let power_side =
             power.add_side_serialized_with_options("rf_bus", rf_bus.tx_handler(1), side_opts);
         let flight_side =
@@ -1387,24 +1403,28 @@ mod reliable_drop_tests {
 
         let gs_topology = gs.export_topology();
         assert!(
-            gs_topology.routers.iter().any(|board| board.sender_id == "DAQ"),
+            gs_topology
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "DAQ"),
             "DAQ should appear in GS topology export"
         );
         assert!(
-            gs_topology.routers.iter().any(|board| board.sender_id == "FC"),
+            gs_topology
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "FC"),
             "FC should appear in GS topology export"
         );
 
-        gs.tx(
-            Packet::from_f32_slice(
-                DataType::GpsData,
-                &[99.0, 0.0, 0.0],
-                &[DataEndpoint::Radio],
-                99,
-            )
-            .unwrap(),
+        gs.tx(Packet::from_f32_slice(
+            DataType::GpsData,
+            &[99.0, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            99,
         )
-        .unwrap();
+        .unwrap())
+            .unwrap();
 
         for _ in 0..96 {
             gs.process_all_queues_with_timeout(0).unwrap();
@@ -1555,7 +1575,8 @@ mod reliable_drop_tests {
             actuator.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(1), side_opts);
         let valve_side =
             valve.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(2), side_opts);
-        let daq_side = daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
+        let daq_side =
+            daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
 
         gateway
             .rx_from_side(
@@ -1585,20 +1606,22 @@ mod reliable_drop_tests {
             now.fetch_add(25, Ordering::SeqCst);
         }
         assert!(
-            source.export_topology().routers.iter().any(|board| board.sender_id == "AB"),
+            source
+                .export_topology()
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "AB"),
             "source should learn that AB is reachable behind GW before the command is sent"
         );
 
         source
-            .tx(
-                Packet::from_f32_slice(
-                    DataType::GpsData,
-                    &[7.0, 0.0, 0.0],
-                    &[DataEndpoint::Radio],
-                    7,
-                )
-                .unwrap(),
+            .tx(Packet::from_f32_slice(
+                DataType::GpsData,
+                &[7.0, 0.0, 0.0],
+                &[DataEndpoint::Radio],
+                7,
             )
+            .unwrap())
             .unwrap();
 
         let mut dropped_actuator_first_delivery = false;
@@ -1795,7 +1818,8 @@ mod reliable_drop_tests {
             actuator.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(1), side_opts);
         let valve_side =
             valve.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(2), side_opts);
-        let daq_side = daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
+        let daq_side =
+            daq.add_side_serialized_with_options("gw_bus", gw_bus.tx_handler(3), side_opts);
 
         gateway
             .rx_from_side(
@@ -1825,20 +1849,22 @@ mod reliable_drop_tests {
             now.fetch_add(25, Ordering::SeqCst);
         }
         assert!(
-            source.export_topology().routers.iter().any(|board| board.sender_id == "AB"),
+            source
+                .export_topology()
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "AB"),
             "source should learn that AB is reachable behind GW before the command is sent"
         );
 
         source
-            .tx(
-                Packet::from_f32_slice(
-                    DataType::GpsData,
-                    &[11.0, 0.0, 0.0],
-                    &[DataEndpoint::Radio],
-                    11,
-                )
-                .unwrap(),
+            .tx(Packet::from_f32_slice(
+                DataType::GpsData,
+                &[11.0, 0.0, 0.0],
+                &[DataEndpoint::Radio],
+                11,
             )
+            .unwrap())
             .unwrap();
 
         let mut saw_reliable_source_frame = false;
@@ -2031,15 +2057,13 @@ mod reliable_drop_tests {
         source.process_all_queues_with_timeout(0).unwrap();
 
         source
-            .tx(
-                Packet::from_f32_slice(
-                    DataType::GpsData,
-                    &[21.0, 0.0, 0.0],
-                    &[DataEndpoint::Radio],
-                    21,
-                )
-                .unwrap(),
+            .tx(Packet::from_f32_slice(
+                DataType::GpsData,
+                &[21.0, 0.0, 0.0],
+                &[DataEndpoint::Radio],
+                21,
             )
+            .unwrap())
             .unwrap();
 
         for _ in 0..32 {
@@ -2053,10 +2077,13 @@ mod reliable_drop_tests {
                     .unwrap();
             }
             for frame in drain_queue(&r_to_d) {
-                dest.rx_serialized_queue_from_side(&frame, dest_side).unwrap();
+                dest.rx_serialized_queue_from_side(&frame, dest_side)
+                    .unwrap();
             }
             for frame in drain_queue(&d_to_r) {
-                relay.rx_serialized_from_side(relay_dest_side, &frame).unwrap();
+                relay
+                    .rx_serialized_from_side(relay_dest_side, &frame)
+                    .unwrap();
             }
             for frame in drain_queue(&r_to_s) {
                 source
@@ -2185,15 +2212,13 @@ mod reliable_drop_tests {
         source.process_all_queues_with_timeout(0).unwrap();
 
         source
-            .tx(
-                Packet::from_f32_slice(
-                    DataType::GpsData,
-                    &[33.0, 0.0, 0.0],
-                    &[DataEndpoint::Radio],
-                    33,
-                )
-                .unwrap(),
+            .tx(Packet::from_f32_slice(
+                DataType::GpsData,
+                &[33.0, 0.0, 0.0],
+                &[DataEndpoint::Radio],
+                33,
             )
+            .unwrap())
             .unwrap();
 
         let mut delayed_first_hop_frames = Vec::new();
@@ -2213,10 +2238,13 @@ mod reliable_drop_tests {
             }
 
             for frame in drain_queue(&r_to_d) {
-                dest.rx_serialized_queue_from_side(&frame, dest_side).unwrap();
+                dest.rx_serialized_queue_from_side(&frame, dest_side)
+                    .unwrap();
             }
             for frame in drain_queue(&d_to_r) {
-                relay.rx_serialized_from_side(relay_dest_side, &frame).unwrap();
+                relay
+                    .rx_serialized_from_side(relay_dest_side, &frame)
+                    .unwrap();
             }
             for frame in drain_queue(&r_to_s) {
                 source

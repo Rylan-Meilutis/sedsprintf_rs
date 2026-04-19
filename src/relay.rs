@@ -1,6 +1,7 @@
 use crate::config::{
-    MAX_QUEUE_SIZE, MAX_RECENT_RX_IDS, QUEUE_GROW_STEP, RELIABLE_MAX_PENDING, RELIABLE_MAX_RETRIES,
-    RELIABLE_RETRANSMIT_MS, STARTING_QUEUE_SIZE, STARTING_RECENT_RX_IDS,
+    MAX_QUEUE_BUDGET, MAX_RECENT_RX_IDS, QUEUE_GROW_STEP, RECENT_RX_QUEUE_BYTES,
+    RELIABLE_MAX_END_TO_END_ACK_CACHE, RELIABLE_MAX_END_TO_END_PENDING, RELIABLE_MAX_PENDING,
+    RELIABLE_MAX_RETRIES, RELIABLE_MAX_RETURN_ROUTES, RELIABLE_RETRANSMIT_MS, STARTING_QUEUE_SIZE,
 };
 #[cfg(feature = "discovery")]
 use crate::discovery::{
@@ -13,13 +14,17 @@ use crate::serialize;
 use crate::{is_reliable_type, message_meta, message_priority, reliable_mode};
 use crate::{
     router::Clock,
-    {lock::{ReentryGate, ReentryGuard, RouterMutex}, RouteSelectionMode, TelemetryError, TelemetryResult},
+    {
+        lock::{ReentryGate, ReentryGuard, RouterMutex}, RouteSelectionMode, TelemetryError,
+        TelemetryResult,
+    },
 };
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::mem::size_of;
 
 /// Logical side index (CAN, UART, RADIO, etc.)
 pub type RelaySideId = usize;
@@ -140,6 +145,7 @@ struct ReliableSent {
     last_send_ms: u64,
     retries: u32,
     queued: bool,
+    partial_acked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -166,7 +172,9 @@ struct DiscoverySenderState {
 fn is_internal_control_type(ty: crate::DataType) -> bool {
     if matches!(
         ty,
-        crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+        crate::DataType::ReliableAck
+            | crate::DataType::ReliablePartialAck
+            | crate::DataType::ReliablePacketRequest
     ) {
         return true;
     }
@@ -253,11 +261,311 @@ struct RelayInner {
     reliable_tx: BTreeMap<(RelaySideId, u32), ReliableTxState>,
     reliable_rx: BTreeMap<(RelaySideId, u32), ReliableRxState>,
     reliable_return_routes: BTreeMap<u64, ReliableReturnRouteState>,
+    reliable_return_route_order: VecDeque<u64>,
     end_to_end_acked_destinations: BTreeMap<u64, BTreeSet<u64>>,
+    end_to_end_acked_destination_order: VecDeque<u64>,
     #[cfg(feature = "discovery")]
     discovery_routes: BTreeMap<RelaySideId, DiscoverySideState>,
     #[cfg(feature = "discovery")]
     discovery_cadence: DiscoveryCadenceState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayQueueKind {
+    Rx,
+    Tx,
+    Replay,
+    Recent,
+    ReliableRxBuffer,
+    #[cfg(feature = "discovery")]
+    Discovery,
+}
+
+impl RelayInner {
+    #[cfg(feature = "discovery")]
+    fn topology_board_byte_cost(board: &TopologyBoardNode) -> usize {
+        board
+            .sender_id
+            .len()
+            .saturating_add(board.reachable_endpoints.len() * size_of::<crate::DataEndpoint>())
+            .saturating_add(
+                board
+                    .reachable_timesync_sources
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(board.connections.iter().map(|s| s.len()).sum::<usize>())
+    }
+
+    #[cfg(feature = "discovery")]
+    fn discovery_sender_byte_cost(sender: &str, state: &DiscoverySenderState) -> usize {
+        sender
+            .len()
+            .saturating_add(state.reachable.len() * size_of::<crate::DataEndpoint>())
+            .saturating_add(
+                state
+                    .reachable_timesync_sources
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                state
+                    .topology_boards
+                    .iter()
+                    .map(Self::topology_board_byte_cost)
+                    .sum::<usize>(),
+            )
+            .saturating_add(size_of::<DiscoverySenderState>())
+    }
+
+    #[cfg(feature = "discovery")]
+    fn discovery_route_byte_cost(route: &DiscoverySideState) -> usize {
+        size_of::<DiscoverySideState>()
+            .saturating_add(route.reachable.len() * size_of::<crate::DataEndpoint>())
+            .saturating_add(
+                route
+                    .reachable_timesync_sources
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                route
+                    .announcers
+                    .iter()
+                    .map(|(sender, state)| Self::discovery_sender_byte_cost(sender, state))
+                    .sum::<usize>(),
+            )
+    }
+
+    #[cfg(feature = "discovery")]
+    fn discovery_bytes_used(&self) -> usize {
+        self.discovery_routes
+            .values()
+            .map(Self::discovery_route_byte_cost)
+            .sum()
+    }
+
+    #[inline]
+    fn reliable_rx_buffered_bytes(&self) -> usize {
+        self.reliable_rx
+            .values()
+            .flat_map(|state| state.buffered.values())
+            .map(|bytes| size_of::<Arc<[u8]>>() + bytes.len())
+            .sum()
+    }
+
+    #[inline]
+    fn shared_queue_bytes_used(&self) -> usize {
+        self.rx_queue
+            .bytes_used()
+            .saturating_add(self.tx_queue.bytes_used())
+            .saturating_add(self.replay_queue.bytes_used())
+            .saturating_add(self.recent_rx.max_bytes())
+            .saturating_add(self.reliable_rx_buffered_bytes())
+            .saturating_add({
+                #[cfg(feature = "discovery")]
+                {
+                    self.discovery_bytes_used()
+                }
+                #[cfg(not(feature = "discovery"))]
+                {
+                    0
+                }
+            })
+    }
+
+    fn reliable_rx_buffer_len(&self) -> usize {
+        self.reliable_rx
+            .values()
+            .map(|state| state.buffered.len())
+            .sum()
+    }
+
+    fn pop_reliable_rx_buffered(&mut self) -> Option<Arc<[u8]>> {
+        let key = self
+            .reliable_rx
+            .iter()
+            .find_map(|(key, state)| (!state.buffered.is_empty()).then_some(*key))?;
+        self.reliable_rx
+            .get_mut(&key)?
+            .buffered
+            .pop_first()
+            .map(|(_, v)| v)
+    }
+
+    fn pop_shared_queue_item(&mut self, preferred: RelayQueueKind) -> bool {
+        match preferred {
+            RelayQueueKind::Rx => self.rx_queue.pop_front().is_some(),
+            RelayQueueKind::Tx => self.tx_queue.pop_front().is_some(),
+            RelayQueueKind::Replay => self.replay_queue.pop_front().is_some(),
+            RelayQueueKind::Recent => self.recent_rx.pop_front().is_some(),
+            RelayQueueKind::ReliableRxBuffer => self.pop_reliable_rx_buffered().is_some(),
+            #[cfg(feature = "discovery")]
+            RelayQueueKind::Discovery => self.pop_discovery_route(),
+        }
+    }
+
+    #[cfg(feature = "discovery")]
+    fn pop_discovery_route(&mut self) -> bool {
+        let Some((&side, _)) = self
+            .discovery_routes
+            .iter()
+            .min_by_key(|(_, route)| route.last_seen_ms)
+        else {
+            return false;
+        };
+        self.discovery_routes.remove(&side);
+        Self::queue_budget_warning("topology route evicted because MAX_QUEUE_BUDGET is full");
+        true
+    }
+
+    fn largest_shared_queue(&self) -> Option<RelayQueueKind> {
+        let candidates = [
+            (
+                RelayQueueKind::Rx,
+                self.rx_queue.bytes_used(),
+                self.rx_queue.len(),
+            ),
+            (
+                RelayQueueKind::Tx,
+                self.tx_queue.bytes_used(),
+                self.tx_queue.len(),
+            ),
+            (
+                RelayQueueKind::Replay,
+                self.replay_queue.bytes_used(),
+                self.replay_queue.len(),
+            ),
+            (RelayQueueKind::Recent, 0, 0),
+            (
+                RelayQueueKind::ReliableRxBuffer,
+                self.reliable_rx_buffered_bytes(),
+                self.reliable_rx_buffer_len(),
+            ),
+            #[cfg(feature = "discovery")]
+            (
+                RelayQueueKind::Discovery,
+                self.discovery_bytes_used(),
+                self.discovery_routes.len(),
+            ),
+        ];
+        candidates
+            .into_iter()
+            .filter(|(_, bytes, len)| *bytes > 0 && *len > 0)
+            .max_by_key(|(kind, bytes, _)| {
+                (
+                    *bytes,
+                    if *kind == RelayQueueKind::ReliableRxBuffer {
+                        0
+                    } else {
+                        1
+                    },
+                )
+            })
+            .map(|(kind, _, _)| kind)
+    }
+
+    fn make_shared_queue_room(
+        &mut self,
+        incoming_cost: usize,
+        preferred: RelayQueueKind,
+    ) -> TelemetryResult<()> {
+        if incoming_cost > MAX_QUEUE_BUDGET {
+            return Err(TelemetryError::PacketTooLarge(
+                "Item exceeds maximum shared queue budget",
+            ));
+        }
+
+        while self.shared_queue_bytes_used().saturating_add(incoming_cost) > MAX_QUEUE_BUDGET {
+            let victim = self.largest_shared_queue().unwrap_or(preferred);
+            if victim == RelayQueueKind::Discovery {
+                Self::queue_budget_warning("topology data is using the largest queue budget share");
+            }
+            if !self.pop_shared_queue_item(victim) && !self.pop_shared_queue_item(preferred) {
+                return Err(TelemetryError::PacketTooLarge(
+                    "Item exceeds maximum shared queue budget",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn queue_budget_warning(msg: &str) {
+        #[cfg(feature = "std")]
+        eprintln!("sedsprintf_rs queue budget warning: {msg}");
+        let _ = msg;
+    }
+
+    #[cfg(feature = "discovery")]
+    fn fit_discovery_budget(&mut self) {
+        while self.shared_queue_bytes_used() > MAX_QUEUE_BUDGET {
+            if !self.pop_discovery_route() {
+                break;
+            }
+        }
+    }
+
+    fn push_rx(&mut self, item: RelayRxItem) -> TelemetryResult<()> {
+        self.make_shared_queue_room(item.byte_cost(), RelayQueueKind::Rx)?;
+        self.rx_queue
+            .push_back_prioritized(item, |queued| queued.priority)
+    }
+
+    fn push_tx(&mut self, item: RelayTxItem) -> TelemetryResult<()> {
+        self.make_shared_queue_room(item.byte_cost(), RelayQueueKind::Tx)?;
+        self.tx_queue
+            .push_back_prioritized(item, |queued| queued.priority)
+    }
+
+    fn push_replay(&mut self, item: RelayReplayItem) -> TelemetryResult<()> {
+        self.make_shared_queue_room(item.byte_cost(), RelayQueueKind::Replay)?;
+        self.replay_queue
+            .push_back_prioritized(item, |queued| queued.priority)
+    }
+
+    fn push_recent_rx(&mut self, id: u64) -> TelemetryResult<()> {
+        while self.recent_rx.len() >= MAX_RECENT_RX_IDS {
+            let _ = self.recent_rx.pop_front();
+        }
+        self.make_shared_queue_room(0, RelayQueueKind::Recent)?;
+        self.recent_rx.push_back(id)
+    }
+
+    fn buffer_reliable_rx(
+        &mut self,
+        side: RelaySideId,
+        ty: crate::DataType,
+        seq: u32,
+        bytes: Arc<[u8]>,
+    ) -> TelemetryResult<()> {
+        let key = Relay::reliable_key(side, ty);
+        if self
+            .reliable_rx
+            .get(&key)
+            .is_some_and(|state| state.buffered.contains_key(&seq))
+        {
+            return Ok(());
+        }
+        let cost = size_of::<Arc<[u8]>>() + bytes.len();
+        self.make_shared_queue_room(cost, RelayQueueKind::ReliableRxBuffer)?;
+        let rx_state = self
+            .reliable_rx
+            .entry(key)
+            .or_insert_with(|| ReliableRxState {
+                expected_seq: 1,
+                buffered: BTreeMap::new(),
+            });
+        if rx_state.buffered.len() >= RELIABLE_MAX_PENDING {
+            let _ = rx_state.buffered.pop_first();
+        }
+        rx_state.buffered.insert(seq, bytes);
+        Ok(())
+    }
 }
 
 /// Relay that fans out packets from one side to all others.
@@ -286,6 +594,11 @@ impl Relay {
         Ok(message_priority(ty))
     }
 
+    #[inline]
+    fn is_side_tx_busy(err: &TelemetryError) -> bool {
+        matches!(err, TelemetryError::Io("side tx busy"))
+    }
+
     fn process_replay_queue_item(&self) -> TelemetryResult<bool> {
         let Some(item) = ({
             let mut st = self.state.lock();
@@ -305,7 +618,14 @@ impl Relay {
                 return Ok(false);
             }
         }
-        self.send_reliable_raw_to_side(item.dst, item.bytes.clone())?;
+        if let Err(e) = self.send_reliable_raw_to_side(item.dst, item.bytes.clone()) {
+            if Self::is_side_tx_busy(&e) {
+                let mut st = self.state.lock();
+                st.push_replay(item)?;
+                return Ok(false);
+            }
+            return Err(e);
+        }
         let mut st = self.state.lock();
         let tx_state = self.reliable_tx_state_mut(&mut st, item.dst, ty);
         if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {
@@ -375,22 +695,24 @@ impl Relay {
                 source_route_modes: BTreeMap::new(),
                 route_selection_cursors: BTreeMap::new(),
                 adaptive_route_stats: BTreeMap::new(),
-                rx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
-                tx_queue: BoundedDeque::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
+                rx_queue: BoundedDeque::new(MAX_QUEUE_BUDGET, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
+                tx_queue: BoundedDeque::new(MAX_QUEUE_BUDGET, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 replay_queue: BoundedDeque::new(
-                    MAX_QUEUE_SIZE,
+                    MAX_QUEUE_BUDGET,
                     STARTING_QUEUE_SIZE,
                     QUEUE_GROW_STEP,
                 ),
                 recent_rx: BoundedDeque::new(
-                    MAX_RECENT_RX_IDS * size_of::<u64>(),
-                    STARTING_RECENT_RX_IDS * size_of::<u64>(),
+                    RECENT_RX_QUEUE_BYTES.max(1),
+                    RECENT_RX_QUEUE_BYTES.max(1),
                     QUEUE_GROW_STEP,
                 ),
                 reliable_tx: BTreeMap::new(),
                 reliable_rx: BTreeMap::new(),
                 reliable_return_routes: BTreeMap::new(),
+                reliable_return_route_order: VecDeque::new(),
                 end_to_end_acked_destinations: BTreeMap::new(),
+                end_to_end_acked_destination_order: VecDeque::new(),
                 #[cfg(feature = "discovery")]
                 discovery_routes: BTreeMap::new(),
                 #[cfg(feature = "discovery")]
@@ -680,8 +1002,50 @@ impl Relay {
 
     fn note_reliable_return_route(&self, side: RelaySideId, packet_id: u64) {
         let mut st = self.state.lock();
+        Self::remember_reliable_return_route_locked(&mut st, packet_id);
         st.reliable_return_routes
             .insert(packet_id, ReliableReturnRouteState { side });
+    }
+
+    fn remember_reliable_return_route_locked(st: &mut RelayInner, packet_id: u64) {
+        let cap = RELIABLE_MAX_RETURN_ROUTES.max(1);
+        st.reliable_return_route_order
+            .retain(|id| st.reliable_return_routes.contains_key(id) && *id != packet_id);
+        while st.reliable_return_route_order.len() >= cap {
+            if let Some(oldest) = st.reliable_return_route_order.pop_front() {
+                st.reliable_return_routes.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        st.reliable_return_route_order.push_back(packet_id);
+    }
+
+    fn note_end_to_end_acked_destination_locked(
+        st: &mut RelayInner,
+        packet_id: u64,
+        sender_hash: u64,
+    ) {
+        let entry_cap = RELIABLE_MAX_END_TO_END_ACK_CACHE.max(1);
+        st.end_to_end_acked_destination_order
+            .retain(|id| st.end_to_end_acked_destinations.contains_key(id) && *id != packet_id);
+        while st.end_to_end_acked_destination_order.len() >= entry_cap {
+            if let Some(oldest) = st.end_to_end_acked_destination_order.pop_front() {
+                st.end_to_end_acked_destinations.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        st.end_to_end_acked_destination_order.push_back(packet_id);
+
+        let acked = st
+            .end_to_end_acked_destinations
+            .entry(packet_id)
+            .or_default();
+        let sender_cap = RELIABLE_MAX_END_TO_END_PENDING.max(1);
+        if acked.len() < sender_cap || acked.contains(&sender_hash) {
+            acked.insert(sender_hash);
+        }
     }
 
     #[inline]
@@ -738,6 +1102,14 @@ impl Relay {
         }
     }
 
+    fn handle_reliable_partial_ack(&self, side: RelaySideId, ty: crate::DataType, seq: u32) {
+        let mut st = self.state.lock();
+        let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
+        if let Some(sent) = tx_state.sent.get_mut(&seq) {
+            sent.partial_acked = true;
+        }
+    }
+
     fn reliable_control_packet(
         &self,
         control_ty: crate::DataType,
@@ -763,15 +1135,12 @@ impl Relay {
         let data = RelayItem::Packet(Arc::new(pkt));
         let priority = Self::relay_item_priority(&data)?;
         let mut st = self.state.lock();
-        st.tx_queue.push_back_prioritized(
-            RelayTxItem {
-                src: None,
-                dst: side,
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_tx(RelayTxItem {
+            src: None,
+            dst: side,
+            data,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -785,15 +1154,31 @@ impl Relay {
         let data = RelayItem::Packet(Arc::new(pkt));
         let priority = Self::relay_item_priority(&data)?;
         let mut st = self.state.lock();
-        st.tx_queue.push_back_prioritized(
-            RelayTxItem {
-                src: None,
-                dst: side,
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_tx(RelayTxItem {
+            src: None,
+            dst: side,
+            data,
+            priority,
+        })?;
+        Ok(())
+    }
+
+    fn queue_reliable_partial_ack(
+        &self,
+        side: RelaySideId,
+        ty: crate::DataType,
+        seq: u32,
+    ) -> TelemetryResult<()> {
+        let pkt = self.reliable_control_packet(crate::DataType::ReliablePartialAck, ty, seq)?;
+        let data = RelayItem::Packet(Arc::new(pkt));
+        let priority = Self::relay_item_priority(&data)?;
+        let mut st = self.state.lock();
+        st.push_tx(RelayTxItem {
+            src: None,
+            dst: side,
+            data,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -811,20 +1196,18 @@ impl Relay {
                 && !sent.queued
             {
                 sent.queued = true;
+                sent.partial_acked = false;
                 queued = Some(sent.bytes.clone());
             }
         }
 
         if let Some(bytes) = queued {
             let mut st = self.state.lock();
-            st.replay_queue.push_back_prioritized(
-                RelayReplayItem {
-                    dst: side,
-                    bytes,
-                    priority: message_priority(ty).saturating_add(16),
-                },
-                |queued| queued.priority,
-            )?;
+            st.push_replay(RelayReplayItem {
+                dst: side,
+                bytes,
+                priority: message_priority(ty).saturating_add(16),
+            })?;
         }
         Ok(())
     }
@@ -865,9 +1248,8 @@ impl Relay {
             let st = self.state.lock();
             let side_ref = Self::side_ref(&st, side)?;
             let opts = side_ref.opts;
-            let hop_reliable_enabled =
-                opts.reliable_enabled
-                    && !self.side_has_multiple_announcers_locked(&st, side, self.clock.now_ms());
+            let hop_reliable_enabled = opts.reliable_enabled
+                && !self.side_has_multiple_announcers_locked(&st, side, self.clock.now_ms());
             (side_ref.tx_handler.clone(), opts, hop_reliable_enabled)
         };
 
@@ -957,6 +1339,7 @@ impl Relay {
                     last_send_ms: self.clock.now_ms(),
                     retries: 0,
                     queued: false,
+                    partial_acked: false,
                 },
             );
         }
@@ -1479,6 +1862,7 @@ impl Relay {
                 Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
+            st.fit_discovery_budget();
             if !st.sides.iter().any(|side| side.is_some()) {
                 return Ok(());
             }
@@ -1519,15 +1903,12 @@ impl Relay {
                     discovery::build_discovery_announce("RELAY", now_ms, endpoints.as_slice())?;
                 let data = RelayItem::Packet(Arc::new(pkt));
                 let priority = Self::relay_item_priority(&data)?;
-                st.tx_queue.push_back_prioritized(
-                    RelayTxItem {
-                        src: None,
-                        dst,
-                        data,
-                        priority,
-                    },
-                    |queued| queued.priority,
-                )?;
+                st.push_tx(RelayTxItem {
+                    src: None,
+                    dst,
+                    data,
+                    priority,
+                })?;
             }
             if !timesync_sources.is_empty() {
                 let pkt = discovery::build_discovery_timesync_sources(
@@ -1537,29 +1918,23 @@ impl Relay {
                 )?;
                 let data = RelayItem::Packet(Arc::new(pkt));
                 let priority = Self::relay_item_priority(&data)?;
-                st.tx_queue.push_back_prioritized(
-                    RelayTxItem {
-                        src: None,
-                        dst,
-                        data,
-                        priority,
-                    },
-                    |queued| queued.priority,
-                )?;
+                st.push_tx(RelayTxItem {
+                    src: None,
+                    dst,
+                    data,
+                    priority,
+                })?;
             }
             if !topology.is_empty() {
                 let pkt = discovery::build_discovery_topology("RELAY", now_ms, &topology)?;
                 let data = RelayItem::Packet(Arc::new(pkt));
                 let priority = Self::relay_item_priority(&data)?;
-                st.tx_queue.push_back_prioritized(
-                    RelayTxItem {
-                        src: None,
-                        dst,
-                        data,
-                        priority,
-                    },
-                    |queued| queued.priority,
-                )?;
+                st.push_tx(RelayTxItem {
+                    src: None,
+                    dst,
+                    data,
+                    priority,
+                })?;
             }
         }
         Ok(())
@@ -1575,6 +1950,7 @@ impl Relay {
                 Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
+            st.fit_discovery_budget();
             let has_any = st.sides.iter().enumerate().any(|(side_id, side)| {
                 let Some(side) = side.as_ref() else {
                     return false;
@@ -1691,6 +2067,7 @@ impl Relay {
             .insert(pkt.sender().to_string(), sender_state);
         Self::recompute_discovery_side_state(&mut route);
         st.discovery_routes.insert(src, route);
+        st.fit_discovery_budget();
         if changed {
             Self::note_discovery_topology_change_locked(&mut st, now_ms);
         }
@@ -1734,6 +2111,9 @@ impl Relay {
                         continue;
                     };
                     if sent.queued || now.wrapping_sub(sent.last_send_ms) < RELIABLE_RETRANSMIT_MS {
+                        continue;
+                    }
+                    if sent.partial_acked {
                         continue;
                     }
                     if sent.retries >= RELIABLE_MAX_RETRIES {
@@ -1801,10 +2181,7 @@ impl Relay {
         if st.recent_rx.contains(&id) {
             Ok(true)
         } else {
-            if st.recent_rx.len() >= MAX_RECENT_RX_IDS {
-                st.recent_rx.pop_front();
-            }
-            st.recent_rx.push_back(id)?;
+            st.push_recent_rx(id)?;
             Ok(false)
         }
     }
@@ -1814,7 +2191,9 @@ impl Relay {
         if !is_reliable_type(ty)
             || matches!(
                 ty,
-                crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+                crate::DataType::ReliableAck
+                    | crate::DataType::ReliablePartialAck
+                    | crate::DataType::ReliablePacketRequest
             )
         {
             return Ok(false);
@@ -2225,6 +2604,18 @@ impl Relay {
             .map(BTreeSet::len)
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_end_to_end_acked_packet_count(&self) -> usize {
+        let st = self.state.lock();
+        st.end_to_end_acked_destinations.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_reliable_return_route_count(&self) -> usize {
+        let st = self.state.lock();
+        st.reliable_return_routes.len()
+    }
+
     /// Enqueue serialized bytes that originated from `src` into the relay RX queue.
     ///
     /// Note: `Arc::from(bytes)` allocates and copies `len` bytes into a new `Arc<[u8]>`.
@@ -2235,14 +2626,11 @@ impl Relay {
 
         let data = RelayItem::Serialized(Arc::from(bytes));
         let priority = Self::relay_item_priority(&data)?;
-        st.rx_queue.push_back_prioritized(
-            RelayRxItem {
-                src,
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )
+        st.push_rx(RelayRxItem {
+            src,
+            data,
+            priority,
+        })
     }
 
     /// Enqueue a full packet that originated from `src` into the relay RX queue.
@@ -2254,14 +2642,11 @@ impl Relay {
 
         let data = RelayItem::Packet(Arc::new(packet));
         let priority = Self::relay_item_priority(&data)?;
-        st.rx_queue.push_back_prioritized(
-            RelayRxItem {
-                src,
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )
+        st.push_rx(RelayRxItem {
+            src,
+            data,
+            priority,
+        })
     }
 
     /// Clear both RX and TX queues.
@@ -2379,20 +2764,23 @@ impl Relay {
                         let mut last_delivered = None;
                         let mut ack_old = None;
                         let mut request_missing = None;
+                        let mut partial_ack = None;
                         {
                             let mut st = self.state.lock();
                             let rx_state =
                                 self.reliable_rx_state_mut(&mut st, item.src, frame.envelope.ty);
-                            if hdr.seq < rx_state.expected_seq {
-                                ack_old = Some(rx_state.expected_seq.saturating_sub(1));
-                            } else if hdr.seq > rx_state.expected_seq {
-                                if rx_state.buffered.len() < RELIABLE_MAX_PENDING {
-                                    rx_state
-                                        .buffered
-                                        .entry(hdr.seq)
-                                        .or_insert_with(|| bytes.clone());
-                                }
-                                request_missing = Some(rx_state.expected_seq);
+                            let expected_seq = rx_state.expected_seq;
+                            if hdr.seq < expected_seq {
+                                ack_old = Some(expected_seq.saturating_sub(1));
+                            } else if hdr.seq > expected_seq {
+                                request_missing = Some(expected_seq);
+                                partial_ack = Some(hdr.seq);
+                                st.buffer_reliable_rx(
+                                    item.src,
+                                    frame.envelope.ty,
+                                    hdr.seq,
+                                    bytes.clone(),
+                                )?;
                             } else {
                                 release.push(bytes.clone());
                                 last_delivered = Some(hdr.seq);
@@ -2412,6 +2800,13 @@ impl Relay {
                             return Ok(());
                         }
                         if let Some(request_seq) = request_missing {
+                            if let Some(partial_seq) = partial_ack {
+                                self.queue_reliable_partial_ack(
+                                    item.src,
+                                    frame.envelope.ty,
+                                    partial_seq,
+                                )?;
+                            }
                             self.queue_reliable_packet_request(
                                 item.src,
                                 frame.envelope.ty,
@@ -2456,7 +2851,9 @@ impl Relay {
             RelayItem::Packet(pkt) => {
                 if matches!(
                     pkt.data_type(),
-                    crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+                    crate::DataType::ReliableAck
+                        | crate::DataType::ReliablePartialAck
+                        | crate::DataType::ReliablePacketRequest
                 ) {
                     if pkt.data_type() == crate::DataType::ReliableAck
                         && Self::is_end_to_end_ack_sender(pkt.sender())
@@ -2467,10 +2864,11 @@ impl Relay {
                                 Self::decode_end_to_end_ack_sender_hash(pkt.sender())
                         {
                             let mut st = self.state.lock();
-                            st.end_to_end_acked_destinations
-                                .entry(packet_id)
-                                .or_default()
-                                .insert(sender_hash);
+                            Self::note_end_to_end_acked_destination_locked(
+                                &mut st,
+                                packet_id,
+                                sender_hash,
+                            );
                         }
                     } else {
                         let vals = pkt.data_as_u32()?;
@@ -2486,6 +2884,9 @@ impl Relay {
                             crate::DataType::ReliableAck => {
                                 self.handle_reliable_ack(item.src, ty, seq)
                             }
+                            crate::DataType::ReliablePartialAck => {
+                                self.handle_reliable_partial_ack(item.src, ty, seq)
+                            }
                             crate::DataType::ReliablePacketRequest => {
                                 self.queue_reliable_retransmit(item.src, ty, seq)?
                             }
@@ -2499,7 +2900,9 @@ impl Relay {
                 let env = serialize::peek_envelope(bytes.as_ref())?;
                 if matches!(
                     env.ty,
-                    crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+                    crate::DataType::ReliableAck
+                        | crate::DataType::ReliablePacketRequest
+                        | crate::DataType::ReliablePartialAck
                 ) {
                     let pkt = serialize::deserialize_packet(bytes.as_ref())?;
                     return self.dispatch_relay_rx_item(&RelayRxItem {
@@ -2520,15 +2923,12 @@ impl Relay {
         let RemoteSidePlan::Target(sides) = plan;
         for dst in sides {
             let priority = Self::relay_item_priority(&data)?;
-            st.tx_queue.push_back_prioritized(
-                RelayTxItem {
-                    src: Some(src),
-                    dst,
-                    data: data.clone(),
-                    priority,
-                },
-                |queued| queued.priority,
-            )?;
+            st.push_tx(RelayTxItem {
+                src: Some(src),
+                dst,
+                data: data.clone(),
+                priority,
+            })?;
         }
         Ok(())
     }
@@ -2608,7 +3008,9 @@ impl Relay {
             RelayItem::Packet(pkt) => {
                 if matches!(
                     pkt.data_type(),
-                    crate::DataType::ReliableAck | crate::DataType::ReliablePacketRequest
+                    crate::DataType::ReliableAck
+                        | crate::DataType::ReliablePartialAck
+                        | crate::DataType::ReliablePacketRequest
                 ) {
                     return Ok(None);
                 }
@@ -2658,11 +3060,27 @@ impl Relay {
             let Some((src, dst, handler, opts, data)) = self.pop_ready_tx_item() else {
                 break;
             };
-            if self.send_tx_item(src, dst, handler, opts, data)?
-                && timeout_ms != 0
-                && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64
-            {
-                break;
+            match self.send_tx_item(src, dst, handler, opts, data.clone()) {
+                Ok(sent) => {
+                    if sent
+                        && timeout_ms != 0
+                        && self.clock.now_ms().wrapping_sub(start) >= timeout_ms as u64
+                    {
+                        break;
+                    }
+                }
+                Err(e) if Self::is_side_tx_busy(&e) => {
+                    let priority = Self::relay_item_priority(&data)?;
+                    let mut st = self.state.lock();
+                    st.push_tx(RelayTxItem {
+                        src,
+                        dst,
+                        data,
+                        priority,
+                    })?;
+                    break;
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())

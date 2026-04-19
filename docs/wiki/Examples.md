@@ -93,7 +93,8 @@ rtos-example-code/threadx_timesync.c ([source](https://github.com/Rylan-Meilutis
 Recommended structure:
 
 - Define one `EndpointHandler` for a single `DataEndpoint`.
-- Create a router in sink mode.
+- Create a router with no remote sides for local-only logging, or add sides and control forwarding
+  with runtime route rules.
 - Call `log_*` with a typed payload.
 - Call `rx_serialized` with the bytes you just sent (loopback).
 

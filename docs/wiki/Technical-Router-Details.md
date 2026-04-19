@@ -84,10 +84,10 @@ Discovery advertisements are adaptive:
 
 1) Bytes or packets are accepted immediately or queued.
 2) For reliable types, sequence headers are processed first and internal `RELIABLE_ACK` /
-   `RELIABLE_PACKET_REQUEST` control packets are consumed here.
+   `RELIABLE_PARTIAL_ACK` / `RELIABLE_PACKET_REQUEST` control packets are consumed here.
 3) Packet ID is computed for dedupe (unreliable / unsequenced frames).
-    - Serialized bytes use `packet_id_from_wire` when possible.
-    - If wire parsing fails, raw bytes are hashed as fallback.
+   - Serialized bytes use `packet_id_from_wire` when possible.
+   - If wire parsing fails, raw bytes are hashed as fallback.
 4) Recent‑ID cache drops duplicates.
 5) Local handlers are invoked with retries.
 6) Built-in discovery packets are learned internally when enabled.
@@ -144,6 +144,13 @@ Queues are processed using:
 
 This pattern is useful for interrupt-driven systems and for batching work.
 
+All router queue-backed state shares one dynamic `MAX_QUEUE_BUDGET`: RX work, TX work, recent
+packet IDs, reliable buffers/replay state, and discovery route/topology state. Recent packet ID
+caches preallocate their final storage and reserve that byte cost immediately. The relay uses the
+same budget model for its RX/TX/replay queues, recent IDs, reliable buffers, and discovery
+topology. When the budget is under pressure, older queued state is evicted; discovery topology
+eviction emits a warning in `std` builds.
+
 ## Error handling and retries
 
 Local handlers are invoked via `with_retries`:
@@ -182,9 +189,13 @@ confirmation path works like this:
   confirmations do not keep suppressing later forwarding choices
 
 Reliable TX also no longer blocks a side/type stream on one inflight frame. The router keeps recent
-sent history per side/type, requests missing ordered sequences explicitly, and requeues retransmits
-with elevated priority. The end-to-end holder verification layer piggybacks on that model instead
-of reintroducing a blocking per-side gate.
+sent history per side/type, requests missing ordered sequences explicitly, and requeues requested
+retransmits with elevated priority. Ordered receivers buffer later packets that arrive after a gap,
+partial-ACK those buffered packets, and request the missing sequence. A partial ACK suppresses the
+normal timeout retransmit for that exact packet, but an explicit `RELIABLE_PACKET_REQUEST` can
+still replay it. Once the missing packet arrives, the receiver immediately releases the contiguous
+buffered run and sends cumulative ACKs. The end-to-end holder verification layer piggybacks on
+that model instead of reintroducing a blocking per-side gate.
 
 ## Default routing model
 

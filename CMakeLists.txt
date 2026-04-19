@@ -21,6 +21,15 @@ set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "" CACHE STRING
 set(SEDSPRINTF_RS_MAX_STACK_PAYLOAD "" CACHE STRING
     "Override MAX_STACK_PAYLOAD used by define_stack_payload! (empty = use macro default)")
 
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "" CACHE STRING
+    "Override MAX_QUEUE_BUDGET shared queue budget in bytes (empty = use Rust default)")
+
+set(SEDSPRINTF_RS_MAX_QUEUE_SIZE "" CACHE STRING
+    "Legacy alias for SEDSPRINTF_RS_MAX_QUEUE_BUDGET (empty = ignored)")
+
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "" CACHE STRING
+    "Override MAX_RECENT_RX_IDS preallocated recent packet ID entries (empty = use Rust default)")
+
 # Schema JSON path override (forwarded as SEDSPRINTF_RS_SCHEMA_PATH)
 set(SEDSPRINTF_RS_SCHEMA_PATH "" CACHE STRING
     "Override telemetry_config.json path (empty = use default)")
@@ -28,7 +37,8 @@ set(SEDSPRINTF_RS_SCHEMA_PATH "" CACHE STRING
 # For each env var you want to set, define a CMake var named:
 #   SEDSPRINTF_RS_ENV_<ENVKEY>
 # Example:
-#   set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+#   set(SEDSPRINTF_RS_ENV_QUEUE_GROW_STEP "2.0" CACHE STRING "" FORCE)
+# Prefer the dedicated cache variables above for MAX_QUEUE_BUDGET and MAX_RECENT_RX_IDS.
 #
 # These will be forwarded as build.py args: env:ENVKEY=VALUE
 
@@ -114,6 +124,16 @@ endif ()
 if (NOT SEDSPRINTF_RS_MAX_STACK_PAYLOAD STREQUAL "")
     set(RS_ARGS_STR "${RS_ARGS_STR} max_stack_payload=${SEDSPRINTF_RS_MAX_STACK_PAYLOAD}")
 endif ()
+set(_SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET "${SEDSPRINTF_RS_MAX_QUEUE_BUDGET}")
+if (_SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET STREQUAL "" AND NOT SEDSPRINTF_RS_MAX_QUEUE_SIZE STREQUAL "")
+    set(_SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET "${SEDSPRINTF_RS_MAX_QUEUE_SIZE}")
+endif ()
+if (NOT _SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET STREQUAL "")
+    set(RS_ARGS_STR "${RS_ARGS_STR} max_queue_budget=${_SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET}")
+endif ()
+if (NOT SEDSPRINTF_RS_MAX_RECENT_RX_IDS STREQUAL "")
+    set(RS_ARGS_STR "${RS_ARGS_STR} max_recent_rx_ids=${SEDSPRINTF_RS_MAX_RECENT_RX_IDS}")
+endif ()
 if (NOT SEDSPRINTF_RS_SCHEMA_PATH STREQUAL "")
     set(RS_ARGS_STR "${RS_ARGS_STR} schema_path=${SEDSPRINTF_RS_SCHEMA_PATH}")
 endif ()
@@ -152,6 +172,12 @@ endif ()
 # New: forward proc-macro env var
 if (NOT SEDSPRINTF_RS_MAX_STACK_PAYLOAD STREQUAL "")
     list(APPEND RS_ARGS_BOOTSTRAP "max_stack_payload=${SEDSPRINTF_RS_MAX_STACK_PAYLOAD}")
+endif ()
+if (NOT _SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET STREQUAL "")
+    list(APPEND RS_ARGS_BOOTSTRAP "max_queue_budget=${_SEDSPRINTF_EFFECTIVE_MAX_QUEUE_BUDGET}")
+endif ()
+if (NOT SEDSPRINTF_RS_MAX_RECENT_RX_IDS STREQUAL "")
+    list(APPEND RS_ARGS_BOOTSTRAP "max_recent_rx_ids=${SEDSPRINTF_RS_MAX_RECENT_RX_IDS}")
 endif ()
 if (NOT SEDSPRINTF_RS_SCHEMA_PATH STREQUAL "")
     list(APPEND RS_ARGS_BOOTSTRAP "schema_path=${SEDSPRINTF_RS_SCHEMA_PATH}")

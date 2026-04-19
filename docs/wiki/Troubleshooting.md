@@ -48,7 +48,7 @@ the same feature set or disable compression everywhere.
 
 Check:
 
-- Router mode is `Relay` (not `Sink`).
+- The router has active sides and the relevant routes are enabled.
 - Link-local-only endpoints stay on link-local/software-bus sides.
 - Non-local endpoints depend on discovery state for selective remote routing.
 - Your TX callback is installed (non-NULL) and returns OK.
@@ -62,10 +62,16 @@ If you see packets bouncing endlessly:
 
 ## Dropped packets or queue evictions
 
-Queues are bounded. If traffic is bursty:
+Queues are bounded by one shared `MAX_QUEUE_BUDGET` per router or relay. RX work, TX work,
+recent packet IDs, reliable buffers/replay state, and discovery topology all draw from that same
+budget. Recent packet ID caches reserve their final storage up front, so a large
+`MAX_RECENT_RX_IDS` leaves less budget for active packet queues. If traffic is bursty:
 
-- Increase `MAX_QUEUE_SIZE` or `QUEUE_GROW_STEP`.
+- Increase `MAX_QUEUE_BUDGET` or `QUEUE_GROW_STEP`.
 - Process queues more frequently.
+- Lower `MAX_RECENT_RX_IDS` if dedupe history is reserving too much of the shared budget.
+- If you see topology eviction warnings, either increase `MAX_QUEUE_BUDGET`, reduce discovery churn,
+  or process queues more often so topology/control traffic does not compete with backed-up data.
 
 ## Embedded build fails with missing symbols
 

@@ -20,7 +20,8 @@ set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 
 # optional compile-time env overrides
 set(SEDSPRINTF_RS_MAX_STACK_PAYLOAD "256" CACHE STRING "" FORCE)
-set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs sedsprintf_rs_build)
 
@@ -34,6 +35,8 @@ Important CMake variables:
 - `SEDSPRINTF_RS_TARGET` (Rust target triple)
 - `SEDSPRINTF_RS_DEVICE_IDENTIFIER`
 - `SEDSPRINTF_RS_MAX_STACK_PAYLOAD`
+- `SEDSPRINTF_RS_MAX_QUEUE_BUDGET`
+- `SEDSPRINTF_RS_MAX_RECENT_RX_IDS`
 - `SEDSPRINTF_RS_ENV_<KEY>` for any config env var
 
 `SEDSPRINTF_RS_FORCE_RELEASE` is useful when your top-level CMake build remains `Debug` but you
@@ -77,7 +80,7 @@ int main(void)
     };
 
     SedsRouter *r = seds_router_new(
-        Seds_RM_Sink,
+        Seds_RM_Relay,
         NULL,
         NULL,
         locals,
@@ -96,6 +99,10 @@ int main(void)
 
 On `std` builds, passing `NULL` for `now_ms_cb` makes the router use its own internal monotonic
 clock. On `no_std` builds, provide a monotonic clock callback.
+
+The first `seds_router_new(...)` mode argument is retained for ABI compatibility with older
+headers. Current routers use runtime side route controls instead of sink/relay construction modes,
+so local-only behavior is achieved by creating no sides or disabling the relevant routes.
 
 Reserved internal endpoints:
 
@@ -139,6 +146,16 @@ For routers, this side setting is separate from router-wide and end-to-end relia
   hop-level reliable layer entirely
 - otherwise, the source router can still track reliable packets end-to-end across the network even
   if one particular egress side does not use hop-level reliable framing
+
+For ordered reliable links, packets that arrive after a missing sequence are buffered and
+partial-ACKed. Partial ACKs suppress timeout retransmit for packets already received, while
+explicit packet requests can still replay them. Once the missing sequence arrives, the buffered
+packets are dispatched immediately in order.
+
+Router and relay queue-backed state shares the compile-time `MAX_QUEUE_BUDGET` dynamically:
+RX work, TX work, recent packet IDs, reliable buffers/replay state, and discovery topology all draw
+from it. Recent packet ID caches preallocate their final storage and reserve that byte cost
+immediately. Discovery topology eviction emits a warning in `std` builds.
 
 With `timesync` enabled, the router owns an internal network clock and handles `TIME_SYNC`
 packets internally. Use `seds_router_get_network_time_ms` / `seds_router_get_network_time` to

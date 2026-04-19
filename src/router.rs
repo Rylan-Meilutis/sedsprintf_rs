@@ -9,7 +9,8 @@
 //! - De-duplication remains packet-id based and side-agnostic.
 
 use crate::config::{
-    MAX_QUEUE_SIZE, MAX_RECENT_RX_IDS, QUEUE_GROW_STEP, STARTING_QUEUE_SIZE, STARTING_RECENT_RX_IDS,
+    MAX_QUEUE_BUDGET, MAX_RECENT_RX_IDS, QUEUE_GROW_STEP, RECENT_RX_QUEUE_BYTES,
+    STARTING_QUEUE_SIZE,
 };
 #[cfg(feature = "discovery")]
 use crate::discovery::{
@@ -30,8 +31,9 @@ use crate::timesync::{
 };
 use crate::{
     config::{
-        DataEndpoint, DataType, DEVICE_IDENTIFIER, MAX_HANDLER_RETRIES, RELIABLE_MAX_PENDING,
-        RELIABLE_MAX_RETRIES, RELIABLE_RETRANSMIT_MS,
+        DataEndpoint, DataType, DEVICE_IDENTIFIER, MAX_HANDLER_RETRIES,
+        RELIABLE_MAX_END_TO_END_PENDING, RELIABLE_MAX_PENDING, RELIABLE_MAX_RETRIES,
+        RELIABLE_MAX_RETURN_ROUTES, RELIABLE_RETRANSMIT_MS,
     }, get_needed_message_size, impl_letype_num, is_reliable_type,
     lock::{ReentryGate, RouterMutex},
     message_meta, message_priority, packet::Packet,
@@ -163,6 +165,7 @@ struct ReliableSent {
     last_send_ms: u64,
     retries: u32,
     queued: bool,
+    partial_acked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -674,11 +677,299 @@ struct RouterInner {
     reliable_tx: BTreeMap<(RouterSideId, u32), ReliableTxState>,
     reliable_rx: BTreeMap<(RouterSideId, u32), ReliableRxState>,
     reliable_return_routes: BTreeMap<u64, ReliableReturnRouteState>,
+    reliable_return_route_order: VecDeque<u64>,
     end_to_end_reliable_tx: BTreeMap<u64, EndToEndReliableSent>,
+    end_to_end_reliable_tx_order: VecDeque<u64>,
     #[cfg(feature = "discovery")]
     discovery_routes: BTreeMap<RouterSideId, DiscoverySideState>,
     #[cfg(feature = "discovery")]
     discovery_cadence: DiscoveryCadenceState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouterQueueKind {
+    Received,
+    Transmit,
+    Recent,
+    ReliableRxBuffer,
+    #[cfg(feature = "discovery")]
+    Discovery,
+}
+
+impl RouterInner {
+    #[cfg(feature = "discovery")]
+    fn topology_board_byte_cost(board: &TopologyBoardNode) -> usize {
+        board
+            .sender_id
+            .len()
+            .saturating_add(board.reachable_endpoints.len() * size_of::<DataEndpoint>())
+            .saturating_add(
+                board
+                    .reachable_timesync_sources
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(board.connections.iter().map(|s| s.len()).sum::<usize>())
+    }
+
+    #[cfg(feature = "discovery")]
+    fn discovery_sender_byte_cost(sender: &str, state: &DiscoverySenderState) -> usize {
+        sender
+            .len()
+            .saturating_add(state.reachable.len() * size_of::<DataEndpoint>())
+            .saturating_add(
+                state
+                    .reachable_timesync_sources
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                state
+                    .topology_boards
+                    .iter()
+                    .map(Self::topology_board_byte_cost)
+                    .sum::<usize>(),
+            )
+            .saturating_add(size_of::<DiscoverySenderState>())
+    }
+
+    #[cfg(feature = "discovery")]
+    fn discovery_route_byte_cost(side: RouterSideId, route: &DiscoverySideState) -> usize {
+        size_of::<RouterSideId>()
+            .saturating_add(size_of::<DiscoverySideState>())
+            .saturating_add(route.reachable.len() * size_of::<DataEndpoint>())
+            .saturating_add(
+                route
+                    .reachable_timesync_sources
+                    .iter()
+                    .map(|s| s.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                route
+                    .announcers
+                    .iter()
+                    .map(|(sender, state)| Self::discovery_sender_byte_cost(sender, state))
+                    .sum::<usize>(),
+            )
+            .saturating_add(side.saturating_sub(side))
+    }
+
+    #[cfg(feature = "discovery")]
+    fn discovery_bytes_used(&self) -> usize {
+        self.discovery_routes
+            .iter()
+            .map(|(side, route)| Self::discovery_route_byte_cost(*side, route))
+            .sum()
+    }
+
+    #[inline]
+    fn reliable_rx_buffered_bytes(&self) -> usize {
+        self.reliable_rx
+            .values()
+            .flat_map(|state| state.buffered.values())
+            .map(|bytes| size_of::<Arc<[u8]>>() + bytes.len())
+            .sum()
+    }
+
+    #[inline]
+    fn shared_queue_bytes_used(&self) -> usize {
+        self.received_queue
+            .bytes_used()
+            .saturating_add(self.transmit_queue.bytes_used())
+            .saturating_add(self.recent_rx.max_bytes())
+            .saturating_add(self.reliable_rx_buffered_bytes())
+            .saturating_add({
+                #[cfg(feature = "discovery")]
+                {
+                    self.discovery_bytes_used()
+                }
+                #[cfg(not(feature = "discovery"))]
+                {
+                    0
+                }
+            })
+    }
+
+    fn reliable_rx_buffer_len(&self) -> usize {
+        self.reliable_rx
+            .values()
+            .map(|state| state.buffered.len())
+            .sum()
+    }
+
+    fn pop_reliable_rx_buffered(&mut self) -> Option<Arc<[u8]>> {
+        let key = self
+            .reliable_rx
+            .iter()
+            .find_map(|(key, state)| (!state.buffered.is_empty()).then_some(*key))?;
+        self.reliable_rx
+            .get_mut(&key)?
+            .buffered
+            .pop_first()
+            .map(|(_, v)| v)
+    }
+
+    fn pop_shared_queue_item(&mut self, preferred: RouterQueueKind) -> bool {
+        match preferred {
+            RouterQueueKind::Received => self.received_queue.pop_front().is_some(),
+            RouterQueueKind::Transmit => self.transmit_queue.pop_front().is_some(),
+            RouterQueueKind::Recent => self.recent_rx.pop_front().is_some(),
+            RouterQueueKind::ReliableRxBuffer => self.pop_reliable_rx_buffered().is_some(),
+            #[cfg(feature = "discovery")]
+            RouterQueueKind::Discovery => self.pop_discovery_route(),
+        }
+    }
+
+    #[cfg(feature = "discovery")]
+    fn pop_discovery_route(&mut self) -> bool {
+        let Some((&side, _)) = self
+            .discovery_routes
+            .iter()
+            .min_by_key(|(_, route)| route.last_seen_ms)
+        else {
+            return false;
+        };
+        self.discovery_routes.remove(&side);
+        Self::queue_budget_warning("topology route evicted because MAX_QUEUE_BUDGET is full");
+        true
+    }
+
+    fn largest_shared_queue(&self) -> Option<RouterQueueKind> {
+        let candidates = [
+            (
+                RouterQueueKind::Received,
+                self.received_queue.bytes_used(),
+                self.received_queue.len(),
+            ),
+            (
+                RouterQueueKind::Transmit,
+                self.transmit_queue.bytes_used(),
+                self.transmit_queue.len(),
+            ),
+            (RouterQueueKind::Recent, 0, 0),
+            (
+                RouterQueueKind::ReliableRxBuffer,
+                self.reliable_rx_buffered_bytes(),
+                self.reliable_rx_buffer_len(),
+            ),
+            #[cfg(feature = "discovery")]
+            (
+                RouterQueueKind::Discovery,
+                self.discovery_bytes_used(),
+                self.discovery_routes.len(),
+            ),
+        ];
+        candidates
+            .into_iter()
+            .filter(|(_, bytes, len)| *bytes > 0 && *len > 0)
+            .max_by_key(|(kind, bytes, _)| {
+                (
+                    *bytes,
+                    if *kind == RouterQueueKind::ReliableRxBuffer {
+                        0
+                    } else {
+                        1
+                    },
+                )
+            })
+            .map(|(kind, _, _)| kind)
+    }
+
+    fn make_shared_queue_room(
+        &mut self,
+        incoming_cost: usize,
+        preferred: RouterQueueKind,
+    ) -> TelemetryResult<()> {
+        if incoming_cost > MAX_QUEUE_BUDGET {
+            return Err(TelemetryError::PacketTooLarge(
+                "Item exceeds maximum shared queue budget",
+            ));
+        }
+
+        while self.shared_queue_bytes_used().saturating_add(incoming_cost) > MAX_QUEUE_BUDGET {
+            let victim = self.largest_shared_queue().unwrap_or(preferred);
+            if victim == RouterQueueKind::Discovery {
+                Self::queue_budget_warning("topology data is using the largest queue budget share");
+            }
+            if !self.pop_shared_queue_item(victim) && !self.pop_shared_queue_item(preferred) {
+                return Err(TelemetryError::PacketTooLarge(
+                    "Item exceeds maximum shared queue budget",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn queue_budget_warning(msg: &str) {
+        #[cfg(feature = "std")]
+        eprintln!("sedsprintf_rs queue budget warning: {msg}");
+        let _ = msg;
+    }
+
+    #[cfg(feature = "discovery")]
+    fn fit_discovery_budget(&mut self) {
+        while self.shared_queue_bytes_used() > MAX_QUEUE_BUDGET {
+            if !self.pop_discovery_route() {
+                break;
+            }
+        }
+    }
+
+    fn push_received(&mut self, item: RouterRxItem) -> TelemetryResult<()> {
+        self.make_shared_queue_room(item.byte_cost(), RouterQueueKind::Received)?;
+        self.received_queue
+            .push_back_prioritized(item, |queued| queued.priority)
+    }
+
+    fn push_transmit(&mut self, item: TxQueued) -> TelemetryResult<()> {
+        self.make_shared_queue_room(item.byte_cost(), RouterQueueKind::Transmit)?;
+        self.transmit_queue
+            .push_back_prioritized(item, |queued| queued.priority)
+    }
+
+    fn push_recent_rx(&mut self, id: u64) -> TelemetryResult<()> {
+        while self.recent_rx.len() >= MAX_RECENT_RX_IDS {
+            let _ = self.recent_rx.pop_front();
+        }
+        self.make_shared_queue_room(0, RouterQueueKind::Recent)?;
+        self.recent_rx.push_back(id)
+    }
+
+    fn buffer_reliable_rx(
+        &mut self,
+        side: RouterSideId,
+        ty: DataType,
+        seq: u32,
+        bytes: Arc<[u8]>,
+    ) -> TelemetryResult<()> {
+        let key = Router::reliable_key(side, ty);
+        if self
+            .reliable_rx
+            .get(&key)
+            .is_some_and(|state| state.buffered.contains_key(&seq))
+        {
+            return Ok(());
+        }
+        let cost = size_of::<Arc<[u8]>>() + bytes.len();
+        self.make_shared_queue_room(cost, RouterQueueKind::ReliableRxBuffer)?;
+        let rx_state = self
+            .reliable_rx
+            .entry(key)
+            .or_insert_with(|| ReliableRxState {
+                expected_seq: 1,
+                buffered: BTreeMap::new(),
+            });
+        if rx_state.buffered.len() >= RELIABLE_MAX_PENDING {
+            let _ = rx_state.buffered.pop_first();
+        }
+        rx_state.buffered.insert(seq, bytes);
+        Ok(())
+    }
 }
 
 /// Non-blocking RX queue used by ISR-safe `rx_queue*` APIs.
@@ -857,7 +1148,10 @@ fn has_nonlocal_endpoint(eps: &[DataEndpoint], cfg: &RouterConfig) -> bool {
 
 #[inline]
 fn is_internal_control_type(ty: DataType) -> bool {
-    if matches!(ty, DataType::ReliableAck | DataType::ReliablePacketRequest) {
+    if matches!(
+        ty,
+        DataType::ReliableAck | DataType::ReliablePartialAck | DataType::ReliablePacketRequest
+    ) {
         return true;
     }
 
@@ -1199,8 +1493,37 @@ impl Router {
 
     fn note_reliable_return_route(&self, side: RouterSideId, packet_id: u64) {
         let mut st = self.state.lock();
+        Self::remember_reliable_return_route_locked(&mut st, packet_id);
         st.reliable_return_routes
             .insert(packet_id, ReliableReturnRouteState { side });
+    }
+
+    fn remember_reliable_return_route_locked(st: &mut RouterInner, packet_id: u64) {
+        let cap = RELIABLE_MAX_RETURN_ROUTES.max(1);
+        st.reliable_return_route_order
+            .retain(|id| st.reliable_return_routes.contains_key(id) && *id != packet_id);
+        while st.reliable_return_route_order.len() >= cap {
+            if let Some(oldest) = st.reliable_return_route_order.pop_front() {
+                st.reliable_return_routes.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        st.reliable_return_route_order.push_back(packet_id);
+    }
+
+    fn remember_end_to_end_reliable_tx_locked(st: &mut RouterInner, packet_id: u64) {
+        let cap = RELIABLE_MAX_END_TO_END_PENDING.max(1);
+        st.end_to_end_reliable_tx_order
+            .retain(|id| st.end_to_end_reliable_tx.contains_key(id) && *id != packet_id);
+        while st.end_to_end_reliable_tx_order.len() >= cap {
+            if let Some(oldest) = st.end_to_end_reliable_tx_order.pop_front() {
+                st.end_to_end_reliable_tx.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        st.end_to_end_reliable_tx_order.push_back(packet_id);
     }
 
     #[cfg(feature = "discovery")]
@@ -1240,6 +1563,9 @@ impl Router {
                         .any(|ep| board.reachable_endpoints.contains(&ep))
                     {
                         out.insert(Self::sender_hash(&board.sender_id), side);
+                        if out.len() >= RELIABLE_MAX_END_TO_END_PENDING.max(1) {
+                            return Ok(out);
+                        }
                     }
                 }
             }
@@ -1256,6 +1582,7 @@ impl Router {
         #[cfg(not(feature = "discovery"))]
         let pending_destinations = BTreeMap::new();
         let tracked_destinations = !pending_destinations.is_empty();
+        Self::remember_end_to_end_reliable_tx_locked(&mut st, packet_id);
         st.end_to_end_reliable_tx.insert(
             packet_id,
             EndToEndReliableSent {
@@ -1420,6 +1747,11 @@ impl Router {
         message_priority(ty).saturating_add(16)
     }
 
+    #[inline]
+    fn is_side_tx_busy(err: &TelemetryError) -> bool {
+        matches!(err, TelemetryError::Io("side tx busy"))
+    }
+
     #[cfg(feature = "timesync")]
     fn timesync_has_usable_time_locked(st: &TimeSyncRuntime, now_mono_ns: u64) -> bool {
         st.disciplined_clock.read_unix_ms(now_mono_ns).is_some()
@@ -1464,18 +1796,15 @@ impl Router {
 
         let RemoteSidePlan::Target(sides) = plan;
         for idx in sides {
-            st.transmit_queue.push_back_prioritized(
-                TxQueued {
-                    item: RouterTxItem::ToSide {
-                        src: exclude,
-                        dst: idx,
-                        data: data.clone(),
-                    },
-                    ignore_local,
-                    priority,
+            st.push_transmit(TxQueued {
+                item: RouterTxItem::ToSide {
+                    src: exclude,
+                    dst: idx,
+                    data: data.clone(),
                 },
-                |queued| queued.priority,
-            )?;
+                ignore_local,
+                priority,
+            })?;
         }
 
         Ok(())
@@ -1980,6 +2309,7 @@ impl Router {
                 self.reconcile_end_to_end_reliable_destinations_locked(&mut st)?;
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
+            st.fit_discovery_budget();
             if st.sides.iter().all(|side| side.is_none()) {
                 return Ok(());
             }
@@ -2066,6 +2396,7 @@ impl Router {
                 self.reconcile_end_to_end_reliable_destinations_locked(&mut st)?;
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
+            st.fit_discovery_budget();
             let has_any = st.sides.iter().enumerate().any(|(side_id, side)| {
                 let Some(side) = side.as_ref() else {
                     return false;
@@ -2175,6 +2506,7 @@ impl Router {
             .insert(pkt.sender().to_string(), sender_state);
         Self::recompute_discovery_side_state(&mut route);
         st.discovery_routes.insert(side, route);
+        st.fit_discovery_budget();
         self.reconcile_end_to_end_reliable_destinations_locked(&mut st)?;
         if changed {
             Self::note_discovery_topology_change_locked(&mut st, now_ms);
@@ -2288,6 +2620,24 @@ impl Router {
         )
     }
 
+    fn queue_reliable_partial_ack(
+        &self,
+        side: RouterSideId,
+        ty: DataType,
+        seq: u32,
+    ) -> TelemetryResult<()> {
+        let pkt = self.reliable_control_packet(DataType::ReliablePartialAck, ty, seq)?;
+        self.tx_queue_item_with_priority(
+            RouterTxItem::ToSide {
+                src: None,
+                dst: side,
+                data: RouterItem::Packet(pkt),
+            },
+            true,
+            message_priority(DataType::ReliablePartialAck),
+        )
+    }
+
     fn handle_reliable_ack(&self, side: RouterSideId, ty: DataType, ack: u32) {
         let mut st = self.state.lock();
         let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
@@ -2306,6 +2656,14 @@ impl Router {
         }
     }
 
+    fn handle_reliable_partial_ack(&self, side: RouterSideId, ty: DataType, seq: u32) {
+        let mut st = self.state.lock();
+        let tx_state = self.reliable_tx_state_mut(&mut st, side, ty);
+        if let Some(sent) = tx_state.sent.get_mut(&seq) {
+            sent.partial_acked = true;
+        }
+    }
+
     fn queue_reliable_retransmit(
         &self,
         side: RouterSideId,
@@ -2320,6 +2678,7 @@ impl Router {
                 && !sent.queued
             {
                 sent.queued = true;
+                sent.partial_acked = false;
                 queued = Some(sent.bytes.clone());
             }
         }
@@ -2473,6 +2832,7 @@ impl Router {
                     last_send_ms: self.clock.now_ms(),
                     retries: 0,
                     queued: false,
+                    partial_acked: false,
                 },
             );
         }
@@ -2544,7 +2904,9 @@ impl Router {
             RouterItem::Packet(pkt) => {
                 if matches!(
                     pkt.data_type(),
-                    DataType::ReliableAck | DataType::ReliablePacketRequest
+                    DataType::ReliableAck
+                        | DataType::ReliablePartialAck
+                        | DataType::ReliablePacketRequest
                 ) {
                     return Ok(None);
                 }
@@ -2573,6 +2935,9 @@ impl Router {
                         continue;
                     };
                     if sent.queued || now.wrapping_sub(sent.last_send_ms) < RELIABLE_RETRANSMIT_MS {
+                        continue;
+                    }
+                    if sent.partial_acked {
                         continue;
                     }
                     if sent.retries >= RELIABLE_MAX_RETRIES {
@@ -3285,30 +3650,32 @@ impl Router {
                 route_selection_cursors: BTreeMap::new(),
                 adaptive_route_stats: BTreeMap::new(),
                 received_queue: BoundedDeque::new(
-                    MAX_QUEUE_SIZE,
+                    MAX_QUEUE_BUDGET,
                     STARTING_QUEUE_SIZE,
                     QUEUE_GROW_STEP,
                 ),
                 transmit_queue: BoundedDeque::new(
-                    MAX_QUEUE_SIZE,
+                    MAX_QUEUE_BUDGET,
                     STARTING_QUEUE_SIZE,
                     QUEUE_GROW_STEP,
                 ),
                 recent_rx: BoundedDeque::new(
-                    MAX_RECENT_RX_IDS * size_of::<u64>(),
-                    STARTING_RECENT_RX_IDS * size_of::<u64>(),
+                    RECENT_RX_QUEUE_BYTES.max(1),
+                    RECENT_RX_QUEUE_BYTES.max(1),
                     QUEUE_GROW_STEP,
                 ),
                 reliable_tx: BTreeMap::new(),
                 reliable_rx: BTreeMap::new(),
                 reliable_return_routes: BTreeMap::new(),
+                reliable_return_route_order: VecDeque::new(),
                 end_to_end_reliable_tx: BTreeMap::new(),
+                end_to_end_reliable_tx_order: VecDeque::new(),
                 #[cfg(feature = "discovery")]
                 discovery_routes: BTreeMap::new(),
                 #[cfg(feature = "discovery")]
                 discovery_cadence: DiscoveryCadenceState::default(),
             }),
-            isr_rx_queue: IsrRxQueue::new(MAX_QUEUE_SIZE, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
+            isr_rx_queue: IsrRxQueue::new(MAX_QUEUE_BUDGET, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
             side_tx_gate: ReentryGate::new(),
             clock,
             #[cfg(feature = "timesync")]
@@ -3760,6 +4127,40 @@ impl Router {
             .map(|sent| sent.pending_destinations.len())
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_end_to_end_tracked_count(&self) -> usize {
+        let st = self.state.lock();
+        st.end_to_end_reliable_tx.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_reliable_return_route_count(&self) -> usize {
+        let st = self.state.lock();
+        st.reliable_return_routes.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_queue_lengths(&self) -> (usize, usize, usize) {
+        let st = self.state.lock();
+        (
+            st.received_queue.len(),
+            st.transmit_queue.len(),
+            st.recent_rx.len(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_shared_queue_bytes_used(&self) -> usize {
+        let st = self.state.lock();
+        st.shared_queue_bytes_used()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_recent_rx_capacity(&self) -> (usize, usize) {
+        let st = self.state.lock();
+        (st.recent_rx.capacity(), st.recent_rx.max_bytes())
+    }
+
     /// Compute a de-dupe hash for a RouterItem.
     /// Uses packet ID for Packet items, and attempts to extract packet ID from
     /// serialized bytes. If extraction fails, hashes raw bytes as a fallback.
@@ -3795,7 +4196,7 @@ impl Router {
         if st.recent_rx.contains(&id) {
             Ok(true)
         } else {
-            st.recent_rx.push_back(id)?;
+            st.push_recent_rx(id)?;
             Ok(false)
         }
     }
@@ -4095,14 +4496,11 @@ impl Router {
         priority: u8,
     ) -> TelemetryResult<()> {
         let mut st = self.state.lock();
-        st.transmit_queue.push_back_prioritized(
-            TxQueued {
-                item,
-                ignore_local,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_transmit(TxQueued {
+            item,
+            ignore_local,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -4136,14 +4534,11 @@ impl Router {
         let data = RouterItem::Serialized(Arc::from(bytes));
         let priority = Self::router_item_priority(&data)?;
         let mut st = self.state.lock();
-        st.received_queue.push_back_prioritized(
-            RouterRxItem {
-                src: None,
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_received(RouterRxItem {
+            src: None,
+            data,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -4169,14 +4564,11 @@ impl Router {
         let data = RouterItem::Packet(pkt);
         let priority = Self::router_item_priority(&data)?;
         let mut st = self.state.lock();
-        st.received_queue.push_back_prioritized(
-            RouterRxItem {
-                src: None,
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_received(RouterRxItem {
+            src: None,
+            data,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -4204,14 +4596,11 @@ impl Router {
         let data = RouterItem::Packet(pkt);
         let priority = Self::router_item_priority(&data)?;
         let mut st = self.state.lock();
-        st.received_queue.push_back_prioritized(
-            RouterRxItem {
-                src: Some(side),
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_received(RouterRxItem {
+            src: Some(side),
+            data,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -4243,14 +4632,11 @@ impl Router {
         let data = RouterItem::Serialized(Arc::from(bytes));
         let priority = Self::router_item_priority(&data)?;
         let mut st = self.state.lock();
-        st.received_queue.push_back_prioritized(
-            RouterRxItem {
-                src: Some(side),
-                data,
-                priority,
-            },
-            |queued| queued.priority,
-        )?;
+        st.push_received(RouterRxItem {
+            src: Some(side),
+            data,
+            priority,
+        })?;
         Ok(())
     }
 
@@ -4423,7 +4809,7 @@ impl Router {
     ) -> TelemetryResult<bool> {
         if !matches!(
             pkt.data_type(),
-            DataType::ReliableAck | DataType::ReliablePacketRequest
+            DataType::ReliableAck | DataType::ReliablePartialAck | DataType::ReliablePacketRequest
         ) {
             return Ok(false);
         }
@@ -4461,6 +4847,10 @@ impl Router {
         match pkt.data_type() {
             DataType::ReliableAck => {
                 self.handle_reliable_ack(src, ty, seq);
+                Ok(true)
+            }
+            DataType::ReliablePartialAck => {
+                self.handle_reliable_partial_ack(src, ty, seq);
                 Ok(true)
             }
             DataType::ReliablePacketRequest => {
@@ -4509,11 +4899,7 @@ impl Router {
                     matches!(side_ref.tx_handler, RouterTxHandlerFn::Serialized(_)),
                     opts.reliable_enabled
                         && self.cfg.reliable_enabled()
-                        && !self.side_has_multiple_announcers_locked(
-                            &st,
-                            src,
-                            self.clock.now_ms(),
-                        ),
+                        && !self.side_has_multiple_announcers_locked(&st, src, self.clock.now_ms()),
                 )
             };
 
@@ -4570,20 +4956,23 @@ impl Router {
                             let mut last_delivered = None;
                             let mut ack_old = None;
                             let mut request_missing = None;
+                            let mut partial_ack = None;
                             {
                                 let mut st = self.state.lock();
                                 let rx_state =
                                     self.reliable_rx_state_mut(&mut st, src, frame.envelope.ty);
-                                if hdr.seq < rx_state.expected_seq {
-                                    ack_old = Some(rx_state.expected_seq.saturating_sub(1));
-                                } else if hdr.seq > rx_state.expected_seq {
-                                    if rx_state.buffered.len() < RELIABLE_MAX_PENDING {
-                                        rx_state
-                                            .buffered
-                                            .entry(hdr.seq)
-                                            .or_insert_with(|| bytes.clone());
-                                    }
-                                    request_missing = Some(rx_state.expected_seq);
+                                let expected_seq = rx_state.expected_seq;
+                                if hdr.seq < expected_seq {
+                                    ack_old = Some(expected_seq.saturating_sub(1));
+                                } else if hdr.seq > expected_seq {
+                                    request_missing = Some(expected_seq);
+                                    partial_ack = Some(hdr.seq);
+                                    st.buffer_reliable_rx(
+                                        src,
+                                        frame.envelope.ty,
+                                        hdr.seq,
+                                        bytes.clone(),
+                                    )?;
                                 } else {
                                     release.push(bytes.clone());
                                     last_delivered = Some(hdr.seq);
@@ -4603,6 +4992,13 @@ impl Router {
                                 return Ok(());
                             }
                             if let Some(request_seq) = request_missing {
+                                if let Some(partial_seq) = partial_ack {
+                                    self.queue_reliable_partial_ack(
+                                        src,
+                                        frame.envelope.ty,
+                                        partial_seq,
+                                    )?;
+                                }
                                 self.queue_reliable_packet_request(
                                     src,
                                     frame.envelope.ty,
@@ -4780,7 +5176,9 @@ impl Router {
 
                 if matches!(
                     env.ty,
-                    DataType::ReliableAck | DataType::ReliablePacketRequest
+                    DataType::ReliableAck
+                        | DataType::ReliablePartialAck
+                        | DataType::ReliablePacketRequest
                 ) {
                     let pkt = serialize::deserialize_packet(bytes.as_ref())?;
                     pkt.validate()?;
@@ -5068,8 +5466,21 @@ impl Router {
                         self.register_end_to_end_reliable_tx(&data)?;
                     }
                 }
-                for side in sides {
+                for (idx, side) in sides.iter().copied().enumerate() {
                     if let Err(e) = self.send_reliable_to_side(side, data.clone()) {
+                        if Self::is_side_tx_busy(&e) {
+                            for retry_side in sides[idx..].iter().copied() {
+                                self.tx_queue_item_with_flags(
+                                    RouterTxItem::ToSide {
+                                        src: None,
+                                        dst: retry_side,
+                                        data: data.clone(),
+                                    },
+                                    true,
+                                )?;
+                            }
+                            return Ok(());
+                        }
                         match &data {
                             RouterItem::Packet(pkt) => {
                                 let _ = self.handle_callback_error(pkt, None, e);
@@ -5112,6 +5523,13 @@ impl Router {
                     return Ok(());
                 }
                 if let Err(e) = self.send_reliable_to_side(dst, data.clone()) {
+                    if Self::is_side_tx_busy(&e) {
+                        self.tx_queue_item_with_flags(
+                            RouterTxItem::ToSide { src, dst, data },
+                            true,
+                        )?;
+                        return Ok(());
+                    }
                     match &data {
                         RouterItem::Packet(pkt) => {
                             let _ = self.handle_callback_error(pkt, None, e);
@@ -5134,8 +5552,21 @@ impl Router {
                         self.remote_side_plan(&data, None)?;
                     sides = fallback_sides;
                 }
-                for side in sides {
+                for (idx, side) in sides.iter().copied().enumerate() {
                     if let Err(e) = self.send_reliable_to_side(side, data.clone()) {
+                        if Self::is_side_tx_busy(&e) {
+                            for retry_side in sides[idx..].iter().copied() {
+                                self.tx_queue_item_with_flags(
+                                    RouterTxItem::ToSide {
+                                        src: None,
+                                        dst: retry_side,
+                                        data: data.clone(),
+                                    },
+                                    true,
+                                )?;
+                            }
+                            return Ok(());
+                        }
                         match &data {
                             RouterItem::Packet(pkt) => {
                                 let _ = self.handle_callback_error(pkt, None, e);
@@ -5163,7 +5594,16 @@ impl Router {
                         return Ok(());
                     }
                 }
-                self.send_reliable_raw_to_side(dst, bytes.clone())?;
+                if let Err(e) = self.send_reliable_raw_to_side(dst, bytes.clone()) {
+                    if Self::is_side_tx_busy(&e) {
+                        self.tx_queue_item_with_flags(
+                            RouterTxItem::ReliableReplay { dst, bytes },
+                            true,
+                        )?;
+                        return Ok(());
+                    }
+                    return Err(e);
+                }
                 let mut st = self.state.lock();
                 let tx_state = self.reliable_tx_state_mut(&mut st, dst, ty);
                 if let Some(sent) = tx_state.sent.get_mut(&hdr.seq) {

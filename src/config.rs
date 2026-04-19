@@ -11,6 +11,7 @@ use crate::{
     parse_f64, parse_strings, parse_usize, EndpointMeta, MessageClass, MessageDataType,
     MessageElement, MessageMeta,
 };
+use core::mem::size_of;
 use sedsprintf_macros::{define_stack_payload, define_telemetry_schema};
 use strum_macros::EnumCount;
 // -----------------------------------------------------------------------------
@@ -37,25 +38,37 @@ pub const MAX_RECENT_RX_IDS: usize = match option_env!("MAX_RECENT_RX_IDS") {
     None => 128,
 };
 
-/// Starting number of recent received packet IDs to track for duplicate
-/// detection.
-pub const STARTING_RECENT_RX_IDS: usize = match option_env!("STARTING_RECENT_RX_IDS") {
-    Some(val) => parse_usize(val),
-    None => 32,
-};
-
 /// Starting size of the internal router and relay queues in bytes.
 pub const STARTING_QUEUE_SIZE: usize = match option_env!("STARTING_QUEUE_SIZE") {
     Some(val) => parse_usize(val),
-    None => 64,
+    None => 128,
 };
 
-/// Maximum size of the internal router and relay queues in Bytes.
-/// Higher values increase memory usage but may help prevent packet
-/// drops under high load.
-pub const MAX_QUEUE_SIZE: usize = match option_env!("MAX_QUEUE_SIZE") {
+/// Shared memory budget for router and relay queue-owned state in bytes.
+///
+/// Higher values increase memory usage but may help prevent packet drops,
+/// reliable buffer eviction, and discovery topology eviction under high load.
+/// `MAX_QUEUE_SIZE` is accepted as a legacy environment alias.
+pub const MAX_QUEUE_BUDGET: usize = match option_env!("MAX_QUEUE_BUDGET") {
     Some(val) => parse_usize(val),
-    None => 1024 * 50, // 50 KB
+    None => match option_env!("MAX_QUEUE_SIZE") {
+        Some(val) => parse_usize(val),
+        None => 1024 * 100, // 100 KiB
+    },
+};
+
+/// Bytes reserved up front for the recent-RX ID cache.
+///
+/// The recent-ID cache is expected to fill to `MAX_RECENT_RX_IDS` during normal
+/// operation, so it preallocates its final storage and counts that reserved
+/// storage against the shared queue budget from construction.
+pub const RECENT_RX_QUEUE_BYTES: usize = {
+    let requested = MAX_RECENT_RX_IDS.saturating_mul(size_of::<u64>());
+    if requested < MAX_QUEUE_BUDGET {
+        requested
+    } else {
+        MAX_QUEUE_BUDGET
+    }
 };
 
 /// Grow amount of the internal router and relay queues.
@@ -125,6 +138,26 @@ pub const RELIABLE_MAX_PENDING: usize = match option_env!("RELIABLE_MAX_PENDING"
     Some(val) => parse_usize(val),
     None => 16,
 };
+
+/// Maximum cached packet-id return routes for directed reliable ACK traffic.
+pub const RELIABLE_MAX_RETURN_ROUTES: usize = match option_env!("RELIABLE_MAX_RETURN_ROUTES") {
+    Some(val) => parse_usize(val),
+    None => MAX_RECENT_RX_IDS,
+};
+
+/// Maximum source-originated packets tracked for end-to-end reliable ACKs.
+pub const RELIABLE_MAX_END_TO_END_PENDING: usize =
+    match option_env!("RELIABLE_MAX_END_TO_END_PENDING") {
+        Some(val) => parse_usize(val),
+        None => RELIABLE_MAX_PENDING,
+    };
+
+/// Maximum relay-side packet-id ACK cache entries for end-to-end reliable forwarding.
+pub const RELIABLE_MAX_END_TO_END_ACK_CACHE: usize =
+    match option_env!("RELIABLE_MAX_END_TO_END_ACK_CACHE") {
+        Some(val) => parse_usize(val),
+        None => MAX_RECENT_RX_IDS,
+    };
 
 // Schema path can be overridden at build time via SEDSPRINTF_RS_SCHEMA_PATH.
 // Board-local IPC/link-local additions can be merged via SEDSPRINTF_RS_IPC_SCHEMA_PATH.

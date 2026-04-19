@@ -162,6 +162,11 @@ The end-to-end path works like this:
 That means reliable delivery is now verified at the application-destination boundary, not just per
 hop, while still keeping reliable send non-blocking for newer packets on the same side/type lane.
 
+For ordered reliable links, a receiver that gets packets after a gap buffers those later packets,
+emits partial ACKs for them, and requests the missing sequence. Partial ACKs stop timeout-based
+retransmits for packets the receiver already has, but explicit packet requests can still replay
+them. When the missing sequence arrives, the buffered packets are dispatched immediately in order.
+
 ## Receiving packets
 
 Common receive APIs:
@@ -212,6 +217,12 @@ What each one does:
 For relays, nested `process_tx_queue*` / `process_all_queues*` calls made from inside a side TX
 callback are intentionally turned into no-ops so a side callback cannot recursively drive relay TX
 on the same stack.
+
+Router and relay queue-backed state shares the compile-time `MAX_QUEUE_BUDGET` dynamically.
+That includes RX work, TX work, recent packet IDs, reliable buffers/replay state, and discovery
+topology. Recent packet ID caches preallocate their final storage and reserve that byte cost
+immediately. If the remaining budget is exhausted, older queued state is evicted; discovery
+topology eviction emits a warning in `std` builds.
 
 ## Topology export
 

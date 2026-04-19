@@ -130,6 +130,28 @@ fn main() {
     println!("cargo:rerun-if-env-changed={SCHEMA_PATH_ENV}");
     println!("cargo:rerun-if-env-changed={IPC_SCHEMA_PATH_ENV}");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_TIMESYNC");
+    for key in [
+        "DEVICE_IDENTIFIER",
+        "MAX_RECENT_RX_IDS",
+        "STARTING_QUEUE_SIZE",
+        "MAX_QUEUE_BUDGET",
+        "MAX_QUEUE_SIZE",
+        "QUEUE_GROW_STEP",
+        "PAYLOAD_COMPRESS_THRESHOLD",
+        "STATIC_STRING_LENGTH",
+        "STATIC_HEX_LENGTH",
+        "STRING_PRECISION",
+        "MAX_STACK_PAYLOAD",
+        "MAX_HANDLER_RETRIES",
+        "RELIABLE_RETRANSMIT_MS",
+        "RELIABLE_MAX_RETRIES",
+        "RELIABLE_MAX_PENDING",
+        "RELIABLE_MAX_RETURN_ROUTES",
+        "RELIABLE_MAX_END_TO_END_PENDING",
+        "RELIABLE_MAX_END_TO_END_ACK_CACHE",
+    ] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
 
     // Make the discovered JSON path available to the crate at compile time.
     // Use in Rust as: env!("SEDSPRINTF_RS_SCHEMA_JSON")

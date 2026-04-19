@@ -169,14 +169,19 @@ always hashes **decompressed** sender/payload bytes, so dedupe works across comp
 
 ## Queues and bounded memory
 
-Router and relay queues are built on `BoundedDeque<T>`:
+Router and relay queue storage is built on `BoundedDeque<T>`:
 
 - Byte-budgeted: each item reports a `byte_cost` via the `ByteCost` trait.
 - Hard element cap: capacity never exceeds `max_elems` (computed from `size_of::<T>()`).
 - Eviction policy: pop from the front until new item fits in byte budget.
 - Growth policy: multiplicative growth controlled by `QUEUE_GROW_STEP`.
 
-This design keeps memory use bounded and avoids unbounded `VecDeque` growth in embedded targets.
+The public `MAX_QUEUE_BUDGET` is shared dynamically across router/relay RX queues, TX queues,
+recent-ID caches, reliable replay/out-of-order buffers, and discovery topology state. Recent-ID
+caches preallocate their final storage at construction and reserve that amount from the shared
+budget immediately. This design keeps memory use bounded and avoids unbounded `VecDeque` growth in
+embedded targets while letting the active part of the system use available queue budget when other
+internal queues are quiet.
 
 ## Router architecture
 

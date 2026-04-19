@@ -1,5 +1,29 @@
 # Changelogs
 
+## Next release highlights
+
+- Shared queue budgeting:
+    - Router and relay internals now share one dynamic `MAX_QUEUE_BUDGET` instead of using
+      isolated caps for each internal queue.
+    - RX queues, TX queues, recent packet IDs, reliable replay/out-of-order buffers, and discovery
+      topology state all count against the same budget.
+    - Recent packet ID caches now preallocate their final storage and reserve their byte cost from
+      the shared budget immediately.
+    - Discovery topology state is now bounded by that budget, with warnings emitted in `std` builds
+      when topology entries must be evicted because the queue budget is exhausted.
+- Reliable recovery traffic reduction:
+    - Ordered reliable RX now partial-ACKs out-of-order packets.
+    - A partial ACK suppresses timeout retransmission for that packet, while still allowing an
+      explicit packet request to retransmit it later if needed.
+    - Buffered packets after a missing sequence are released immediately when the gap is filled.
+- Runtime robustness:
+    - Router and relay side-TX contention is now handled as transient backpressure by requeueing
+      pending work for retry instead of returning an intermittent handler failure.
+- Regression coverage:
+    - Added tests for shared queue-budget accounting, discovery topology budget pressure, partial
+      ACK behavior, side-TX busy retry handling, and the threaded system flow that previously
+      failed intermittently.
+
 ## Version 3.11.1 highlights
 
 - Discovery topology fidelity:
