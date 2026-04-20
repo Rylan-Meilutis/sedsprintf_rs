@@ -2,13 +2,24 @@
 
 ## Supported Versions
 
-The following shows a supported
+Security fixes are provided for the current `3.x` release line. Older major
+versions are not supported.
 
 | Version | Supported |
 |---------|-----------|
-| 2.X.X   | ✓         |
-| < 2.0.0 | x         |
+| 3.x.x   | Yes       |
+| < 3.0.0 | No        |
 
 ## Reporting a Vulnerability
 
-Email me at rylan@rylanswebsite.com to report a vulnerability.
+Email rylan@rylanswebsite.com to report a vulnerability.
+
+Please include:
+
+- affected version or commit
+- a short description of the issue
+- reproduction steps or proof of concept, if available
+- expected impact
+
+Do not open a public issue for suspected vulnerabilities until the issue has
+been reviewed.
