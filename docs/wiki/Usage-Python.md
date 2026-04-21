@@ -96,6 +96,11 @@ As of `3.11.0`, reliable delivery is end-to-end verified:
 - if a discovered holder ages out of topology, the source removes it from the pending holder set
 - newer reliable packets on the same side still do not block while those end-to-end ACKs are pending
 
+For ordered reliable links, later packets that arrive after a missing sequence are buffered and
+partial-ACKed. Partial ACKs suppress timeout retransmit for packets already received, but explicit
+packet requests can still replay them. The buffered packets are dispatched as soon as the missing
+sequence arrives.
+
 ## Queue processing
 
 Useful maintenance calls:
@@ -105,6 +110,11 @@ Useful maintenance calls:
 - `process_all_queues()`
 - `periodic(timeout_ms)`
 - `periodic_no_timesync(timeout_ms)` when time sync is enabled but should be skipped for one loop
+
+Router and relay queue-backed state shares one dynamic `MAX_QUEUE_BUDGET`. RX work, TX work,
+recent packet IDs, reliable buffers/replay state, and discovery topology all count against it.
+Recent packet ID caches preallocate their final storage and reserve that byte cost immediately.
+Discovery topology eviction emits a warning in `std` builds.
 
 ## Time sync
 

@@ -59,7 +59,9 @@ The router is the central component. It performs three main jobs:
 2) **Dispatch** incoming packets to local handlers.
 3) **Forward** packets off‑device when configured.
 
-If you only want local logging, the router can run in sink mode (no forwarding).
+If you only want local logging, create a router with no sides or disable the relevant routes. Routers
+and relays use the same full-mesh side model by default once sides are registered, and runtime route
+controls decide which paths are allowed.
 
 ## Relay
 
@@ -103,6 +105,10 @@ returned an end-to-end acknowledgement after local delivery, and retransmits are
 still outstanding. If one holder later disappears from discovery, that holder is removed from the pending obligation
 set so topology loss does not keep the end-to-end transaction alive forever.
 
+For ordered reliable links, packets that arrive after a missing sequence are buffered and partially
+acknowledged. That tells the sender not to retransmit those already-seen packets on timeout, while
+still allowing them to be sent again if the receiver explicitly requests them.
+
 ## Dedupe
 
 To prevent loops (especially in relay mode), the system uses a packet ID hash. If it sees the same packet again, it
@@ -115,7 +121,11 @@ The router and relay can queue work. This lets you:
 - Receive data in an interrupt and process later.
 - Batch outgoing sends to avoid spikes.
 
-Queues are bounded, so they never grow without limit.
+Queues are bounded by one shared `MAX_QUEUE_BUDGET` per router or relay. RX work, TX work,
+recent packet IDs, reliable buffers/replay state, and learned discovery topology all draw from that
+same budget. Recent packet ID caches reserve their final storage up front. If the remaining budget
+is exhausted, older queued state is evicted; discovery topology evictions emit warnings in builds
+that support standard error output.
 
 ## Compression
 

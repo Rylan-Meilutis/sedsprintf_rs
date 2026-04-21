@@ -867,6 +867,10 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
         "Internal reliable-delivery acknowledgement (type, seq).".to_string(),
     ));
     ty_entries.push((
+        syn::Ident::new("ReliablePartialAck", Span::call_site()),
+        "Internal reliable-delivery selective acknowledgement (type, seq).".to_string(),
+    ));
+    ty_entries.push((
         syn::Ident::new("ReliablePacketRequest", Span::call_site()),
         "Internal reliable-delivery retransmit request (type, seq).".to_string(),
     ));
@@ -874,7 +878,7 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
     let max_ty_value = cfg.types.len() as u32
         + if timesync_enabled { 3 } else { 0 }
         + if discovery_enabled { 3 } else { 0 }
-        + 2;
+        + 3;
 
     let ty_variants = ty_entries
         .iter()
@@ -899,6 +903,13 @@ pub fn define_telemetry_schema(input: TokenStream) -> TokenStream {
             },
             DataType::ReliablePacketRequest => MessageMeta {
                 name: "RELIABLE_PACKET_REQUEST",
+                element: MessageElement::Static(2, MessageDataType::UInt32, MessageClass::Data),
+                endpoints: &[#(#endpoints_tokens),*],
+                reliable: crate::ReliableMode::None,
+                priority: 250,
+            },
+            DataType::ReliablePartialAck => MessageMeta {
+                name: "RELIABLE_PARTIAL_ACK",
                 element: MessageElement::Static(2, MessageDataType::UInt32, MessageClass::Data),
                 endpoints: &[#(#endpoints_tokens),*],
                 reliable: crate::ReliableMode::None,

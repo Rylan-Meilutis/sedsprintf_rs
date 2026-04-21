@@ -20,7 +20,8 @@ set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 
 # optional compile-time env overrides
 set(SEDSPRINTF_RS_MAX_STACK_PAYLOAD "256" CACHE STRING "" FORCE)
-set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs sedsprintf_rs_build)
 
@@ -34,6 +35,8 @@ Important CMake variables:
 - `SEDSPRINTF_RS_TARGET` (Rust target triple)
 - `SEDSPRINTF_RS_DEVICE_IDENTIFIER`
 - `SEDSPRINTF_RS_MAX_STACK_PAYLOAD`
+- `SEDSPRINTF_RS_MAX_QUEUE_BUDGET`
+- `SEDSPRINTF_RS_MAX_RECENT_RX_IDS`
 - `SEDSPRINTF_RS_ENV_<KEY>` for any config env var
 
 `SEDSPRINTF_RS_FORCE_RELEASE` is useful when your top-level CMake build remains `Debug` but you
@@ -77,7 +80,7 @@ int main(void)
     };
 
     SedsRouter *r = seds_router_new(
-        Seds_RM_Sink,
+        Seds_RM_Relay,
         NULL,
         NULL,
         locals,
@@ -97,6 +100,10 @@ int main(void)
 On `std` builds, passing `NULL` for `now_ms_cb` makes the router use its own internal monotonic
 clock. On `no_std` builds, provide a monotonic clock callback.
 
+The first `seds_router_new(...)` mode argument is retained for ABI compatibility with older
+headers. Current routers use runtime side route controls instead of sink/relay construction modes,
+so local-only behavior is achieved by creating no sides or disabling the relevant routes.
+
 Reserved internal endpoints:
 
 - Do not register `SEDS_EP_DISCOVERY` in `SedsLocalEndpointDesc`.
@@ -109,6 +116,46 @@ See c-example-code/
 for a more complete example. Time sync is demonstrated in c-example-code/src/timesync_example.c
 ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/c-example-code/src/timesync_example.c)).
 See [Time-Sync](Time-Sync) for the time sync packet flow and roles.
+
+## Side reliability
+
+Side-level reliability in the C API is controlled by the `reliable_enabled` argument passed to:
+
+- `seds_router_add_side_serialized`
+- `seds_router_add_side_packet`
+- `seds_relay_add_side_serialized`
+- `seds_relay_add_side_packet`
+
+That flag is per hop, not global. It controls what the router/relay does on the connection between
+itself and that specific side callback.
+
+What it means in practice:
+
+- reliable schema types only use the router/relay's hop-level reliable layer on sides where
+  `reliable_enabled == true`
+- on serialized sides, that hop-level layer adds sequence numbers, ACKs, packet requests, and
+  retransmits
+- on sides where `reliable_enabled == false`, the router/relay sends the application packet once
+  without that hop-level reliable wrapper
+- packet-view side callbacks do not preserve the serialized hop-level wrapper, so the most complete
+  router/relay-managed reliable behavior is on serialized sides
+
+For routers, this side setting is separate from router-wide and end-to-end reliability:
+
+- `RouterConfig::with_reliable_enabled(false)` on the Rust side disables the router-managed
+  hop-level reliable layer entirely
+- otherwise, the source router can still track reliable packets end-to-end across the network even
+  if one particular egress side does not use hop-level reliable framing
+
+For ordered reliable links, packets that arrive after a missing sequence are buffered and
+partial-ACKed. Partial ACKs suppress timeout retransmit for packets already received, while
+explicit packet requests can still replay them. Once the missing sequence arrives, the buffered
+packets are dispatched immediately in order.
+
+Router and relay queue-backed state shares the compile-time `MAX_QUEUE_BUDGET` dynamically:
+RX work, TX work, recent packet IDs, reliable buffers/replay state, and discovery topology all draw
+from it. Recent packet ID caches preallocate their final storage and reserve that byte cost
+immediately. Discovery topology eviction emits a warning in `std` builds.
 
 With `timesync` enabled, the router owns an internal network clock and handles `TIME_SYNC`
 packets internally. Use `seds_router_get_network_time_ms` / `seds_router_get_network_time` to
@@ -147,6 +194,22 @@ Common calls:
 - `seds_router_receive_serialized`: receive bytes immediately.
 - `seds_router_rx_serialized_packet_to_queue`: enqueue for later processing.
 - `seds_router_process_all_queues`: process queued RX/TX.
+
+Immediate vs queued variants:
+
+- `receive*` / `transmit*` act immediately in the current call
+- `*_to_queue*` only enqueue work for a later queue drain
+- `*_from_side*` variants tag the traffic with an explicit ingress side id
+- non-`from_side` variants treat the traffic as locally-originated
+
+Main-loop guidance:
+
+- `seds_router_periodic(...)` is the normal router loop entry point because it polls time sync,
+  polls discovery, and drains queues
+- `seds_router_periodic_no_timesync(...)` does the same but skips time sync for that iteration
+- `seds_relay_periodic(...)` is the normal relay loop entry point
+- `seds_router_process_*` and `seds_relay_process_*` are lower-level phase helpers when you need
+  manual control
 
 As of v3.0.0, most applications should call the plain receive APIs above. Side IDs are tracked
 internally by the router. If you need to explicitly override ingress (custom relay or bridge),
@@ -196,6 +259,16 @@ traffic on the default routing policy.
 - `Seds_RSM_Fanout`: send to all eligible paths.
 - `Seds_RSM_Weighted`: send one packet on one eligible path using weighted round-robin.
 - `Seds_RSM_Failover`: send only on the lowest-priority eligible path.
+
+The routing parameters mean:
+
+- `src_side_id`: the ingress side that traffic arrived from; pass `-1` for locally-originated
+  router/relay traffic
+- `dst_side_id`: the candidate egress side being allowed, blocked, weighted, or prioritized
+- `ty`: the `DataType` affected by a typed-route override
+- `enabled`: whether that route is allowed
+- `weight`: relative share used by `Seds_RSM_Weighted`
+- `priority`: lower values win in `Seds_RSM_Failover`
 
 ## Payload layout expectations
 

@@ -132,6 +132,30 @@ fn get_handler(rx_count_c: Arc<AtomicUsize>) -> EndpointHandler {
     })
 }
 
+#[test]
+fn recent_rx_cache_preallocates_and_reserves_shared_budget() {
+    use crate::config::{MAX_QUEUE_BUDGET, MAX_RECENT_RX_IDS, RECENT_RX_QUEUE_BYTES};
+    use crate::router::{Router, RouterConfig};
+
+    let router = Router::new(RouterConfig::default());
+    let (capacity, max_bytes) = router.debug_recent_rx_capacity();
+
+    assert_eq!(max_bytes, RECENT_RX_QUEUE_BYTES.max(1));
+    assert_eq!(
+        capacity,
+        (RECENT_RX_QUEUE_BYTES.max(1) / core::mem::size_of::<u64>()).max(1)
+    );
+    assert!(capacity <= MAX_RECENT_RX_IDS.max(1));
+    assert!(
+        router.debug_shared_queue_bytes_used() <= MAX_QUEUE_BUDGET,
+        "reserved recent ID memory must fit inside the shared queue budget"
+    );
+    assert!(
+        router.debug_shared_queue_bytes_used() >= max_bytes,
+        "recent ID reservation should count against the shared queue budget immediately"
+    );
+}
+
 /// Build a handler for `SD_CARD` that:
 /// - asserts `GPS_DATA` element width is `4` (f32),
 /// - decodes the payload as little-endian `f32`,
@@ -2161,13 +2185,25 @@ mod tests_more {
             router.rx_queue(pkt).unwrap();
         }
 
+        let (queued_rx, queued_tx, _queued_recent) = router.debug_queue_lengths();
+        assert!(queued_tx <= N, "TX queue should be bounded");
+        assert!(queued_rx <= N, "RX queue should be bounded");
+        assert!(
+            router.debug_shared_queue_bytes_used() <= crate::config::MAX_QUEUE_BUDGET,
+            "shared queue budget should cap retained queued bytes"
+        );
+
         router.process_all_queues_with_timeout(0).unwrap();
 
-        assert_eq!(tx_count.load(Ordering::SeqCst), N, "all TX should flush");
+        assert_eq!(
+            tx_count.load(Ordering::SeqCst),
+            queued_tx,
+            "all retained TX should flush"
+        );
         assert_eq!(
             rx_count.load(Ordering::SeqCst),
-            2 * N,
-            "each TX local delivery + RX packet should invoke handler"
+            queued_tx + queued_rx,
+            "each retained TX local delivery + retained RX packet should invoke handler"
         );
     }
 }
@@ -3049,6 +3085,49 @@ mod relay_tests {
             "expected {total_frames} relayed frames"
         );
     }
+
+    #[test]
+    fn relay_side_tx_reentry_defers_recursive_queue_drains() {
+        let relay = Arc::new(Relay::new(zero_clock()));
+        let remaining = Arc::new(AtomicUsize::new(6));
+        let ingress = relay.add_side_serialized("INGRESS", move |_bytes| Ok(()));
+
+        let relay_c = relay.clone();
+        let remaining_c = remaining.clone();
+        let loop_hits = Arc::new(AtomicUsize::new(0));
+        let loop_hits_c = loop_hits.clone();
+        let in_tx = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reentered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let in_tx_c = in_tx.clone();
+        let reentered_c = reentered.clone();
+        relay.add_side_serialized("LOOP", move |bytes| {
+            loop_hits_c.fetch_add(1, Ordering::SeqCst);
+            if in_tx_c.swap(true, Ordering::SeqCst) {
+                reentered_c.store(true, Ordering::SeqCst);
+            }
+            if remaining_c
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                relay_c.rx_serialized_from_side(ingress, bytes)?;
+                relay_c.process_all_queues()?;
+            }
+            in_tx_c.store(false, Ordering::SeqCst);
+            Ok(())
+        });
+
+        relay
+            .rx_serialized_from_side(ingress, wire_for_value(1).as_ref())
+            .unwrap();
+        relay.process_all_queues().unwrap();
+        for _ in 0..8 {
+            relay.process_all_queues().unwrap();
+        }
+
+        assert!(!reentered.load(Ordering::SeqCst));
+        assert!(remaining.load(Ordering::SeqCst) < 6);
+        assert!(loop_hits.load(Ordering::SeqCst) > 0);
+    }
 }
 
 #[cfg(test)]
@@ -3701,7 +3780,8 @@ mod reliable_tests {
     use crate::{packet::Packet, serialize, TelemetryResult};
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
 
     fn zero_clock() -> Box<dyn Clock + Send + Sync> {
         Box::new(|| 0u64)
@@ -3788,6 +3868,181 @@ mod reliable_tests {
         }
 
         assert_eq!(rx_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_side_tx_busy_is_queued_for_retry() {
+        let tx_hits = Arc::new(AtomicUsize::new(0));
+        let tx_hits_c = tx_hits.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let release_rx_c = release_rx.clone();
+
+        let router = Arc::new(Router::new_with_clock(
+            RouterConfig::default(),
+            zero_clock(),
+        ));
+        router.add_side_serialized("BUS", move |_bytes| -> TelemetryResult<()> {
+            let hit = tx_hits_c.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                entered_tx.send(()).unwrap();
+                release_rx_c.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        });
+
+        let first = Packet::from_f32_slice(
+            DataType::BatteryStatus,
+            &[1.0_f32, 2.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        let second = Packet::from_f32_slice(
+            DataType::BatteryStatus,
+            &[3.0_f32, 4.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+
+        let router_for_first = router.clone();
+        let first_handle = thread::spawn(move || router_for_first.tx(first));
+        entered_rx.recv().unwrap();
+
+        router.tx(second).unwrap();
+        assert_eq!(
+            tx_hits.load(Ordering::SeqCst),
+            1,
+            "second TX should be queued while the side callback is busy"
+        );
+
+        release_tx.send(()).unwrap();
+        first_handle.join().unwrap().unwrap();
+        router.process_tx_queue().unwrap();
+        assert_eq!(
+            tx_hits.load(Ordering::SeqCst),
+            2,
+            "queued TX should flush after the side callback becomes available"
+        );
+    }
+
+    #[test]
+    fn partial_ack_is_emitted_and_still_allows_requested_replay() {
+        let sent_frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sent_frames_c = sent_frames.clone();
+        let sender = Router::new_with_clock(
+            RouterConfig::default().with_reliable_enabled(true),
+            zero_clock(),
+        );
+        let sender_side = sender.add_side_serialized_with_options(
+            "to_receiver",
+            move |bytes: &[u8]| {
+                sent_frames_c.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        let pkt1 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[1.0_f32, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            1,
+        )
+        .unwrap();
+        let pkt2 = Packet::from_f32_slice(
+            DataType::GpsData,
+            &[2.0_f32, 0.0, 0.0],
+            &[DataEndpoint::Radio],
+            2,
+        )
+        .unwrap();
+        sender.tx(pkt1).unwrap();
+        sender.tx(pkt2).unwrap();
+
+        let frames = sent_frames.lock().unwrap().clone();
+        assert_eq!(frames.len(), 2);
+
+        let receiver_controls: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let receiver_controls_c = receiver_controls.clone();
+        let receiver = Router::new_with_clock(
+            RouterConfig::default().with_reliable_enabled(true),
+            zero_clock(),
+        );
+        let receiver_side = receiver.add_side_serialized_with_options(
+            "to_sender",
+            move |bytes: &[u8]| {
+                receiver_controls_c.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        receiver
+            .rx_serialized_from_side(&frames[1], receiver_side)
+            .unwrap();
+        receiver.process_tx_queue().unwrap();
+        let controls = receiver_controls.lock().unwrap().clone();
+        assert!(controls.iter().any(|frame| {
+            serialize::peek_envelope(frame)
+                .map(|env| env.ty == DataType::ReliablePartialAck)
+                .unwrap_or(false)
+        }));
+        assert!(controls.iter().any(|frame| {
+            serialize::peek_envelope(frame)
+                .map(|env| env.ty == DataType::ReliablePacketRequest)
+                .unwrap_or(false)
+        }));
+
+        let ack1 = Packet::new(
+            DataType::ReliableAck,
+            crate::message_meta(DataType::ReliableAck).endpoints,
+            "RX",
+            0,
+            crate::router::encode_slice_le(&[DataType::GpsData as u32, 1]),
+        )
+        .unwrap();
+        sender.rx_from_side(&ack1, sender_side).unwrap();
+        for control in controls.iter().filter(|frame| {
+            serialize::peek_envelope(frame)
+                .map(|env| env.ty == DataType::ReliablePartialAck)
+                .unwrap_or(false)
+        }) {
+            sender
+                .rx_serialized_from_side(control, sender_side)
+                .unwrap();
+        }
+
+        sent_frames.lock().unwrap().clear();
+        let request2 = Packet::new(
+            DataType::ReliablePacketRequest,
+            crate::message_meta(DataType::ReliablePacketRequest).endpoints,
+            "RX",
+            0,
+            crate::router::encode_slice_le(&[DataType::GpsData as u32, 2]),
+        )
+        .unwrap();
+        sender.rx_from_side(&request2, sender_side).unwrap();
+        sender.process_tx_queue_with_timeout(0).unwrap();
+        assert!(
+            sent_frames
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|frame| serialize::peek_frame_info(frame)
+                    .ok()
+                    .and_then(|info| info.reliable.map(|hdr| hdr.seq == 2))
+                    .unwrap_or(false)),
+            "requested packet should still retransmit"
+        );
     }
 
     #[test]
@@ -4179,6 +4434,10 @@ mod router_tests {
 
     #[cfg(feature = "discovery")]
     mod discovery_tests {
+        use crate::config::{
+            RELIABLE_MAX_END_TO_END_ACK_CACHE, RELIABLE_MAX_END_TO_END_PENDING,
+            RELIABLE_MAX_RETURN_ROUTES,
+        };
         use crate::discovery::{
             build_discovery_announce, build_discovery_timesync_sources, build_discovery_topology,
             TopologyBoardNode, DISCOVERY_FAST_INTERVAL_MS, DISCOVERY_ROUTE_TTL_MS,
@@ -4332,6 +4591,86 @@ mod router_tests {
             assert_eq!(
                 router.debug_end_to_end_pending_destination_count(packet_id),
                 None
+            );
+        }
+
+        #[test]
+        fn reliable_router_state_stays_bounded_under_unacked_traffic() {
+            let router = Router::new_with_clock(
+                RouterConfig::default().with_sender("SRC"),
+                StepClock::new_box(0, 0),
+            );
+            let side = router.add_side_serialized_with_options(
+                "link",
+                |_bytes| Ok(()),
+                crate::router::RouterSideOptions {
+                    reliable_enabled: true,
+                    ..crate::router::RouterSideOptions::default()
+                },
+            );
+
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_A", 0, &[DataEndpoint::Radio]).unwrap(),
+                    side,
+                )
+                .unwrap();
+
+            for idx in 0..(RELIABLE_MAX_END_TO_END_PENDING.max(1) + 4) {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[idx as f32, 0.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    idx as u64,
+                )
+                .unwrap();
+                let _ = router.tx(pkt);
+            }
+
+            assert!(
+                router.debug_end_to_end_tracked_count() <= RELIABLE_MAX_END_TO_END_PENDING.max(1)
+            );
+
+            for idx in 0..(RELIABLE_MAX_RETURN_ROUTES.max(1) + 4) {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[idx as f32, 1.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    (1000 + idx) as u64,
+                )
+                .unwrap();
+                router.rx_from_side(&pkt, side).unwrap();
+            }
+
+            assert!(
+                router.debug_reliable_return_route_count() <= RELIABLE_MAX_RETURN_ROUTES.max(1)
+            );
+        }
+
+        #[test]
+        fn discovery_topology_counts_against_shared_queue_budget() {
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
+            let side = router.add_side_serialized("link", |_bytes| Ok(()));
+
+            for idx in 0..128 {
+                let boards = vec![TopologyBoardNode {
+                    sender_id: format!("REMOTE_BOARD_{idx}_{}", "x".repeat(512)),
+                    reachable_endpoints: vec![DataEndpoint::Radio, DataEndpoint::SdCard],
+                    reachable_timesync_sources: vec![format!("TIME_{idx}_{}", "y".repeat(256))],
+                    connections: vec![format!("CONN_{idx}_{}", "z".repeat(512))],
+                }];
+                let pkt = build_discovery_topology(
+                    Box::leak(format!("SRC_{idx}").into_boxed_str()),
+                    idx as u64,
+                    &boards,
+                )
+                .unwrap();
+                router.rx_from_side(&pkt, side).unwrap();
+            }
+
+            assert!(
+                router.debug_shared_queue_bytes_used() <= crate::config::MAX_QUEUE_BUDGET,
+                "discovery topology state must be part of the shared queue budget"
             );
         }
 
@@ -6042,6 +6381,60 @@ mod router_tests {
         }
 
         #[test]
+        fn reliable_relay_state_stays_bounded_under_unacked_traffic() {
+            let relay = Relay::new(zero_clock());
+            let side =
+                relay.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            for idx in 0..(RELIABLE_MAX_RETURN_ROUTES.max(1) + 4) {
+                let pkt = Packet::from_f32_slice(
+                    DataType::GpsData,
+                    &[idx as f32, 2.0, 0.0],
+                    &[DataEndpoint::Radio],
+                    idx as u64,
+                )
+                .unwrap();
+                relay.rx_from_side(side, pkt).unwrap();
+            }
+            assert!(relay.debug_reliable_return_route_count() <= RELIABLE_MAX_RETURN_ROUTES.max(1));
+
+            let packet_id = 123u64;
+            for idx in 0..(RELIABLE_MAX_END_TO_END_PENDING.max(1) + 4) {
+                let ack = Packet::new(
+                    DataType::ReliableAck,
+                    crate::message_meta(DataType::ReliableAck).endpoints,
+                    &format!("E2EACK:DEST_{idx}"),
+                    idx as u64,
+                    Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
+                )
+                .unwrap();
+                relay.rx_from_side(side, ack).unwrap();
+            }
+            assert!(
+                relay
+                    .debug_end_to_end_acked_destination_count(packet_id)
+                    .unwrap_or(0)
+                    <= RELIABLE_MAX_END_TO_END_PENDING.max(1)
+            );
+
+            for idx in 0..(RELIABLE_MAX_END_TO_END_ACK_CACHE.max(1) + 4) {
+                let ack = Packet::new(
+                    DataType::ReliableAck,
+                    crate::message_meta(DataType::ReliableAck).endpoints,
+                    "E2EACK:DEST_A",
+                    idx as u64,
+                    Arc::<[u8]>::from((10_000u64 + idx as u64).to_le_bytes().to_vec()),
+                )
+                .unwrap();
+                relay.rx_from_side(side, ack).unwrap();
+            }
+            assert!(
+                relay.debug_end_to_end_acked_packet_count()
+                    <= RELIABLE_MAX_END_TO_END_ACK_CACHE.max(1)
+            );
+        }
+
+        #[test]
         fn link_local_only_packets_stay_on_software_bus_sides() {
             let Some(software_bus) = endpoint_by_name("SOFTWARE_BUS") else {
                 return;
@@ -6436,6 +6829,138 @@ mod router_tests {
                     .count(),
                 0
             );
+        }
+
+        #[test]
+        fn immediate_cross_wired_router_reentry_falls_back_to_queue() {
+            let Some(ipc_message) = datatype_by_name("IPC_MESSAGE") else {
+                return;
+            };
+
+            let remaining = Arc::new(AtomicUsize::new(6));
+            let sequence = Arc::new(AtomicUsize::new(1));
+            let a_slot = Arc::new(Mutex::new(None::<Arc<Router>>));
+            let b_slot = Arc::new(Mutex::new(None::<Arc<Router>>));
+
+            let a_remaining = remaining.clone();
+            let a_sequence = sequence.clone();
+            let a_router = a_slot.clone();
+            let router_a = Arc::new(Router::new_with_clock(
+                RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                    DataEndpoint::Radio,
+                    move |_pkt: &Packet| {
+                        if a_remaining
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        let seq = a_sequence.fetch_add(1, Ordering::SeqCst) as u64;
+                        let pkt = Packet::new(
+                            ipc_message,
+                            &[DataEndpoint::SdCard],
+                            "A_NODE",
+                            seq,
+                            Arc::<[u8]>::from(b"bounce-a".as_slice()),
+                        )?;
+                        a_router
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .expect("router A initialized")
+                            .tx(pkt)
+                    },
+                )])
+                .with_sender("A_NODE"),
+                StepClock::new_default_box(),
+            ));
+
+            let b_remaining = remaining.clone();
+            let b_sequence = sequence.clone();
+            let b_router = b_slot.clone();
+            let router_b = Arc::new(Router::new_with_clock(
+                RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                    DataEndpoint::SdCard,
+                    move |_pkt: &Packet| {
+                        if b_remaining
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        let seq = b_sequence.fetch_add(1, Ordering::SeqCst) as u64;
+                        let pkt = Packet::new(
+                            ipc_message,
+                            &[DataEndpoint::Radio],
+                            "B_NODE",
+                            seq,
+                            Arc::<[u8]>::from(b"bounce-b".as_slice()),
+                        )?;
+                        b_router
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .expect("router B initialized")
+                            .tx(pkt)
+                    },
+                )])
+                .with_sender("B_NODE"),
+                StepClock::new_default_box(),
+            ));
+
+            *a_slot.lock().unwrap() = Some(router_a.clone());
+            *b_slot.lock().unwrap() = Some(router_b.clone());
+
+            let a_in_tx = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let a_reentered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let b_in_tx = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let b_reentered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let router_b_for_side = router_b.clone();
+            let a_in_tx_flag = a_in_tx.clone();
+            let a_reentered_flag = a_reentered.clone();
+            let side_a = router_a.add_side_packet("A_TO_B", move |pkt: &Packet| {
+                if a_in_tx_flag.swap(true, Ordering::SeqCst) {
+                    a_reentered_flag.store(true, Ordering::SeqCst);
+                }
+                let result = router_b_for_side.rx_from_side(pkt, 0);
+                a_in_tx_flag.store(false, Ordering::SeqCst);
+                result
+            });
+
+            let router_a_for_side = router_a.clone();
+            let b_in_tx_flag = b_in_tx.clone();
+            let b_reentered_flag = b_reentered.clone();
+            let side_b = router_b.add_side_packet("B_TO_A", move |pkt: &Packet| {
+                if b_in_tx_flag.swap(true, Ordering::SeqCst) {
+                    b_reentered_flag.store(true, Ordering::SeqCst);
+                }
+                let result = router_a_for_side.rx_from_side(pkt, 0);
+                b_in_tx_flag.store(false, Ordering::SeqCst);
+                result
+            });
+
+            assert_eq!(side_a, 0);
+            assert_eq!(side_b, 0);
+
+            let first = Packet::new(
+                ipc_message,
+                &[DataEndpoint::SdCard],
+                "START",
+                0,
+                Arc::<[u8]>::from(b"start".as_slice()),
+            )
+            .unwrap();
+            router_a.tx(first).unwrap();
+
+            for _ in 0..8 {
+                router_a.process_all_queues().unwrap();
+                router_b.process_all_queues().unwrap();
+            }
+
+            assert!(!a_reentered.load(Ordering::SeqCst));
+            assert!(!b_reentered.load(Ordering::SeqCst));
+            assert!(remaining.load(Ordering::SeqCst) < 6);
         }
     }
 

@@ -21,6 +21,46 @@
 //! }
 //! ```
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Debug)]
+pub struct ReentryGate {
+    busy: AtomicBool,
+}
+
+pub struct ReentryGuard<'a> {
+    busy: &'a AtomicBool,
+}
+
+impl ReentryGate {
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    pub fn try_enter(&self) -> Option<ReentryGuard<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| ReentryGuard { busy: &self.busy })
+    }
+
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ReentryGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.busy.store(false, Ordering::Release);
+    }
+}
+
 // ============================================================================
 //  std implementation
 // ============================================================================

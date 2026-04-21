@@ -40,11 +40,13 @@ Options (can be combined where it makes sense):
   device_id=<id>          Set DEVICE_IDENTIFIER env var for the build.
   schema_path=<path>      Set SEDSPRINTF_RS_SCHEMA_PATH for the build.
   ipc_schema_path=<path>  Set SEDSPRINTF_RS_IPC_SCHEMA_PATH for a board-local IPC overlay.
+  max_queue_budget=<n>    Set MAX_QUEUE_BUDGET for the shared router/relay queue budget.
+  max_recent_rx_ids=<n>   Set MAX_RECENT_RX_IDS for the preallocated recent-ID cache.
 
 New (compile-time env vars):
   max_stack_payload=<n>   Set MAX_STACK_PAYLOAD for define_stack_payload!(env="MAX_STACK_PAYLOAD", ...).
   env:KEY=VALUE           Set arbitrary environment variable(s) for the build (repeatable).
-                          Example: env:MAX_QUEUE_SIZE=65536 env:QUEUE_GROW_STEP=2.0
+                          Example: env:MAX_QUEUE_BUDGET=65536 env:QUEUE_GROW_STEP=2.0
   env:SEDSPRINTF_RS_INSTALL_C_TOOLCHAIN_CMD="..."  Optional command used to auto-install
                           cross C toolchain when embedded checks need it.
   env:SEDSPRINTF_RS_EMBEDDED_CFLAGS_AUTO=0         Disable automatic size-oriented CFLAGS/defines
@@ -63,7 +65,7 @@ Examples:
   build.py test
   build.py test release
   build.py maturin-build max_stack_payload=256
-  build.py maturin-install env:MAX_RECENT_RX_IDS=256 env:MAX_STACK_PAYLOAD=128
+  build.py maturin-install max_recent_rx_ids=256 env:MAX_STACK_PAYLOAD=128
 """,
         file=out,
         end="",
@@ -867,6 +869,24 @@ def main(argv: list[str]) -> None:
             if not v:
                 print_help("max_stack_payload requires a value")
             env_overrides["MAX_STACK_PAYLOAD"] = v
+
+        elif arg.startswith("max_queue_budget="):
+            v = arg.split("=", 1)[1].strip()
+            if not v:
+                print_help("max_queue_budget requires a value")
+            env_overrides["MAX_QUEUE_BUDGET"] = v
+
+        elif arg.startswith("max_queue_size="):
+            v = arg.split("=", 1)[1].strip()
+            if not v:
+                print_help("max_queue_size requires a value")
+            env_overrides["MAX_QUEUE_BUDGET"] = v
+
+        elif arg.startswith("max_recent_rx_ids="):
+            v = arg.split("=", 1)[1].strip()
+            if not v:
+                print_help("max_recent_rx_ids requires a value")
+            env_overrides["MAX_RECENT_RX_IDS"] = v
 
         elif arg.startswith("env:"):
             rest = arg[4:]

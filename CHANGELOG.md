@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.12.0
+
+- Queue sizing now uses one shared dynamic `MAX_QUEUE_BUDGET` across router and relay internals
+  instead of fixed per-queue caps.
+- The compile-time queue knob has been renamed from `MAX_QUEUE_SIZE` to `MAX_QUEUE_BUDGET` to
+  match its current meaning; the old environment name remains accepted as a legacy alias.
+- Router and relay receive queues, transmit queues, reliable replay/out-of-order buffers, recent
+  packet ID tracking, and discovery topology state now all draw from that same budget.
+- Recent packet ID caches now preallocate their final storage at construction and reserve
+  `min(MAX_RECENT_RX_IDS * sizeof(u64), MAX_QUEUE_BUDGET)` bytes from the shared queue budget.
+- Discovery topology growth is bounded by the shared queue budget, and `std` builds emit a warning
+  when topology state has to be evicted because the budget is exhausted.
+- Ordered reliable receive paths now partial-ACK out-of-order packets so those packets do not get
+  timeout-retransmitted while a gap is being recovered.
+- Explicit `RELIABLE_PACKET_REQUEST` retransmits still work for partial-ACKed packets, so a packet
+  can be held back from timeout traffic without becoming impossible to request again.
+- Buffered reliable packets after a missing sequence are retained under the shared queue budget and
+  released immediately once the missing packet arrives.
+- Router and relay side-TX contention is now treated as transient backpressure: pending work is
+  requeued and retried instead of surfacing an intermittent handler failure.
+- Added regression coverage for shared queue-budget accounting, discovery topology budget pressure,
+  partial reliable ACK behavior, side-TX busy retry handling, and the previously flaky threaded
+  system flow.
+
 ## 3.11.1
 
 - Discovery now carries a full transitive router graph with the built-in

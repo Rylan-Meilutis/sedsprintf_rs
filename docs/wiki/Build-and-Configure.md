@@ -22,7 +22,7 @@ Examples:
 ./build.py embedded release target=thumbv7em-none-eabihf device_id=FC
 ./build.py python
 ./build.py test release
-./build.py maturin-install env:MAX_RECENT_RX_IDS=256 env:MAX_STACK_PAYLOAD=128
+./build.py maturin-install max_recent_rx_ids=256 env:MAX_STACK_PAYLOAD=128
 ```
 
 Useful options:
@@ -148,9 +148,8 @@ Supported keys (defaults shown):
 
 - `DEVICE_IDENTIFIER` (TEST_PLATFORM)
 - `MAX_RECENT_RX_IDS` (128)
-- `STARTING_RECENT_RX_IDS` (32)
-- `STARTING_QUEUE_SIZE` (64 bytes)
-- `MAX_QUEUE_SIZE` (51200 bytes)
+- `STARTING_QUEUE_SIZE` (128 bytes)
+- `MAX_QUEUE_BUDGET` (102400 bytes)
 - `QUEUE_GROW_STEP` (3.2)
 - `PAYLOAD_COMPRESS_THRESHOLD` (16 bytes)
 - `STATIC_STRING_LENGTH` (1024)
@@ -158,6 +157,16 @@ Supported keys (defaults shown):
 - `STRING_PRECISION` (8)
 - `MAX_STACK_PAYLOAD` (64, via `define_stack_payload!`)
 - `MAX_HANDLER_RETRIES` (3)
+
+`MAX_QUEUE_BUDGET` is the shared queue-owned memory budget for each router or relay. RX queues, TX
+queues, reliable replay/out-of-order buffers, and discovery topology state draw from this budget
+dynamically. The recent packet ID cache preallocates
+`min(MAX_RECENT_RX_IDS * sizeof(u64), MAX_QUEUE_BUDGET)` bytes at construction and reserves that
+amount from the same budget.
+
+`MAX_QUEUE_SIZE` is still accepted as a legacy environment alias, but new builds should use
+`MAX_QUEUE_BUDGET`, `build.py max_queue_budget=<n>`, or CMake
+`SEDSPRINTF_RS_MAX_QUEUE_BUDGET`.
 
 ## CMake integration
 

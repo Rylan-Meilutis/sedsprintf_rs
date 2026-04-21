@@ -62,6 +62,18 @@ becomes more selective; when it is not known, the system falls back to ordinary 
 are reserved internal router endpoints: applications can use the discovery and time-sync APIs, but must not register
 local endpoint handlers for those endpoints or try to override their built-in handling.
 
+Queue memory is bounded by the compile-time `MAX_QUEUE_BUDGET`. Router and relay internals share that budget
+dynamically across RX work, TX work, reliable replay/out-of-order buffers, recent packet ID tracking, and learned
+discovery topology state. The recent packet ID cache preallocates its final storage because it is expected to fill
+during normal operation, so its reserved bytes come out of the shared budget immediately. If one active queue area is
+idle, another can use more of the remaining budget; if several areas fill at once, older queued state is evicted so
+total queue-owned memory stays bounded.
+
+Reliable delivery uses internal ACK/request control packets. Ordered reliable receivers buffer out-of-order packets,
+partial-ACK packets that arrived after a gap, request the missing sequence, and then release the buffered run as soon as
+the gap is filled. A partial ACK suppresses timeout retransmission for that exact packet, but an explicit packet request
+can still retransmit it later.
+
 The size of the header in a serialized packet is around 20 bytes (the size will change based on the total number of
 endpoints in your system and the length of the sender string), plus a 4-byte CRC32 trailer. As a rough example, a packet
 containing three floats is on the order of mid-30s bytes total. This small size makes it ideal for use in low bandwidth
@@ -70,6 +82,20 @@ environments.
 ---
 
 ## Recent changelog milestones
+
+## Version 3.12.0 highlights
+
+- Router and relay queue-backed state now shares one dynamic `MAX_QUEUE_BUDGET` instead of using
+  isolated per-queue caps.
+- `MAX_QUEUE_SIZE` has been renamed to `MAX_QUEUE_BUDGET`; the old environment name remains
+  accepted as a legacy alias.
+- Recent packet ID caches, reliable replay/out-of-order buffers, and discovery topology state now
+  count against the same shared budget, with topology eviction warnings in `std` builds.
+- Ordered reliable receive paths now partial-ACK out-of-order packets to reduce timeout
+  retransmission traffic while still allowing explicit packet requests.
+- Router and relay side-TX contention is now retried as transient backpressure instead of surfacing
+  intermittent handler failures.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
 
 ## Version 3.11.1 highlights
 
@@ -172,6 +198,8 @@ Options:
   device_id=<id>          Set DEVICE_IDENTIFIER env var for the build.
   schema_path=<path>      Set SEDSPRINTF_RS_SCHEMA_PATH for the build.
   ipc_schema_path=<path>  Set SEDSPRINTF_RS_IPC_SCHEMA_PATH for a board-local IPC overlay.
+  max_queue_budget=<n>    Set MAX_QUEUE_BUDGET for the shared router/relay queue budget.
+  max_recent_rx_ids=<n>   Set MAX_RECENT_RX_IDS for the preallocated recent-ID cache.
   max_stack_payload=<n>   Set MAX_STACK_PAYLOAD for define_stack_payload!(env="MAX_STACK_PAYLOAD", ...).
   env:KEY=VALUE           Set arbitrary environment variable(s) for the build (repeatable).
 ```
@@ -185,7 +213,7 @@ Examples:
 ./build.py embedded release target=thumbv7em-none-eabihf device_id=FC
 ./build.py python
 ./build.py test release
-./build.py maturin-install env:MAX_RECENT_RX_IDS=256 env:MAX_STACK_PAYLOAD=128
+./build.py maturin-install max_recent_rx_ids=256 env:MAX_STACK_PAYLOAD=128
 ```
 
 ## Dependencies
@@ -256,7 +284,8 @@ set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 
 # optional compile-time env overrides
 set(SEDSPRINTF_RS_MAX_STACK_PAYLOAD "256" CACHE STRING "" FORCE)
-set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 
 # Use the provided CMake glue
 add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs sedsprintf_rs_build)
@@ -327,7 +356,8 @@ set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_TARGET "thumbv7em-none-eabihf" CACHE STRING "" FORCE)
 set(SEDSPRINTF_EMBEDDED_BUILD ON CACHE BOOL "" FORCE)
 set(SEDSPRINTF_RS_MAX_STACK_PAYLOAD "256" CACHE STRING "" FORCE)
-set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 
 # or
 
@@ -335,7 +365,8 @@ set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "GS26" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_TARGET "" CACHE STRING "" FORCE)
 set(SEDSPRINTF_EMBEDDED_BUILD OFF CACHE BOOL "" FORCE)
-set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 ```
 
 ### Manually via build.py
@@ -425,7 +456,8 @@ set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "FC26_MAIN" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_TARGET "thumbv7em-none-eabihf" CACHE STRING "" FORCE)
 set(SEDSPRINTF_EMBEDDED_BUILD ON CACHE BOOL "" FORCE)
 set(SEDSPRINTF_RS_MAX_STACK_PAYLOAD "256" CACHE STRING "" FORCE)
-set(SEDSPRINTF_RS_ENV_MAX_QUEUE_SIZE "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_QUEUE_BUDGET "65536" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 
 # Add the submodule/subtree root (adjust path as needed)
 add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs sedsprintf_rs_build)

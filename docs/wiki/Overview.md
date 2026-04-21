@@ -17,6 +17,8 @@ Key outcomes:
 - Optional TCP‑like reliability (ACKs, retransmits, ordered/unordered delivery) for types marked reliable in the schema.
 - CRC32 integrity checks on all serialized frames (corrupt frames are dropped; reliable modes request retransmit via internal reliable control packets).
 - Optional adaptive discovery that learns which endpoints are reachable on which sides and exports a live topology view.
+- Bounded queue memory: RX, TX, reliable buffers, preallocated dedupe caches, and discovery
+  topology share one dynamic `MAX_QUEUE_BUDGET` per router or relay.
 
 As of v3.0.0, the router manages side tracking internally. Most users call the plain RX APIs without threading a side ID
 through their handlers; side-aware RX functions are only needed when you explicitly override ingress.
@@ -44,6 +46,10 @@ configuration and endpoint rules.
 
 If discovery is enabled, forwarding can become side-aware: known routes are used first, and unknown routes fall back to
 the usual flood behavior.
+
+If reliable ordered delivery is enabled, later packets that arrive after a missing sequence are
+buffered and partially acknowledged. The missing packet is requested, and the buffered run is
+released immediately when the gap is filled.
 
 ## What happens when you send telemetry
 
