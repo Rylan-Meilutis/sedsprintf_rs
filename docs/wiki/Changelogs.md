@@ -1,6 +1,6 @@
 # Changelogs
 
-## Next release highlights
+## Version 3.12.0 highlights
 
 - Shared queue budgeting:
     - Router and relay internals now share one dynamic `MAX_QUEUE_BUDGET` instead of using

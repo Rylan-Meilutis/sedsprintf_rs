@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.12.0
 
 - Queue sizing now uses one shared dynamic `MAX_QUEUE_BUDGET` across router and relay internals
   instead of fixed per-queue caps.

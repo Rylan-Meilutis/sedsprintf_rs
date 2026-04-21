@@ -83,6 +83,20 @@ environments.
 
 ## Recent changelog milestones
 
+## Version 3.12.0 highlights
+
+- Router and relay queue-backed state now shares one dynamic `MAX_QUEUE_BUDGET` instead of using
+  isolated per-queue caps.
+- `MAX_QUEUE_SIZE` has been renamed to `MAX_QUEUE_BUDGET`; the old environment name remains
+  accepted as a legacy alias.
+- Recent packet ID caches, reliable replay/out-of-order buffers, and discovery topology state now
+  count against the same shared budget, with topology eviction warnings in `std` builds.
+- Ordered reliable receive paths now partial-ACK out-of-order packets to reduce timeout
+  retransmission traffic while still allowing explicit packet requests.
+- Router and relay side-TX contention is now retried as transient backpressure instead of surfacing
+  intermittent handler failures.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
+
 ## Version 3.11.1 highlights
 
 - Discovery now propagates a full router graph with `DISCOVERY_TOPOLOGY`, so routers and relays
