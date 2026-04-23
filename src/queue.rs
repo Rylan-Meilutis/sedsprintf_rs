@@ -118,7 +118,7 @@ impl<T: ByteCost> BoundedDeque<T> {
     /// Get iterator over items.
     #[allow(dead_code)]
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
+    pub fn iter(&self) -> impl Iterator<Item=&T> {
         self.q.iter()
     }
 
@@ -360,7 +360,7 @@ mod tests {
             },
             |item| item.priority,
         )
-        .unwrap();
+            .unwrap();
         q.push_back_prioritized(
             Item {
                 id: 2,
@@ -369,7 +369,7 @@ mod tests {
             },
             |item| item.priority,
         )
-        .unwrap();
+            .unwrap();
         q.push_back_prioritized(
             Item {
                 id: 3,
@@ -378,7 +378,7 @@ mod tests {
             },
             |item| item.priority,
         )
-        .unwrap();
+            .unwrap();
 
         assert_eq!(q.pop_front().unwrap().id, 3);
         assert_eq!(q.pop_front().unwrap().id, 1);
@@ -396,7 +396,7 @@ mod tests {
             },
             |item| item.priority,
         )
-        .unwrap();
+            .unwrap();
         q.push_back_prioritized(
             Item {
                 id: 2,
@@ -405,7 +405,7 @@ mod tests {
             },
             |item| item.priority,
         )
-        .unwrap();
+            .unwrap();
 
         let err = q
             .push_back_prioritized(

@@ -1,171 +1,137 @@
 # Telemetry Schema
 
-The schema defines all `DataEndpoint` and `DataType` variants and is the source of truth for every language binding. All
-nodes that exchange telemetry must use the exact same schema (including ordering), or decoding will be undefined.
+As of v4.0.0, user telemetry schema is runtime state. `DataEndpoint` and
+`DataType` are stable numeric IDs on the wire, but the library no longer
+generates application-specific Rust enum variants or binding constants at
+compile time.
 
-Location:
+The default registry contains only built-in internal entries:
 
--
+- telemetry error endpoint/type
+- reliable-control packet types
+- discovery endpoint/types
+- time-sync endpoint/types when the `timesync` feature is enabled
 
-telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json)) (
-override path with `SEDSPRINTF_RS_SCHEMA_PATH`)
+Applications add user endpoints and data types at runtime through APIs, JSON
+seeding, or discovery schema sync.
 
-Optional board-local IPC overlay:
+## Runtime IDs and Names
 
-- Set `SEDSPRINTF_RS_IPC_SCHEMA_PATH` to a second JSON file.
-- Its endpoints and types are merged after the base schema during code generation.
-- Overlay endpoints are treated as link-local automatically.
-- Base-schema endpoints are treated as non-link-local automatically.
-- Overlay endpoint/type names must not collide with the base schema.
-- The GUI editor can load/edit/save the base schema and IPC overlay separately.
+`DataEndpoint(pub u32)` and `DataType(pub u32)` are transparent runtime IDs.
+Use names for readability and only use raw IDs where you are assigning a wire
+ID intentionally.
 
-Generated outputs:
+```rust
+let radio = DataEndpoint::named("RADIO");
+let gps = DataType::named("GPS_DATA");
 
-- Rust enums and metadata: `define_telemetry_schema!` in
-  src/config.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/config.rs))
-- C header:
-  C-Headers/sedsprintf.h ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/C-Headers/sedsprintf.h))
-- Python stubs:
-  python-files/sedsprintf_rs/sedsprintf_rs.pyi ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/python-files/sedsprintf_rs/sedsprintf_rs.pyi))
-
-## Why schema order matters
-
-The order of items in
-telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json))
-defines the enum discriminants (with built-ins inserted as noted below).
-Those discriminants are sent on the wire and used in endpoint bitmaps. Reordering entries without updating every
-deployed system will break decode compatibility.
-
-Built-ins:
-
-- `TelemetryError` data type is built-in and is appended after all schema types.
-- `TelemetryError` endpoint is built-in and is appended after all schema endpoints.
-- Do not define `TelemetryError` in the JSON schema.
-
-Safe changes:
-
-- Appending new endpoints/types to the end of the list.
-- Updating documentation fields (`doc`).
-- Adding board-specific link-local IPC endpoints/types in a separate overlay file via `SEDSPRINTF_RS_IPC_SCHEMA_PATH`.
-
-Risky changes:
-
-- Reordering or deleting endpoints/types.
-- Changing a type's element layout (data type or count).
-
-## Schema structure
-
-Top-level keys:
-
-- `endpoints`: list of `DataEndpoint` definitions.
-- `types`: list of `DataType` definitions.
-
-### Endpoint fields
-
-- `rust`: Rust enum variant name.
-- `name`: wire/display name (typically ALL_CAPS).
-- `doc`: optional description.
-- `link_local_only`: derived by schema file. Endpoints coming from the IPC overlay are link-local-only; endpoints coming
-  from the base schema are not.
-
-Legacy config upgrade rules:
-
-- Older schemas may still contain `broadcast_mode`.
-- `build.rs` and `define_telemetry_schema!` accept that legacy field and normalize it during schema loading.
-- `broadcast_mode = "Never"` is upgraded to `link_local_only = true`.
-- `broadcast_mode = "Default"` and `broadcast_mode = "Always"` are accepted but ignored.
-- Unknown `broadcast_mode` values are ignored with a build warning.
-- New schemas should omit `broadcast_mode` entirely.
-
-Remote forwarding is topology-driven:
-
-- IPC/link-local endpoints are restricted to link-local/software-bus sides.
-- Discovery advertisements tell routers which remote sides can currently reach which endpoints.
-- If multiple local/remote candidates exist for the same endpoint, routing fans out to the discovered matches.
-- If only one candidate exists, the packet is delivered only there.
-- If discovery has not learned any route for a non-local endpoint yet, relay mode falls back to flooding.
-
-Link-local scope further constrains forwarding:
-
-- Base schema endpoint: the endpoint can use any side.
-- IPC overlay endpoint: the endpoint is restricted to link-local/software-bus sides and is excluded from discovery
-  advertisements sent on non-link-local sides.
-
-To keep packet semantics unambiguous, a type must not mix link-local-only endpoints with normal endpoints.
-
-### Type fields
-
-- `rust`: Rust enum variant name.
-- `name`: wire/display name.
-- `doc`: optional description.
-- `reliable`: optional boolean (legacy). `true` maps to ordered reliable delivery.
-- `reliable_mode`: optional string (`None`, `Ordered`, `Unordered`). Overrides `reliable` when present.
-- `class`: `Data`, `Warning`, or `Error` (used for formatting and error handling).
-- `element`: payload layout description (see below).
-- `endpoints`: list of endpoint Rust variant names (used as metadata for defaults/validation).
-
-### Element fields
-
-- `kind`: `Static` or `Dynamic`.
-- `data_type`: primitive element type (`Float32`, `UInt16`, `String`, `Binary`, etc.).
-- `count`: only for `Static` (number of elements).
-
-## How element layouts map to bytes
-
-This library treats the payload as a raw byte slice. The schema tells it how to interpret that slice:
-
-- **Static + numeric/bool**: payload size must equal `count * element_width`.
-- **Dynamic + numeric/bool**: payload size must be a multiple of `element_width`.
-- **String**: dynamic UTF-8 bytes; trailing NULs are ignored for validation.
-- **Binary**: raw bytes (no UTF-8 requirements).
-- **NoData**: zero-length payload (used for marker messages).
-
-For static `String` or `Binary` payloads, the schema uses the compile-time limits:
-
-- `STATIC_STRING_LENGTH`
-- `STATIC_HEX_LENGTH`
-
-These are configured in
-src/config.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/config.rs))
-and used by `data_type_size`.
-
-## Rust-side metadata
-
-The macro-generated metadata types are defined in
-src/lib.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/lib.rs)):
-
-- `MessageMeta { name, element, endpoints, reliable }`
-- `MessageElement::{Static, Dynamic}`
-- `MessageDataType` (primitive element type)
-- `MessageClass` (Data/Warning/Error)
-
-Helpers:
-
-- `message_meta(ty)`: returns the full `MessageMeta`.
-- `get_data_type(ty)`: returns the primitive element type.
-- `get_needed_message_size(ty)`: returns the static payload size (bytes).
-- `endpoints_from_datatype(ty)`: returns endpoints listed in the schema.
-- `is_reliable_type(ty)`: returns whether the type uses reliable delivery on the wire.
-
-## How the schema is used at runtime
-
-- `Packet::new` validates payload sizes against `message_meta`.
-- `Router::log*` uses the schema to validate payload lengths before serialization.
-- `Packet::to_string` uses `MessageClass` and `MessageDataType` to format payloads.
-
-## Example
-
+let maybe_radio = DataEndpoint::try_named("RADIO");
+let maybe_gps = DataType::try_named("GPS_DATA");
 ```
+
+Definitions carry:
+
+- numeric ID
+- string name
+- human-readable description
+- endpoint link-local flag
+- data type shape, allowed endpoints, reliability mode, and priority
+
+Lookup/export APIs include:
+
+- `endpoint_definition(...)`
+- `endpoint_definition_by_name(...)`
+- `data_type_definition(...)`
+- `data_type_definition_by_name(...)`
+- `known_endpoints()`
+- `known_data_types()`
+- `export_schema()`
+
+## Registering Schema
+
+Rust:
+
+```rust
+let radio = register_endpoint_id_with_description(
+    DataEndpoint(100),
+    "RADIO",
+    "Downlink radio",
+    false,
+)?;
+
+register_data_type_id_with_description(
+    DataType(100),
+    "GPS_DATA",
+    "Latitude, longitude, altitude",
+    MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+    &[radio],
+    ReliableMode::Ordered,
+    80,
+)?;
+```
+
+Direct registration rejects conflicts:
+
+- same endpoint ID/name with different endpoint metadata
+- same data type ID/name with a different shape, endpoint set, reliability mode,
+  or priority
+- data types referencing endpoints that do not exist
+
+Endpoint handler registration also creates missing endpoints in `std` builds:
+
+```rust
+EndpointHandler::new_packet_handler(DataEndpoint(250), |_pkt| Ok(()));
+```
+
+If that endpoint ID did not exist, it is registered as `ENDPOINT_250` and can be
+advertised through schema discovery.
+
+## Removing Schema
+
+User endpoints and data types can be removed at runtime:
+
+- `remove_endpoint(...)`
+- `remove_endpoint_by_name(...)`
+- `remove_data_type(...)`
+- `remove_data_type_by_name(...)`
+
+Removing an endpoint also removes user data types that reference it. Built-in
+internal entries cannot be removed.
+
+## JSON Runtime Seeding
+
+JSON is optional runtime input. It is not used to generate user schema constants.
+
+Host/std builds can seed from:
+
+- `SEDSPRINTF_RS_STATIC_SCHEMA_PATH`
+- `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH`
+- Rust `register_schema_json_path(...)` / `register_schema_json_bytes(...)`
+- C `seds_schema_register_json_file(...)` / `seds_schema_register_json_bytes(...)`
+- Python `register_schema_json_file(...)` / `register_schema_json_bytes(...)`
+
+Embedded builds include `telemetry_config.json` bytes only if that file exists
+at build time, then decode those bytes through the same runtime parser. The
+crate remains buildable/publishable without an application JSON file.
+
+JSON shape:
+
+```json
 {
   "endpoints": [
-    { "rust": "Radio", "name": "RADIO", "doc": "Downlink radio" }
+    {
+      "rust": "Radio",
+      "name": "RADIO",
+      "description": "Downlink radio"
+    }
   ],
   "types": [
     {
       "rust": "GpsData",
       "name": "GPS_DATA",
-      "doc": "GPS data",
-      "reliable": false,
+      "description": "GPS data",
+      "reliable_mode": "Ordered",
+      "priority": 80,
       "class": "Data",
       "element": { "kind": "Static", "data_type": "Float32", "count": 3 },
       "endpoints": ["Radio"]
@@ -174,63 +140,63 @@ Helpers:
 }
 ```
 
-An IPC overlay file uses the same shape. Its endpoints become link-local automatically because they come from the
-overlay file, not because they carry a separate flag.
+Notes:
 
-Legacy schema example accepted during upgrade:
+- `description` is preferred.
+- Legacy `doc` is still accepted as an alias.
+- Legacy `broadcast_mode = "Never"` is accepted and maps to link-local behavior.
+- IPC JSON loaded through the IPC seed path is applied as link-local overlay data.
 
-```
-{
-  "endpoints": [
-    {
-      "rust": "SoftwareBus",
-      "name": "SOFTWARE_BUS",
-      "broadcast_mode": "Never"
-    }
-  ],
-  "types": [
-    {
-      "rust": "IpcMessage",
-      "name": "IPC_MESSAGE",
-      "class": "Data",
-      "element": { "kind": "Dynamic", "data_type": "Binary" },
-      "endpoints": ["SoftwareBus"]
-    }
-  ]
-}
-```
+## Network Schema Sync
 
-That legacy endpoint is treated exactly like:
+Discovery includes schema advertisements. When nodes connect, they can exchange
+the current endpoint/type list and merge compatible definitions.
 
-```
-{
-  "endpoints": [
-    {
-      "rust": "SoftwareBus",
-      "name": "SOFTWARE_BUS",
-      "link_local_only": true
-    }
-  ],
-  "types": [
-    {
-      "rust": "IpcMessage",
-      "name": "IPC_MESSAGE",
-      "class": "Data",
-      "element": { "kind": "Dynamic", "data_type": "Binary" },
-      "endpoints": ["SoftwareBus"]
-    }
-  ]
-}
-```
+Merge behavior:
 
-## Compatibility checklist
+- new endpoint/type definitions are added
+- equivalent definitions are kept
+- ID/name conflicts are resolved deterministically so nodes converge on the same
+  winner
+- data types with missing endpoint dependencies are skipped until those
+  endpoints are known
 
-Before deploying a schema change:
+Direct local registration remains stricter than network merge. If local code
+tries to register an existing data type with a different shape, registration
+returns `BadArg`.
 
-- Ensure every node uses the same
-  telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json))
-  order.
-- Regenerate C and Python bindings via
-  build.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/build.rs)).
-- Verify that any static sizes have not changed unexpectedly.
-- Redeploy all nodes that exchange telemetry.
+## Memory Budgeting
+
+Runtime schema memory counts against the shared router/relay `MAX_QUEUE_BUDGET`.
+That same budget also covers RX/TX queues, reliable replay/out-of-order state,
+recent packet ID caches, and discovery topology.
+
+If a received schema snapshot would exceed the budget, the merge is rejected and
+the current registry is left unchanged.
+
+## Payload Layouts
+
+Schema shape still controls packet validation:
+
+- **Static + numeric/bool**: payload size must equal `count * element_width`.
+- **Dynamic + numeric/bool**: payload size must be a multiple of element width.
+- **String**: dynamic UTF-8 bytes; trailing NULs are ignored for validation.
+- **Binary**: raw bytes.
+- **NoData**: zero-length payload.
+
+For static `String` or `Binary` payloads, the configured limits are:
+
+- `STATIC_STRING_LENGTH`
+- `STATIC_HEX_LENGTH`
+
+## Compatibility Checklist
+
+For v4 deployments:
+
+- Prefer named runtime lookup in application code: `DataEndpoint::named(...)` and
+  `DataType::named(...)`.
+- Seed required endpoints/types at router startup if they must always exist.
+- Let discovery sync optional or peer-defined schema over time.
+- Treat data type shape changes as incompatible unless you intentionally create
+  a new type ID/name.
+- Budget for schema memory if you expect many dynamic endpoints/types.

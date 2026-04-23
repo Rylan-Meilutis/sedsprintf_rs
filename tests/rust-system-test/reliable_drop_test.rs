@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod reliable_drop_tests {
-    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType, RELIABLE_RETRANSMIT_MS};
     use sedsprintf_rs::discovery::build_discovery_announce;
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::{Relay, RelaySideOptions};
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use sedsprintf_rs::serialize;
+    use sedsprintf_rs::TelemetryResult;
 
     use std::collections::{BTreeSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,7 +82,7 @@ mod reliable_drop_tests {
             let actuator_handler_hits = actuator_hits.clone();
             let actuator = Router::new_with_clock(
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                    DataEndpoint::Radio,
+                    DataEndpoint::named("RADIO"),
                     move |pkt| {
                         let vals = pkt.data_as_f32()?;
                         if let Some(first) = vals.first() {
@@ -91,15 +91,15 @@ mod reliable_drop_tests {
                         Ok(())
                     },
                 )])
-                .with_sender("AB"),
+                    .with_sender("AB"),
                 shared_clock(now.clone()),
             );
             let valve = Router::new_with_clock(
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                    DataEndpoint::SdCard,
+                    DataEndpoint::named("SD_CARD"),
                     |_pkt| Ok(()),
                 )])
-                .with_sender("VB"),
+                    .with_sender("VB"),
                 shared_clock(now.clone()),
             );
             let daq = Router::new_with_clock(
@@ -472,16 +472,17 @@ mod reliable_drop_tests {
 
         let received: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let recv_sink = received.clone();
-        let handler = EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |pkt| {
-            let vals = pkt.data_as_f32()?;
-            if let Some(first) = vals.first() {
-                recv_sink
-                    .lock()
-                    .expect("received lock poisoned")
-                    .push(*first as u32);
-            }
-            Ok(())
-        });
+        let handler =
+            EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |pkt| {
+                let vals = pkt.data_as_f32()?;
+                if let Some(first) = vals.first() {
+                    recv_sink
+                        .lock()
+                        .expect("received lock poisoned")
+                        .push(*first as u32);
+                }
+                Ok(())
+            });
 
         let router_a = Router::new_with_clock(RouterConfig::default(), shared_clock(now.clone()));
         let router_b =
@@ -527,12 +528,12 @@ mod reliable_drop_tests {
         const TOTAL: u32 = 6;
         for i in 0..TOTAL {
             let pkt = Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[i as f32, 0.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 i as u64,
             )
-            .expect("failed to build packet");
+                .expect("failed to build packet");
             router_a.tx(pkt).expect("tx failed");
         }
 
@@ -549,7 +550,7 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&a_to_b) {
                 let info = serialize::peek_frame_info(&frame).expect("peek frame failed");
-                if info.envelope.ty == DataType::GpsData
+                if info.envelope.ty == DataType::named("GPS_DATA")
                     && !info.ack_only()
                     && let Some(hdr) = info.reliable
                     && hdr.seq == 1
@@ -572,7 +573,7 @@ mod reliable_drop_tests {
                 {
                     let pkt = serialize::deserialize_packet(&frame).expect("decode control failed");
                     let vals = pkt.data_as_u32().expect("control payload decode failed");
-                    if vals.first().copied() == Some(DataType::GpsData as u32) {
+                    if vals.first().copied() == Some(DataType::named("GPS_DATA").as_u32()) {
                         dropped_control_once = true;
                         continue; // drop first control packet for the reliable stream
                     }
@@ -613,16 +614,17 @@ mod reliable_drop_tests {
 
         let received: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let recv_sink = received.clone();
-        let handler = EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |pkt| {
-            let vals = pkt.data_as_f32()?;
-            if let Some(first) = vals.first() {
-                recv_sink
-                    .lock()
-                    .expect("received lock poisoned")
-                    .push(*first as u32);
-            }
-            Ok(())
-        });
+        let handler =
+            EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |pkt| {
+                let vals = pkt.data_as_f32()?;
+                if let Some(first) = vals.first() {
+                    recv_sink
+                        .lock()
+                        .expect("received lock poisoned")
+                        .push(*first as u32);
+                }
+                Ok(())
+            });
 
         let router =
             Router::new_with_clock(RouterConfig::new(vec![handler]), shared_clock(now.clone()));
@@ -638,19 +640,19 @@ mod reliable_drop_tests {
         );
 
         let pkt1 = Packet::from_f32_slice(
-            DataType::GpsData,
+            DataType::named("GPS_DATA"),
             &[1.0_f32, 0.0, 0.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             1,
         )
-        .expect("failed to build packet");
+            .expect("failed to build packet");
         let pkt2 = Packet::from_f32_slice(
-            DataType::GpsData,
+            DataType::named("GPS_DATA"),
             &[2.0_f32, 0.0, 0.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             2,
         )
-        .expect("failed to build packet");
+            .expect("failed to build packet");
 
         let seq1 = serialize::serialize_packet_with_reliable(
             &pkt1,
@@ -689,16 +691,17 @@ mod reliable_drop_tests {
 
         let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let delivered_c = delivered.clone();
-        let handler = EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |pkt| {
-            let vals = pkt.data_as_f32()?;
-            if let Some(first) = vals.first() {
-                delivered_c
-                    .lock()
-                    .expect("delivered lock poisoned")
-                    .push(*first as u32);
-            }
-            Ok(())
-        });
+        let handler =
+            EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |pkt| {
+                let vals = pkt.data_as_f32()?;
+                if let Some(first) = vals.first() {
+                    delivered_c
+                        .lock()
+                        .expect("delivered lock poisoned")
+                        .push(*first as u32);
+                }
+                Ok(())
+            });
 
         let source = Router::new_with_clock(RouterConfig::default(), shared_clock(now.clone()));
         let relay = Relay::new(shared_clock(now.clone()));
@@ -792,19 +795,20 @@ mod reliable_drop_tests {
             RelaySideOptions::default(),
         );
 
-        let discovery = build_discovery_announce("DEST", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery =
+            build_discovery_announce("DEST", 0, &[DataEndpoint::named("RADIO")]).unwrap();
         relay.rx_from_side(relay_dest_side, discovery).unwrap();
         relay.process_all_queues().unwrap();
         let _ = drain_queue(&r_to_s);
         let _ = drain_queue(&r_to_spur);
 
         let pkt = Packet::from_f32_slice(
-            DataType::GpsData,
+            DataType::named("GPS_DATA"),
             &[42.0, 0.0, 0.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             42,
         )
-        .expect("failed to build packet");
+            .expect("failed to build packet");
         source.tx(pkt).expect("source tx failed");
 
         let mut dropped_end_to_end_ack = false;
@@ -818,7 +822,7 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&s_to_r) {
                 let info = serialize::peek_frame_info(&frame).expect("source->relay peek failed");
-                if info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                if info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     forwarded_data_frames += 1;
                 }
                 relay
@@ -905,7 +909,7 @@ mod reliable_drop_tests {
 
         let handler_a = {
             let delivered = delivered_a.clone();
-            EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |pkt| {
+            EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |pkt| {
                 let vals = pkt.data_as_f32()?;
                 if let Some(first) = vals.first() {
                     delivered.lock().unwrap().push(*first as u32);
@@ -915,7 +919,7 @@ mod reliable_drop_tests {
         };
         let handler_b = {
             let delivered = delivered_b.clone();
-            EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |pkt| {
+            EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |pkt| {
                 let vals = pkt.data_as_f32()?;
                 if let Some(first) = vals.first() {
                     delivered.lock().unwrap().push(*first as u32);
@@ -1039,13 +1043,13 @@ mod reliable_drop_tests {
         relay
             .rx_from_side(
                 relay_a_side,
-                build_discovery_announce("DEST_A", 0, &[DataEndpoint::Radio]).unwrap(),
+                build_discovery_announce("DEST_A", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
         relay
             .rx_from_side(
                 relay_b_side,
-                build_discovery_announce("DEST_B", 0, &[DataEndpoint::Radio]).unwrap(),
+                build_discovery_announce("DEST_B", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
         relay.process_all_queues().unwrap();
@@ -1058,12 +1062,12 @@ mod reliable_drop_tests {
 
         source
             .tx(Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[7.0, 0.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 7,
             )
-            .unwrap())
+                .unwrap())
             .unwrap();
         source.process_all_queues_with_timeout(0).unwrap();
 
@@ -1085,7 +1089,9 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&r_to_a) {
                 let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::GpsData && !info.ack_only() && a_ack_seen_by_relay
+                if info.envelope.ty == DataType::named("GPS_DATA")
+                    && !info.ack_only()
+                    && a_ack_seen_by_relay
                 {
                     forwarded_a_after_ack += 1;
                 }
@@ -1096,7 +1102,7 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&r_to_b) {
                 let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                if info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     forwarded_b_frames += 1;
                 }
                 dest_b
@@ -1220,12 +1226,12 @@ mod reliable_drop_tests {
 
         topo.gs
             .tx(Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[42.0, 1.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 42,
             )
-            .unwrap())
+                .unwrap())
             .unwrap();
 
         for _ in 0..80 {
@@ -1257,7 +1263,7 @@ mod reliable_drop_tests {
         let rf = Relay::new(shared_clock(now.clone()));
         let actuator = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint::named("RADIO"),
                 move |pkt| {
                     let vals = pkt.data_as_f32()?;
                     if let Some(first) = vals.first() {
@@ -1266,15 +1272,15 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-            .with_sender("AB"),
+                .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let valve = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::SdCard,
+                DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )])
-            .with_sender("VB"),
+                .with_sender("VB"),
             shared_clock(now.clone()),
         );
         let daq = Router::new_with_clock(
@@ -1418,12 +1424,12 @@ mod reliable_drop_tests {
         );
 
         gs.tx(Packet::from_f32_slice(
-            DataType::GpsData,
+            DataType::named("GPS_DATA"),
             &[99.0, 0.0, 0.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             99,
         )
-        .unwrap())
+            .unwrap())
             .unwrap();
 
         for _ in 0..96 {
@@ -1508,7 +1514,7 @@ mod reliable_drop_tests {
         let gateway = Relay::new(shared_clock(now.clone()));
         let actuator = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint::named("RADIO"),
                 move |pkt| {
                     let vals = pkt.data_as_f32()?;
                     if let Some(first) = vals.first() {
@@ -1517,15 +1523,15 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-            .with_sender("AB"),
+                .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let valve = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::SdCard,
+                DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )])
-            .with_sender("VB"),
+                .with_sender("VB"),
             shared_clock(now.clone()),
         );
         let daq = Router::new_with_clock(
@@ -1581,13 +1587,13 @@ mod reliable_drop_tests {
         gateway
             .rx_from_side(
                 gw_child,
-                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+                build_discovery_announce("AB", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
         gateway
             .rx_from_side(
                 gw_child,
-                build_discovery_announce("VB", 0, &[DataEndpoint::SdCard]).unwrap(),
+                build_discovery_announce("VB", 0, &[DataEndpoint::named("SD_CARD")]).unwrap(),
             )
             .unwrap();
         gateway
@@ -1616,12 +1622,12 @@ mod reliable_drop_tests {
 
         source
             .tx(Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[7.0, 0.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 7,
             )
-            .unwrap())
+                .unwrap())
             .unwrap();
 
         let mut dropped_actuator_first_delivery = false;
@@ -1637,7 +1643,7 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&src_to_gw) {
                 let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                if info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     source_to_gateway_data_frames += 1;
                     if let Some(hdr) = info.reliable {
                         source_to_gateway_seqs.insert(hdr.seq);
@@ -1653,7 +1659,7 @@ mod reliable_drop_tests {
 
             for (src, frame) in gw_bus.drain() {
                 let info = serialize::peek_frame_info(&frame).unwrap();
-                if src == 0 && info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                if src == 0 && info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     gateway_to_bus_data_frames += 1;
                 }
                 if src != 0 {
@@ -1661,7 +1667,7 @@ mod reliable_drop_tests {
                 }
 
                 let drop_for_actuator = src == 0
-                    && info.envelope.ty == DataType::GpsData
+                    && info.envelope.ty == DataType::named("GPS_DATA")
                     && !info.ack_only()
                     && !dropped_actuator_first_delivery;
 
@@ -1751,7 +1757,7 @@ mod reliable_drop_tests {
         let gateway = Relay::new(shared_clock(now.clone()));
         let actuator = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint::named("RADIO"),
                 move |pkt| {
                     let vals = pkt.data_as_f32()?;
                     if let Some(first) = vals.first() {
@@ -1760,15 +1766,15 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-            .with_sender("AB"),
+                .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let valve = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::SdCard,
+                DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )])
-            .with_sender("VB"),
+                .with_sender("VB"),
             shared_clock(now.clone()),
         );
         let daq = Router::new_with_clock(
@@ -1824,13 +1830,13 @@ mod reliable_drop_tests {
         gateway
             .rx_from_side(
                 gw_child,
-                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+                build_discovery_announce("AB", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
         gateway
             .rx_from_side(
                 gw_child,
-                build_discovery_announce("VB", 0, &[DataEndpoint::SdCard]).unwrap(),
+                build_discovery_announce("VB", 0, &[DataEndpoint::named("SD_CARD")]).unwrap(),
             )
             .unwrap();
         gateway
@@ -1859,12 +1865,12 @@ mod reliable_drop_tests {
 
         source
             .tx(Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[11.0, 0.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 11,
             )
-            .unwrap())
+                .unwrap())
             .unwrap();
 
         let mut saw_reliable_source_frame = false;
@@ -1880,7 +1886,7 @@ mod reliable_drop_tests {
 
             for frame in drain_queue(&src_to_gw) {
                 let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                if info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     saw_reliable_source_frame = info.reliable.is_some();
                 }
                 gateway.rx_serialized_from_side(uplink, &frame).unwrap();
@@ -1896,7 +1902,7 @@ mod reliable_drop_tests {
                 {
                     saw_shared_side_control_frame = true;
                 }
-                if src == 0 && info.envelope.ty == DataType::GpsData && !info.ack_only() {
+                if src == 0 && info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     saw_shared_side_data_frame = true;
                     shared_side_frame_flags = info.reliable.map(|hdr| hdr.flags);
                 }
@@ -1962,7 +1968,7 @@ mod reliable_drop_tests {
         let relay = Relay::new(shared_clock(now.clone()));
         let dest = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint::named("RADIO"),
                 move |pkt| {
                     let vals = pkt.data_as_f32()?;
                     if let Some(first) = vals.first() {
@@ -1971,7 +1977,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-            .with_sender("AB"),
+                .with_sender("AB"),
             shared_clock(now.clone()),
         );
 
@@ -2044,7 +2050,7 @@ mod reliable_drop_tests {
         relay
             .rx_from_side(
                 relay_dest_side,
-                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+                build_discovery_announce("AB", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
         relay.announce_discovery().unwrap();
@@ -2058,12 +2064,12 @@ mod reliable_drop_tests {
 
         source
             .tx(Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[21.0, 0.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 21,
             )
-            .unwrap())
+                .unwrap())
             .unwrap();
 
         for _ in 0..32 {
@@ -2117,7 +2123,7 @@ mod reliable_drop_tests {
         let relay = Relay::new(shared_clock(now.clone()));
         let dest = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint::named("RADIO"),
                 move |pkt| {
                     let vals = pkt.data_as_f32()?;
                     if let Some(first) = vals.first() {
@@ -2126,7 +2132,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-            .with_sender("AB"),
+                .with_sender("AB"),
             shared_clock(now.clone()),
         );
 
@@ -2199,7 +2205,7 @@ mod reliable_drop_tests {
         relay
             .rx_from_side(
                 relay_dest_side,
-                build_discovery_announce("AB", 0, &[DataEndpoint::Radio]).unwrap(),
+                build_discovery_announce("AB", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
         relay.announce_discovery().unwrap();
@@ -2213,12 +2219,12 @@ mod reliable_drop_tests {
 
         source
             .tx(Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[33.0, 0.0, 0.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 33,
             )
-            .unwrap())
+                .unwrap())
             .unwrap();
 
         let mut delayed_first_hop_frames = Vec::new();
@@ -2273,7 +2279,7 @@ mod reliable_drop_tests {
 
         let receiver = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint::named("RADIO"),
                 move |pkt| {
                     let vals = pkt.data_as_f32()?;
                     if let Some(first) = vals.first() {
@@ -2282,7 +2288,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-            .with_sender("AB"),
+                .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let echoed_frames: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -2303,19 +2309,19 @@ mod reliable_drop_tests {
         );
 
         let pkt1 = Packet::from_f32_slice(
-            DataType::GpsData,
+            DataType::named("GPS_DATA"),
             &[1.0, 0.0, 0.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             1,
         )
-        .unwrap();
+            .unwrap();
         let pkt2 = Packet::from_f32_slice(
-            DataType::GpsData,
+            DataType::named("GPS_DATA"),
             &[2.0, 0.0, 0.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             2,
         )
-        .unwrap();
+            .unwrap();
         let seq1 = serialize::serialize_packet_with_reliable(
             &pkt1,
             serialize::ReliableHeader {

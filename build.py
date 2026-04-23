@@ -38,8 +38,8 @@ Options (can be combined where it makes sense):
   maturin-install         Build wheel and install it with `uv pip install`.
   target=<triple>         Set Rust compilation target (e.g. target=thumbv7em-none-eabihf).
   device_id=<id>          Set DEVICE_IDENTIFIER env var for the build.
-  schema_path=<path>      Set SEDSPRINTF_RS_SCHEMA_PATH for the build.
-  ipc_schema_path=<path>  Set SEDSPRINTF_RS_IPC_SCHEMA_PATH for a board-local IPC overlay.
+  static_schema_path=<path>      Set SEDSPRINTF_RS_STATIC_SCHEMA_PATH for runtime registry seeding.
+  static_ipc_schema_path=<path>  Set SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH for runtime IPC overlay seeding.
   max_queue_budget=<n>    Set MAX_QUEUE_BUDGET for the shared router/relay queue budget.
   max_recent_rx_ids=<n>   Set MAX_RECENT_RX_IDS for the preallocated recent-ID cache.
 
@@ -852,17 +852,17 @@ def main(argv: list[str]) -> None:
             device_id = arg.split("=", 1)[1]
             print(f"Device identifier set to: {device_id}")
 
-        elif arg.startswith("schema_path="):
+        elif arg.startswith("static_schema_path=") or arg.startswith("schema_path="):
             schema_path = arg.split("=", 1)[1]
             if not schema_path:
-                print_help("schema_path requires a value")
-            env_overrides["SEDSPRINTF_RS_SCHEMA_PATH"] = schema_path
+                print_help("static_schema_path requires a value")
+            env_overrides["SEDSPRINTF_RS_STATIC_SCHEMA_PATH"] = schema_path
 
-        elif arg.startswith("ipc_schema_path="):
+        elif arg.startswith("static_ipc_schema_path=") or arg.startswith("ipc_schema_path="):
             ipc_schema_path = arg.split("=", 1)[1]
             if not ipc_schema_path:
-                print_help("ipc_schema_path requires a value")
-            env_overrides["SEDSPRINTF_RS_IPC_SCHEMA_PATH"] = ipc_schema_path
+                print_help("static_ipc_schema_path requires a value")
+            env_overrides["SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH"] = ipc_schema_path
 
         elif arg.startswith("max_stack_payload="):
             v = arg.split("=", 1)[1].strip()
@@ -905,18 +905,16 @@ def main(argv: list[str]) -> None:
     env = os.environ.copy()
     if device_id:
         env["DEVICE_IDENTIFIER"] = device_id
-    if tests:
-        if "SEDSPRINTF_RS_SCHEMA_PATH" not in env_overrides and "SEDSPRINTF_RS_SCHEMA_PATH" not in env:
-            env_overrides["SEDSPRINTF_RS_SCHEMA_PATH"] = str(
-                (repo_root / "telemetry_config.test.json").resolve()
-            )
-        if (
-                "SEDSPRINTF_RS_IPC_SCHEMA_PATH" not in env_overrides
-                and "SEDSPRINTF_RS_IPC_SCHEMA_PATH" not in env
-        ):
-            test_ipc_schema = (repo_root / "telemetry_config.ipc.test.json").resolve()
-            if test_ipc_schema.exists():
-                env_overrides["SEDSPRINTF_RS_IPC_SCHEMA_PATH"] = str(test_ipc_schema)
+    if (tests and "SEDSPRINTF_RS_STATIC_SCHEMA_PATH" not in env_overrides and "SEDSPRINTF_RS_STATIC_SCHEMA_PATH" not
+            in env):
+        env_overrides["SEDSPRINTF_RS_STATIC_SCHEMA_PATH"] = str(
+            (repo_root / "telemetry_config.test.json").resolve()
+        )
+    if (tests and "SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH" not in env_overrides and
+            "SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH" not in env):
+        test_ipc_schema = (repo_root / "telemetry_config.ipc.test.json").resolve()
+        if test_ipc_schema.exists():
+            env_overrides["SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH"] = str(test_ipc_schema)
     _apply_env_overrides(env, env_overrides)
 
     if release_build:

@@ -10,8 +10,7 @@
 //! the header fields used by `peek_envelope`.
 
 use crate::{
-    get_message_name, is_reliable_type, packet::Packet, try_enum_from_u32, DataEndpoint,
-    TelemetryError,
+    get_message_name, is_reliable_type, packet::Packet, DataEndpoint, TelemetryError,
     TelemetryResult,
     {config::DataType, MAX_VALUE_DATA_ENDPOINT, MAX_VALUE_DATA_TYPE},
 };
@@ -276,13 +275,13 @@ const EP_BITMAP_BYTES: usize = EP_BITMAP_BITS.div_ceil(8);
 
 /// Build a compact endpoint bitmap from the provided list of endpoints.
 ///
-/// Each endpoint `ep` sets the bit at position `ep as u32` in the bitmap.
+/// Each endpoint `ep` sets the bit at position `ep.as_u32()` in the bitmap.
 /// Bits are packed LSB-first within each byte.
 #[inline]
 fn build_endpoint_bitmap(eps: &[DataEndpoint]) -> [u8; EP_BITMAP_BYTES] {
     let mut bm = [0u8; EP_BITMAP_BYTES];
     for &ep in eps {
-        let idx = ep as u32 as usize;
+        let idx = ep.as_u32() as usize;
         debug_assert!(idx < EP_BITMAP_BITS, "endpoint discriminant out of range");
         if idx < EP_BITMAP_BITS {
             let byte = idx / 8;
@@ -306,7 +305,7 @@ fn expand_endpoint_bitmap(
     }
 
     // Pick *any* valid endpoint as filler/dummy for the array.
-    let dummy = DataEndpoint::try_from_u32(0).expect("0 must be a valid DataEndpoint discriminant");
+    let dummy = DataEndpoint::TelemetryError;
 
     // Entire array is initialized to a valid value ⇒ fully safe.
     let mut arr = [dummy; EP_BITMAP_BITS];
@@ -386,7 +385,7 @@ pub fn serialize_reliable_ack(
     out.push(flags);
     out.push(0u8); // NEP = 0
 
-    write_uleb128(ty as u64, &mut out);
+    write_uleb128(ty.as_u32() as u64, &mut out);
     write_uleb128(0u64, &mut out); // payload size
     write_uleb128(timestamp_ms, &mut out);
     write_uleb128(sender_bytes.len() as u64, &mut out);
@@ -450,7 +449,7 @@ fn serialize_packet_inner(pkt: &Packet, reliable: Option<ReliableHeader>) -> Arc
     out.push(nep_unique as u8);
 
     // NOTE: data_size is the *logical* (uncompressed) payload size.
-    write_uleb128(pkt.data_type() as u64, &mut out);
+    write_uleb128(pkt.data_type().as_u32() as u64, &mut out);
     write_uleb128(pkt.data_size() as u64, &mut out);
     write_uleb128(pkt.timestamp(), &mut out);
 
@@ -827,16 +826,16 @@ pub fn header_size_bytes(pkt: &Packet) -> usize {
         payload_compression::compress_if_beneficial(sender_bytes);
 
     prelude
-        + uleb128_size(pkt.data_type() as u32 as u64)
+        + uleb128_size(pkt.data_type().as_u32() as u64)
         + uleb128_size(pkt.data_size() as u64)
         + uleb128_size(pkt.timestamp())
         + uleb128_size(sender_bytes.len() as u64)
         + if sender_compressed {
-            // extra varint for sender_wire_len when compressed
-            uleb128_size(sender_wire.len() as u64)
-        } else {
-            0
-        }
+        // extra varint for sender_wire_len when compressed
+        uleb128_size(sender_wire.len() as u64)
+    } else {
+        0
+    }
 }
 
 /// Compute the total wire size (header + bitmap + sender + payload) in bytes.
@@ -974,34 +973,6 @@ pub fn packet_id_from_wire(buf: &[u8]) -> Result<u64, TelemetryError> {
     h = hash_bytes_u64(h, payload_bytes);
 
     Ok(h)
-}
-
-// ===========================================================================
-// Enum conversions (u32 ↔ enums)
-// ===========================================================================
-
-impl DataType {
-    /// Convert a raw `u32` discriminant to `DataType`, returning `None` if out
-    /// of range or invalid.
-    /// # Arguments
-    /// - `x`: Raw `u32` discriminant.
-    /// # Returns
-    /// - `Option<DataType>`: Corresponding `DataType` variant or `None
-    pub fn try_from_u32(x: u32) -> Option<Self> {
-        try_enum_from_u32(x)
-    }
-}
-
-impl DataEndpoint {
-    /// Convert a raw `u32` discriminant to `DataEndpoint`, returning `None` if
-    /// out of range or invalid.
-    /// # Arguments
-    /// - `x`: Raw `u32` discriminant.
-    /// # Returns
-    /// - `Option<DataEndpoint>`: Corresponding `DataEndpoint` variant or `None
-    pub fn try_from_u32(x: u32) -> Option<Self> {
-        try_enum_from_u32(x)
-    }
 }
 
 mod payload_compression {

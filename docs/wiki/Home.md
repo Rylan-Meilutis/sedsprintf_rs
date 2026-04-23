@@ -49,27 +49,28 @@ core Rust library (schema, packet types, serialization, router/relay).
 -
 
 sedsprintf_macros/ ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/tree/main/sedsprintf_macros)):
-proc-macros that generate schema constants.
+support macros for Rust integrations.
 
 -
 
 telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json)):
-schema source of truth (endpoints + data types).
+optional runtime schema seed (endpoints + data types).
 
 -
 
 build.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/build.rs)):
-generates C header and Python .pyi from the schema.
+tracks build metadata and optional embedded schema bytes; user schemas are not compiled into normal
+crate builds.
 
 -
 
 C-Headers/ ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/tree/main/C-Headers)):
-generated C header (`sedsprintf.h`).
+C ABI header (`sedsprintf.h`).
 
 -
 
 python-files/ ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/tree/main/python-files)):
-Python package assets and generated .pyi.
+Python package assets and type hints.
 
 -
 
@@ -93,9 +94,9 @@ log(data)        rx(bytes)
 
 Core ideas:
 
-- Telemetry packets carry a schema-defined type, endpoints, sender name, and payload.
+- Telemetry packets carry a runtime-schema-defined type, endpoints, sender name, and payload.
 - Routers deliver packets to local endpoints and optionally relay them outward.
-- The schema (DataType/DataEndpoint) is generated from
-  telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json)).
+- User schema is registered at runtime by API, optional JSON seed, endpoint handler registration,
+  or discovery sync.
 
 If you want an implementation-level tour, go to [Technical-Architecture](Technical-Architecture).

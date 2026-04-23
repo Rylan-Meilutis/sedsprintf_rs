@@ -1,20 +1,35 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::serialize::{deserialize_packet, peek_frame_info, serialize_packet};
 use std::hint::black_box;
 
-const ENDPOINTS: &[DataEndpoint] = &[DataEndpoint::Radio, DataEndpoint::SdCard];
 const GPS_VALUES: &[f32] = &[37.7749_f32, -122.4194_f32, 30.0_f32];
 const MESSAGE_TEXT: &str = "criterion benchmark packet payload";
 const TIMESTAMP_MS: u64 = 1_741_017_600_000;
 
+fn endpoints() -> [DataEndpoint; 2] {
+    [DataEndpoint::named("RADIO"), DataEndpoint::named("SD_CARD")]
+}
+
 fn gps_packet() -> Packet {
-    Packet::from_f32_slice(DataType::GpsData, GPS_VALUES, ENDPOINTS, TIMESTAMP_MS).unwrap()
+    Packet::from_f32_slice(
+        DataType::named("GPS_DATA"),
+        GPS_VALUES,
+        &endpoints(),
+        TIMESTAMP_MS,
+    )
+        .unwrap()
 }
 
 fn message_packet() -> Packet {
-    Packet::from_str_slice(DataType::MessageData, MESSAGE_TEXT, ENDPOINTS, TIMESTAMP_MS).unwrap()
+    Packet::from_str_slice(
+        DataType::named("MESSAGE_DATA"),
+        MESSAGE_TEXT,
+        &endpoints(),
+        TIMESTAMP_MS,
+    )
+        .unwrap()
 }
 
 fn benchmark_packet_paths(c: &mut Criterion) {
@@ -24,12 +39,12 @@ fn benchmark_packet_paths(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 Packet::from_f32_slice(
-                    DataType::GpsData,
+                    DataType::named("GPS_DATA"),
                     black_box(GPS_VALUES),
-                    black_box(ENDPOINTS),
+                    black_box(&endpoints()),
                     black_box(TIMESTAMP_MS),
                 )
-                .unwrap(),
+                    .unwrap(),
             )
         });
     });

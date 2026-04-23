@@ -7,8 +7,8 @@ mod compression_memory_pool_test {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::mem::{align_of, size_of};
     use std::ptr::null_mut;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     const HDR_WORDS: usize = 4;
     const HDR_RAW_OFF: usize = 0;
@@ -147,13 +147,13 @@ mod compression_memory_pool_test {
 
     fn make_packet(payload: &[u8], ts: u64) -> Packet {
         Packet::new(
-            DataType::MessageData,
-            &[DataEndpoint::SdCard],
+            DataType::named("MESSAGE_DATA"),
+            &[DataEndpoint::named("SD_CARD")],
             "POOL_TEST",
             ts,
             Arc::<[u8]>::from(payload),
         )
-        .expect("packet build failed")
+            .expect("packet build failed")
     }
 
     #[test]

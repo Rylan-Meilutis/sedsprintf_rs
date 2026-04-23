@@ -1,6 +1,7 @@
 # Build and Configure
 
-This page explains how to build the library and how compile-time configuration works across Rust, C/C++, and Python.
+This page explains how to build the library and how build-time/runtime configuration works across Rust, C/C++, and
+Python.
 
 ## Build tooling (build.py)
 
@@ -29,14 +30,14 @@ Useful options:
 
 - `check` runs `cargo clippy -D warnings` for the default, python, and embedded builds.
 - `test` runs the same clippy checks, then:
-  - `cargo test --features timesync`
-  - a short Criterion smoke pass for `packet_paths` and `router_system_paths`
-  - `cargo build --features python`
-  - `cargo build --no-default-features --target <embedded-target> --features embedded` when a matching cross C
-    toolchain is available
+    - `cargo test --features timesync`
+    - a short Criterion smoke pass for `packet_paths` and `router_system_paths`
+    - `cargo build --features python`
+    - `cargo build --no-default-features --target <embedded-target> --features embedded` when a matching cross C
+      toolchain is available
 - `device_id=<id>` sets `DEVICE_IDENTIFIER` for the build.
-- `schema_path=<path>` sets `SEDSPRINTF_RS_SCHEMA_PATH`.
-- `ipc_schema_path=<path>` sets `SEDSPRINTF_RS_IPC_SCHEMA_PATH` for a board-local IPC overlay.
+- `static_schema_path=<path>` sets `SEDSPRINTF_RS_STATIC_SCHEMA_PATH` for runtime registry seeding.
+- `static_ipc_schema_path=<path>` sets `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH` for a runtime IPC/link-local seed.
 - `max_stack_payload=<n>` sets `MAX_STACK_PAYLOAD` for inline payload storage.
 - `env:KEY=VALUE` passes any compile-time env var used by
   src/config.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/config.rs)).
@@ -168,6 +169,37 @@ amount from the same budget.
 `MAX_QUEUE_BUDGET`, `build.py max_queue_budget=<n>`, or CMake
 `SEDSPRINTF_RS_MAX_QUEUE_BUDGET`.
 
+## Runtime telemetry schema
+
+v4 removes compile-time user schema generation. `build.rs` no longer turns
+`telemetry_config.json` into application-specific Rust enum variants or binding constants.
+
+Default builds start with only built-in internal entries:
+
+- telemetry error endpoint/type
+- reliable-control packet types
+- discovery endpoint/types
+- time-sync endpoint/types when `timesync` is enabled
+
+Applications add user endpoints and data types at runtime:
+
+- Rust registration APIs in `config`
+- C ABI registration APIs
+- Python registration APIs
+- JSON seeding through env, path, or bytes
+- discovery schema sync from peers
+
+Runtime JSON seeding options:
+
+- `SEDSPRINTF_RS_STATIC_SCHEMA_PATH=/path/to/telemetry_config.json`
+- `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH=/path/to/ipc_config.json`
+- Rust `register_schema_json_path(...)` / `register_schema_json_bytes(...)`
+- C `seds_schema_register_json_file(...)` / `seds_schema_register_json_bytes(...)`
+- Python `register_schema_json_file(...)` / `register_schema_json_bytes(...)`
+
+Embedded builds include `telemetry_config.json` bytes only when that file exists, then parse those
+bytes at runtime. The default crate build does not require or include application JSON.
+
 ## CMake integration
 
 CMakeLists.txt ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/CMakeLists.txt))
@@ -202,15 +234,13 @@ Options:
 
 If you use `maturin develop` directly, ensure you are in the correct virtualenv.
 
-## Build.rs overrides (advanced)
+## Build.rs behavior (advanced)
 
 build.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/build.rs))
-can be directed to alternate sources or disabled:
+is intentionally minimal in v4. It tracks build environment keys and whether optional embedded
+JSON bytes are available. It does not generate user schema constants.
 
-- `SEDSPRINTF_RS_SKIP_ENUMGEN=1` skips enum generation.
-- `SEDSPRINTF_RS_SCHEMA_PATH=path/to/telemetry_config.json` overrides the base schema source.
-- `SEDSPRINTF_RS_IPC_SCHEMA_PATH=path/to/ipc_config.json` adds a board-local IPC overlay schema.
-- `SEDSPRINTF_RS_LIB_RS=path/to/lib.rs` overrides error enum source.
+Use runtime JSON seeding for schema paths instead of build-script schema overrides.
 
 ## Embedded allocator hooks
 

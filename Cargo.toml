@@ -1,6 +1,6 @@
 [package]
 name = "sedsprintf_rs"
-version = "3.12.0"
+version = "4.0.0"
 edition = "2024"
 build = "build.rs"
 authors = ["Rylan Meilutis <rylan@rylanswebsite.com>"]
@@ -16,8 +16,8 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 default = ["std", "compression", "timesync", "discovery"]
-std = []
-embedded = ["compression", "timesync", "discovery"]
+std = ["serde", "serde/std", "serde_json", "serde_json/std"]
+embedded = ["compression", "timesync", "discovery", "serde", "serde_json", "serde_json/alloc"]
 python = ["std", "pyo3/extension-module", "compression", "timesync", "discovery"]
 compression = ["zstd-safe"]
 timesync = []
@@ -78,16 +78,12 @@ sedsprintf_macros = { path = "sedsprintf_macros" }
 strum_macros = { version = "0.28.0", default-features = false }
 strum = { version = "0.28.0", default-features = false }
 crc32fast = { version = "1.5.0", default-features = false }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"], optional = true }
+serde_json = { version = "1.0.149", default-features = false, optional = true }
 
 # Optional dependencies enabled by features
 pyo3 = { version = "0.28.3", optional = true, features = ["auto-initialize", "extension-module", "multiple-pymethods"] }
 zstd-safe = { version = "7.2.4", optional = true, default-features = false }
-
-# Build dependencies for code generation in build.rs
-[build-dependencies]
-regex = "1.12.3"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
 
 [dev-dependencies]
 criterion = "0.8.2"

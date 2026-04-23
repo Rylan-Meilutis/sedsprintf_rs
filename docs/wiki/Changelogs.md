@@ -1,5 +1,39 @@
 # Changelogs
 
+## Version 4.0.0 highlights
+
+- Runtime-only schema:
+    - User `DataEndpoint` and `DataType` entries are no longer generated at compile time.
+    - `build.rs` no longer compiles application schema JSON into Rust enum variants or binding
+      constants.
+    - The crate can be built/published without a local application `telemetry_config.json`.
+- Runtime schema APIs:
+    - Rust now supports endpoint/type registration, lookup by ID, lookup by name, export, and
+      removal.
+    - `DataEndpoint::named("RADIO")` and `DataType::named("GPS_DATA")` provide readable runtime
+      references for application code and tests.
+    - C and Python expose matching register/info/info-by-name/remove APIs.
+- JSON seeding:
+    - Static JSON is optional runtime input, not compile-time codegen.
+    - Host builds can seed via `SEDSPRINTF_RS_STATIC_SCHEMA_PATH`,
+      `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH`, explicit path APIs, or explicit bytes APIs.
+    - Embedded builds include `telemetry_config.json` bytes only if the file exists, then decode
+      them through the same runtime parser.
+- Network schema sync:
+    - Discovery advertises the current endpoint/type schema.
+    - Nodes merge compatible schemas and resolve ID/name conflicts deterministically.
+    - Direct registration still rejects a data type name/ID that already exists with a different
+      shape.
+- Metadata and memory:
+    - Endpoints and data types now carry human-readable descriptions.
+    - Runtime JSON accepts both `description` and legacy `doc`.
+    - Schema registry memory counts against the same shared router/relay queue budget as RX/TX
+      queues, reliable state, dedupe caches, and discovery topology.
+- Tests and examples:
+    - Rust tests and benches now use readable string-backed lookups instead of raw legacy IDs.
+    - Added regression coverage for schema sync, conflict resolution, budget accounting, string
+      lookup, metadata, and removal.
+
 ## Version 3.12.0 highlights
 
 - Shared queue budgeting:

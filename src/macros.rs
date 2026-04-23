@@ -28,6 +28,8 @@
 pub trait ReprU32Enum: Copy + Sized {
     /// Maximum valid numeric value for this enum (inclusive).
     const MAX: u32;
+    /// Convert a valid raw value to this type.
+    fn from_u32(x: u32) -> Option<Self>;
 }
 
 /// Implement [`ReprU32Enum`] for a concrete `#[repr(u32)]` enum and perform
@@ -52,6 +54,12 @@ macro_rules! impl_repr_u32_enum {
 
         impl $crate::macros::ReprU32Enum for $ty {
             const MAX: u32 = $max;
+
+            #[inline]
+            fn from_u32(x: u32) -> Option<Self> {
+                // SAFETY: `E` is promised to be a fieldless #[repr(u32)] enum (thus 4 bytes, Copy).
+                Some(unsafe { (&x as *const u32 as *const Self).read() })
+            }
         }
     };
 }

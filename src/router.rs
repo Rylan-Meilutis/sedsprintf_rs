@@ -372,10 +372,34 @@ impl EndpointHandler {
             !endpoint_is_router_internal(endpoint),
             "reserved internal endpoint handlers must not be user-registered"
         );
+        #[cfg(feature = "std")]
+        crate::config::ensure_endpoint_id(endpoint, false)
+            .expect("endpoint handler endpoint registration failed");
         Self {
             endpoint,
             handler: EndpointHandlerFn::Packet(Arc::new(f)),
         }
+    }
+
+    /// Create a new packet handler from a runtime endpoint definition.
+    #[inline]
+    pub fn new_packet_handler_for<F>(endpoint: crate::config::EndpointDefinition, f: F) -> Self
+    where
+        F: Fn(&Packet) -> TelemetryResult<()> + Send + Sync + 'static,
+    {
+        Self::new_packet_handler(endpoint.id, f)
+    }
+
+    /// Create a new packet handler by endpoint name.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn new_packet_handler_by_name<F>(endpoint_name: &str, f: F) -> TelemetryResult<Self>
+    where
+        F: Fn(&Packet) -> TelemetryResult<()> + Send + Sync + 'static,
+    {
+        let endpoint = crate::config::endpoint_definition_by_name(endpoint_name)
+            .ok_or(TelemetryError::BadArg)?;
+        Ok(Self::new_packet_handler(endpoint.id, f))
     }
 
     /// Create a new endpoint handler for serialized byte-slice callbacks.
@@ -390,10 +414,34 @@ impl EndpointHandler {
             !endpoint_is_router_internal(endpoint),
             "reserved internal endpoint handlers must not be user-registered"
         );
+        #[cfg(feature = "std")]
+        crate::config::ensure_endpoint_id(endpoint, false)
+            .expect("endpoint handler endpoint registration failed");
         Self {
             endpoint,
             handler: EndpointHandlerFn::Serialized(Arc::new(f)),
         }
+    }
+
+    /// Create a new serialized handler from a runtime endpoint definition.
+    #[inline]
+    pub fn new_serialized_handler_for<F>(endpoint: crate::config::EndpointDefinition, f: F) -> Self
+    where
+        F: Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static,
+    {
+        Self::new_serialized_handler(endpoint.id, f)
+    }
+
+    /// Create a new serialized handler by endpoint name.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn new_serialized_handler_by_name<F>(endpoint_name: &str, f: F) -> TelemetryResult<Self>
+    where
+        F: Fn(&[u8]) -> TelemetryResult<()> + Send + Sync + 'static,
+    {
+        let endpoint = crate::config::endpoint_definition_by_name(endpoint_name)
+            .ok_or(TelemetryError::BadArg)?;
+        Ok(Self::new_serialized_handler(endpoint.id, f))
     }
 
     /// Return the endpoint that the handler is registered for.
@@ -781,6 +829,7 @@ impl RouterInner {
             .saturating_add(self.transmit_queue.bytes_used())
             .saturating_add(self.recent_rx.max_bytes())
             .saturating_add(self.reliable_rx_buffered_bytes())
+            .saturating_add(crate::config::schema_bytes_used())
             .saturating_add({
                 #[cfg(feature = "discovery")]
                 {
@@ -1266,11 +1315,11 @@ impl Router {
         if st
             .typed_route_overrides
             .keys()
-            .any(|(typed_src, typed_ty, _)| *typed_src == src && *typed_ty == ty as u32)
+            .any(|(typed_src, typed_ty, _)| *typed_src == src && *typed_ty == ty.as_u32())
         {
             return st
                 .typed_route_overrides
-                .get(&(src, ty as u32, dst))
+                .get(&(src, ty.as_u32(), dst))
                 .copied()
                 .unwrap_or(false);
         }
@@ -1756,10 +1805,10 @@ impl Router {
     fn timesync_has_usable_time_locked(st: &TimeSyncRuntime, now_mono_ns: u64) -> bool {
         st.disciplined_clock.read_unix_ms(now_mono_ns).is_some()
             || st
-                .clock
-                .current_time(now_mono_ns)
-                .and_then(|reading| reading.unix_time_ms)
-                .is_some()
+            .clock
+            .current_time(now_mono_ns)
+            .and_then(|reading| reading.unix_time_ms)
+            .is_some()
     }
 
     #[cfg(feature = "timesync")]
@@ -1976,11 +2025,11 @@ impl Router {
                 }
                 if restrict_link_local
                     && st
-                        .sides
-                        .get(side)
-                        .and_then(|s| s.as_ref())
-                        .map(|s| !s.opts.link_local_enabled)
-                        .unwrap_or(true)
+                    .sides
+                    .get(side)
+                    .and_then(|s| s.as_ref())
+                    .map(|s| !s.opts.link_local_enabled)
+                    .unwrap_or(true)
                 {
                     continue;
                 }
@@ -2080,9 +2129,9 @@ impl Router {
             let st = self.timesync.lock();
             if let Some(tracker) = st.tracker.as_ref()
                 && tracker.should_serve(
-                    now_ms,
-                    Self::timesync_has_usable_time_locked(&st, self.monotonic_now_ns()),
-                )
+                now_ms,
+                Self::timesync_has_usable_time_locked(&st, self.monotonic_now_ns()),
+            )
             {
                 return vec![self.sender.to_owned()];
             }
@@ -2344,6 +2393,15 @@ impl Router {
                 .collect::<Vec<_>>()
         };
         for (side_id, endpoints, timesync_sources, topology) in per_side {
+            let pkt = discovery::build_discovery_schema(self.sender, now_ms)?;
+            self.tx_queue_item_with_flags(
+                RouterTxItem::ToSide {
+                    src: None,
+                    dst: side_id,
+                    data: RouterItem::Packet(pkt),
+                },
+                true,
+            )?;
             if !endpoints.is_empty() {
                 let pkt =
                     discovery::build_discovery_announce(self.sender, now_ms, endpoints.as_slice())?;
@@ -2405,23 +2463,8 @@ impl Router {
                 {
                     return false;
                 }
-                !self
-                    .advertised_discovery_endpoints_for_link_locked(
-                        &st,
-                        now_ms,
-                        side.opts.link_local_enabled,
-                    )
-                    .is_empty()
-                    || !self
-                        .advertised_discovery_timesync_sources_for_link_locked(&st, now_ms)
-                        .is_empty()
-                    || !self
-                        .advertised_discovery_topology_for_link_locked(
-                            &st,
-                            now_ms,
-                            side.opts.link_local_enabled,
-                        )
-                        .is_empty()
+                let _ = side;
+                true
             });
             if st.sides.is_empty() || !has_any {
                 return Ok(false);
@@ -2448,6 +2491,21 @@ impl Router {
             return Ok(true);
         };
         if pkt.sender() == self.sender {
+            return Ok(true);
+        }
+        if pkt.data_type() == DataType::DiscoverySchema {
+            let snapshot = discovery::decode_discovery_schema(pkt)?;
+            let incoming_cost = crate::config::owned_schema_byte_cost(&snapshot);
+            let mut st = self.state.lock();
+            st.make_shared_queue_room(incoming_cost, RouterQueueKind::Discovery)?;
+            drop(st);
+            let report =
+                crate::config::merge_owned_schema_snapshot_with_budget(snapshot, MAX_QUEUE_BUDGET)?;
+            if report.changed() {
+                let mut st = self.state.lock();
+                st.fit_discovery_budget();
+                Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
+            }
             return Ok(true);
         }
         let mut st = self.state.lock();
@@ -2498,6 +2556,7 @@ impl Router {
                 Self::refresh_sender_topology_state(&mut sender_state);
                 changed
             }
+            DataType::DiscoverySchema => false,
             _ => false,
         };
         sender_state.last_seen_ms = now_ms;
@@ -2535,7 +2594,7 @@ impl Router {
 
     #[inline]
     fn reliable_key(side: RouterSideId, ty: DataType) -> (RouterSideId, u32) {
-        (side, ty as u32)
+        (side, ty.as_u32())
     }
 
     fn reliable_tx_state_mut<'a>(
@@ -2580,7 +2639,7 @@ impl Router {
             message_meta(control_ty).endpoints,
             self.sender,
             self.packet_timestamp_ms(),
-            encode_slice_le(&[ty as u32, seq]),
+            encode_slice_le(&[ty.as_u32(), seq]),
         )
     }
 
@@ -4014,7 +4073,7 @@ impl Router {
             let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
         }
         st.typed_route_overrides
-            .insert((src, ty as u32, dst), enabled);
+            .insert((src, ty.as_u32(), dst), enabled);
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
@@ -4033,7 +4092,7 @@ impl Router {
         if let Some(src) = src {
             let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
         }
-        st.typed_route_overrides.remove(&(src, ty as u32, dst));
+        st.typed_route_overrides.remove(&(src, ty.as_u32(), dst));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
@@ -5037,12 +5096,12 @@ impl Router {
             if item.src.is_some() {
                 match &item.data {
                     RouterItem::Packet(pkt)
-                        if is_reliable_type(pkt.data_type())
-                            && pkt.sender() != self.sender
-                            && self.packet_has_local_handler(pkt) =>
-                    {
-                        self.queue_end_to_end_reliable_ack(pkt)?;
-                    }
+                    if is_reliable_type(pkt.data_type())
+                        && pkt.sender() != self.sender
+                        && self.packet_has_local_handler(pkt) =>
+                        {
+                            self.queue_end_to_end_reliable_ack(pkt)?;
+                        }
                     RouterItem::Serialized(bytes) => {
                         if let Ok(pkt) = serialize::deserialize_packet(bytes.as_ref())
                             && is_reliable_type(pkt.data_type())

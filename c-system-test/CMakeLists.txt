@@ -28,6 +28,10 @@ add_executable(c_system_multi_endpoint_topology_test
         src/multi_endpoint_topology_test.c
 )
 
+add_executable(c_system_runtime_schema_test
+        src/runtime_schema_test.c
+)
+
 # 2) Local includes (your own headers)
 target_include_directories(c_system_test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -39,6 +43,9 @@ target_include_directories(c_system_board_topology_timesync_test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 target_include_directories(c_system_multi_endpoint_topology_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_include_directories(c_system_runtime_schema_test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
@@ -60,3 +67,5 @@ target_link_libraries(c_system_board_topology_timesync_test PRIVATE sedsprintf_r
 target_include_directories(c_system_board_topology_timesync_test PRIVATE "${SEDSPRINTF_RS_INCLUDE_DIR}")
 target_link_libraries(c_system_multi_endpoint_topology_test PRIVATE sedsprintf_rs)
 target_include_directories(c_system_multi_endpoint_topology_test PRIVATE "${SEDSPRINTF_RS_INCLUDE_DIR}")
+target_link_libraries(c_system_runtime_schema_test PRIVATE sedsprintf_rs)
+target_include_directories(c_system_runtime_schema_test PRIVATE "${SEDSPRINTF_RS_INCLUDE_DIR}")

@@ -57,6 +57,7 @@ The static library will be under `target/release/` (or under `target/<triple>/re
 
 ```C
 #include "sedsprintf.h"
+#include <string.h>
 
 static uint64_t now_ms(void *user) { (void)user; return 0; }
 static SedsResult tx_send(const uint8_t *bytes, size_t len, void *user)
@@ -75,8 +76,48 @@ static SedsResult on_packet(const SedsPacketView *pkt, void *user)
 
 int main(void)
 {
+    const uint32_t sd_card = 100;
+    const uint32_t radio = 101;
+    const uint32_t gps_data = 100;
+    const uint32_t gps_endpoints[] = {sd_card, radio};
+
+    seds_endpoint_register_ex(
+        sd_card,
+        "SD_CARD",
+        strlen("SD_CARD"),
+        "Local storage endpoint",
+        strlen("Local storage endpoint"),
+        false
+    );
+    seds_endpoint_register_ex(
+        radio,
+        "RADIO",
+        strlen("RADIO"),
+        "External radio link",
+        strlen("External radio link"),
+        false
+    );
+    seds_dtype_register_ex(
+        gps_data,
+        "GPS_DATA",
+        strlen("GPS_DATA"),
+        "Three f32 GPS values",
+        strlen("Three f32 GPS values"),
+        true,
+        3,
+        1, /* Float32 */
+        0, /* Data */
+        0, /* ReliableMode::None */
+        80,
+        gps_endpoints,
+        2
+    );
+
+    SedsEndpointInfo sd_info;
+    seds_endpoint_get_info_by_name("SD_CARD", strlen("SD_CARD"), &sd_info);
+
     const SedsLocalEndpointDesc locals[] = {
-        { .endpoint = SEDS_EP_SD_CARD, .packet_handler = on_packet, .user = NULL },
+        { .endpoint = sd_info.id, .packet_handler = on_packet, .user = NULL },
     };
 
     SedsRouter *r = seds_router_new(
@@ -89,7 +130,7 @@ int main(void)
     seds_router_add_side_serialized(r, "TX", 2, tx_send, NULL, true);
 
     float data[3] = {1.0f, 2.0f, 3.0f};
-    seds_router_log(r, SEDS_DT_GPS_DATA, data, sizeof(data));
+    seds_router_log(r, gps_data, data, sizeof(data));
     seds_router_process_all_queues(r);
 
     seds_router_free(r);

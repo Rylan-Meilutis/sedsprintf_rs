@@ -5,10 +5,11 @@ look the way they do. It assumes no prior knowledge of the codebase.
 
 ## Goals and constraints
 
-- **Schema-first**: a shared schema defines endpoints, message types, and payload layouts for every language binding.
+- **Runtime schema**: endpoints, message types, and payload layouts live in a runtime registry that can be seeded,
+  queried, exported, and synced between nodes.
 - **Compact on-the-wire representation**: a small header, endpoint bitmaps, and optional compression minimize bandwidth.
 - **Embedded-friendly**: no_std support, bounded queues, and stack/heap tradeoffs.
-- **Multi-language**: C and Python bindings are generated from the same schema.
+- **Multi-language**: Rust, C, and Python expose the same runtime schema and packet APIs.
 - **Deterministic behavior**: validation and dedupe rules are consistent across languages.
 
 ## Module map (what lives where)
@@ -16,7 +17,7 @@ look the way they do. It assumes no prior knowledge of the codebase.
 -
 
 src/config.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/config.rs)):
-compile-time configuration values plus generated `DataType`/`DataEndpoint` enums.
+compile-time configuration values plus the runtime schema registry for `DataType` and `DataEndpoint` metadata.
 
 -
 
@@ -60,29 +61,16 @@ and
 src/python_api.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/python_api.rs)):
 FFI bindings (C ABI and pyo3).
 
-## Schema and metadata pipeline
+## Runtime schema and metadata pipeline
 
-The schema is defined in
-telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json)) (
-plus built-in `TelemetryError` endpoint/type). At build time:
-
-1)
-
-build.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/build.rs))
-reads the schema to generate C headers and Python `.pyi` stubs.
-
-2) `define_telemetry_schema!` in
-   src/config.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/config.rs))
-   expands into Rust enums and metadata tables.
+The registry starts with built-in internal endpoints/types for telemetry errors, reliable control,
+discovery, and time sync. User endpoints and data types are added at runtime through direct APIs,
+optional JSON seeding, handler registration, or discovery schema sync.
 
 Core schema types:
 
-- `DataEndpoint`: enum generated from the `endpoints` list in
-  telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json))
-  plus built-ins.
-- `DataType`: enum generated from the `types` list in
-  telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json))
-  plus built-ins.
+- `DataEndpoint`: transparent runtime ID (`u32`) for logical destinations.
+- `DataType`: transparent runtime ID (`u32`) for message types.
 - `MessageMeta`: per-`DataType` metadata (name, element layout, allowed endpoints).
 - `MessageElement`: `Static(count, MessageDataType, MessageClass)` or `Dynamic(MessageDataType, MessageClass)`.
 - `MessageDataType`: primitive element type (Float32, UInt16, String, Binary, etc.).
@@ -90,10 +78,14 @@ Core schema types:
 
 Why these structures exist:
 
-- **MessageMeta is static** so it can be used in `const fn` lookups (`message_meta`, `get_data_type`).
+- **MessageMeta is registry-backed** so it can change as peers add or announce schema over time.
+- **String lookup APIs** (`DataEndpoint::named`, `DataType::named`) keep application code readable while the wire format
+  remains numeric.
 - **MessageElement separates shape from data type** so the same primitive type can be used for static and dynamic
   payloads.
 - **MessageClass is tied to element layout** so formatting and error generation know the intent of the message.
+- **Discovery schema sync** exports endpoint/type definitions, merges compatible remote schema, and resolves conflicts
+  deterministically.
 
 ## Packet (the core runtime type)
 
@@ -159,7 +151,8 @@ PAYLOAD BYTES                  // raw or compressed
 Design choices:
 
 - **ULEB128 varints** minimize size for small values.
-- **Endpoint bitmap** avoids repeated endpoint IDs; size is based on `MAX_VALUE_DATA_ENDPOINT`.
+- **Endpoint bitmap** avoids repeated endpoint IDs; size is based on the highest runtime endpoint
+  ID known to the schema registry.
 - **Sender/payload compression** uses `zstd` (`zstd-safe`) and is applied only when it makes the payload smaller.
 
 `packet_id_from_wire` parses only as much as needed to compute the same packet ID as `Packet::packet_id`. It
@@ -177,11 +170,11 @@ Router and relay queue storage is built on `BoundedDeque<T>`:
 - Growth policy: multiplicative growth controlled by `QUEUE_GROW_STEP`.
 
 The public `MAX_QUEUE_BUDGET` is shared dynamically across router/relay RX queues, TX queues,
-recent-ID caches, reliable replay/out-of-order buffers, and discovery topology state. Recent-ID
-caches preallocate their final storage at construction and reserve that amount from the shared
-budget immediately. This design keeps memory use bounded and avoids unbounded `VecDeque` growth in
-embedded targets while letting the active part of the system use available queue budget when other
-internal queues are quiet.
+recent-ID caches, reliable replay/out-of-order buffers, discovery topology state, and runtime
+schema registry memory. Recent-ID caches preallocate their final storage at construction and
+reserve that amount from the shared budget immediately. This design keeps memory use bounded and
+avoids unbounded `VecDeque` growth in embedded targets while letting the active part of the system
+use available queue budget when other internal queues are quiet.
 
 ## Router architecture
 

@@ -1,13 +1,13 @@
 #[cfg(feature = "timesync")]
 mod timesync_system_test {
-    use sedsprintf_rs::config::{DEVICE_IDENTIFIER, DataEndpoint, DataType};
+    use sedsprintf_rs::config::{DataEndpoint, DataType, DEVICE_IDENTIFIER};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
     use sedsprintf_rs::serialize;
     use sedsprintf_rs::timesync::{
-        PartialNetworkTime, TimeSyncConfig, TimeSyncRole, TimeSyncTracker,
-        build_timesync_announce_with_sender, build_timesync_request, build_timesync_response,
-        compute_offset_delay,
+        build_timesync_announce_with_sender, build_timesync_request, build_timesync_response, compute_offset_delay,
+        PartialNetworkTime, TimeSyncConfig, TimeSyncRole,
+        TimeSyncTracker,
     };
 
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,7 +51,7 @@ mod timesync_system_test {
         let captured_c = captured.clone();
         let router = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::SdCard,
+                DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )]),
             zero_clock(),
@@ -295,7 +295,7 @@ mod timesync_system_test {
             resp_b_wire.timestamp(),
             resp_b_wire.payload().into(),
         )
-        .unwrap();
+            .unwrap();
         router.rx(&resp_b).unwrap();
 
         now.store(1_600, Ordering::SeqCst);
@@ -407,13 +407,13 @@ mod timesync_system_test {
                     };
 
                     let pkt = Packet::new(
-                        DataType::MessageData,
-                        &[DataEndpoint::SdCard],
+                        DataType::named("MESSAGE_DATA"),
+                        &[DataEndpoint::named("SD_CARD")],
                         "SYS_COMP",
                         ts,
                         Arc::<[u8]>::from(payload.as_slice()),
                     )
-                    .expect("packet build failed");
+                        .expect("packet build failed");
 
                     let wire = serialize::serialize_packet(&pkt);
                     let decoded = serialize::deserialize_packet(&wire).expect("deserialize failed");

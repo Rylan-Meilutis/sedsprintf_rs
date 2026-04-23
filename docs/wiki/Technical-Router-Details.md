@@ -86,8 +86,8 @@ Discovery advertisements are adaptive:
 2) For reliable types, sequence headers are processed first and internal `RELIABLE_ACK` /
    `RELIABLE_PARTIAL_ACK` / `RELIABLE_PACKET_REQUEST` control packets are consumed here.
 3) Packet ID is computed for dedupe (unreliable / unsequenced frames).
-   - Serialized bytes use `packet_id_from_wire` when possible.
-   - If wire parsing fails, raw bytes are hashed as fallback.
+    - Serialized bytes use `packet_id_from_wire` when possible.
+    - If wire parsing fails, raw bytes are hashed as fallback.
 4) Recent‑ID cache drops duplicates.
 5) Local handlers are invoked with retries.
 6) Built-in discovery packets are learned internally when enabled.

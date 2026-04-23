@@ -42,9 +42,7 @@ When a field is compressed, the logical length is still transmitted so the recei
 
 ## Reliable header
 
-For data types configured with `reliable: true` in
-telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json)),
-the wire format includes a fixed 9‑byte
+For data types registered with reliable delivery enabled, the wire format includes a fixed 9-byte
 reliable header between the sender bytes and payload:
 
 - `REL_FLAGS`:
@@ -63,13 +61,14 @@ endpoint handlers to them or treat them as user data.
 
 ## Endpoint bitmap
 
-The bitmap size is based on the highest endpoint discriminant:
+The bitmap size is based on the highest endpoint ID currently known to the runtime schema registry:
 
-- `EP_BITMAP_BITS = MAX_VALUE_DATA_ENDPOINT + 1`
+- `EP_BITMAP_BITS = max_endpoint_id + 1`
 - `EP_BITMAP_BYTES = ceil(EP_BITMAP_BITS / 8)`
 
-Endpoints are packed LSB‑first within each byte. Endpoint order is implicit and matches the enum discriminants. The NEP
-byte is the number of set bits (unique endpoints), used for quick sanity checking.
+Endpoints are packed LSB-first within each byte. Endpoint order is implicit and matches numeric
+runtime IDs. The `NEP` byte is the number of set bits (unique endpoints), used for quick sanity
+checking.
 
 ## Varints (ULEB128)
 

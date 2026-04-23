@@ -83,6 +83,22 @@ environments.
 
 ## Recent changelog milestones
 
+## Version 4.0.0 highlights
+
+- User telemetry schema is now runtime-only. `build.rs` no longer generates Rust enum variants or
+  binding constants from `telemetry_config.json`.
+- Endpoints and data types can be registered, looked up by name, exported, synced through
+  discovery, and removed at runtime.
+- Rust code can use readable runtime references such as `DataEndpoint::named("RADIO")` and
+  `DataType::named("GPS_DATA")` instead of raw numeric IDs.
+- C and Python expose matching schema register/info/info-by-name/remove APIs.
+- Optional JSON config is applied at runtime through env/path/bytes APIs. Default builds do not
+  include application JSON; embedded builds include `telemetry_config.json` bytes only if the file
+  exists and then parse it at runtime.
+- Schema registry memory counts against the same shared `MAX_QUEUE_BUDGET` as other router/relay
+  queue-backed state.
+- Full changelog: [CHANGELOG.md](./CHANGELOG.md)
+
 ## Version 3.12.0 highlights
 
 - Router and relay queue-backed state now shares one dynamic `MAX_QUEUE_BUDGET` instead of using
@@ -196,8 +212,8 @@ Options:
   maturin-install         Build wheel and install it with uv pip install.
   target=<triple>         Set Rust compilation target (e.g. target=thumbv7em-none-eabihf).
   device_id=<id>          Set DEVICE_IDENTIFIER env var for the build.
-  schema_path=<path>      Set SEDSPRINTF_RS_SCHEMA_PATH for the build.
-  ipc_schema_path=<path>  Set SEDSPRINTF_RS_IPC_SCHEMA_PATH for a board-local IPC overlay.
+  static_schema_path=<path>      Set SEDSPRINTF_RS_STATIC_SCHEMA_PATH for runtime registry seeding.
+  static_ipc_schema_path=<path>  Set SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH for a runtime IPC/link-local seed.
   max_queue_budget=<n>    Set MAX_QUEUE_BUDGET for the shared router/relay queue budget.
   max_recent_rx_ids=<n>   Set MAX_RECENT_RX_IDS for the preallocated recent-ID cache.
   max_stack_payload=<n>   Set MAX_STACK_PAYLOAD for define_stack_payload!(env="MAX_STACK_PAYLOAD", ...).
@@ -302,12 +318,10 @@ If you want the Rust crate to use the release profile regardless of the parent C
 set `SEDSPRINTF_RS_FORCE_RELEASE=ON` before `add_subdirectory(...)`. Otherwise the wrapper follows
 `CMAKE_BUILD_TYPE` for single-config generators and defaults to debug for Debug builds.
 
-- Configure telemetry schema via `telemetry_config.json` (endpoints + message types). The Rust enum metadata is
-  generated
-  from this JSON by `define_telemetry_schema!` in `src/config.rs`.
-  NOTE: (ON EVERY SYSTEM THIS LIBRARY IS USED, THE CONFIG ENUMS MUST BE THE SAME OR UNDEFINED BEHAVIOR MAY OCCUR). So
-  for
-  most applications I would recommend making a fork and setting the config values you need for your application.
+- Configure telemetry schema at runtime. The default build contains only built-in internal
+  endpoints/types for telemetry errors, reliable control, discovery, and time sync. Applications
+  add user endpoints/types through the runtime APIs, by passing a JSON schema path/bytes to the
+  registry, or by letting discovery sync schema entries from peers.
 
 ---
 
@@ -380,25 +394,68 @@ set(SEDSPRINTF_RS_MAX_RECENT_RX_IDS "256" CACHE STRING "" FORCE)
 
 ---
 
-## Telemetry config (JSON + GUI editor)
+## Runtime telemetry schema
 
-The telemetry schema lives in `telemetry_config.json` and drives the generated `DataEndpoint` and `DataType` enums.
-You can edit it directly or use the GUI editor:
+In v4, user telemetry schema is runtime state. `DataEndpoint` and `DataType` are stable numeric IDs
+on the wire, but applications should normally look them up by string:
+
+```rust
+use sedsprintf_rs::{DataEndpoint, DataType};
+
+let radio = DataEndpoint::named("RADIO");
+let gps = DataType::named("GPS_DATA");
+```
+
+You can add schema entries directly:
+
+```rust
+use sedsprintf_rs::{
+    config::{register_data_type_id_with_description, register_endpoint_id_with_description},
+    DataEndpoint, DataType, MessageClass, MessageDataType, MessageElement, ReliableMode,
+};
+
+let radio = register_endpoint_id_with_description(
+    DataEndpoint(100),
+    "RADIO",
+    "Downlink radio",
+    false,
+)?;
+
+register_data_type_id_with_description(
+    DataType(100),
+    "GPS_DATA",
+    "Latitude, longitude, altitude",
+    MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+    &[radio],
+    ReliableMode::Ordered,
+    80,
+)?;
+```
+
+Or seed from JSON at runtime. Host builds can use:
+
+- `SEDSPRINTF_RS_STATIC_SCHEMA_PATH=/path/to/telemetry_config.json`
+- `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH=/path/to/ipc_config.json`
+- Rust `register_schema_json_path(...)` / `register_schema_json_bytes(...)`
+- C `seds_schema_register_json_file(...)` / `seds_schema_register_json_bytes(...)`
+- Python `register_schema_json_file(...)` / `register_schema_json_bytes(...)`
+
+Default builds do not compile application JSON into the crate. Embedded builds include
+`telemetry_config.json` bytes only when that file is present, and decode those bytes through the
+normal runtime JSON parser.
+
+The GUI editor still edits JSON schema files:
 
 ```bash
 ./telemetry_config_editor.py
 ```
 
-The editor auto-discovers the base JSON path from `src/config.rs` (or `SEDSPRINTF_RS_SCHEMA_PATH`) and the IPC overlay
-path from `SEDSPRINTF_RS_IPC_SCHEMA_PATH`. It can switch between the shared base schema and the board-local IPC overlay
-and edit/save them independently.
+For board-local IPC/software-bus endpoints, seed a second JSON file with
+`SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH` or the explicit JSON registration API. IPC seed entries are
+applied at runtime and treated as link-local when loaded through the IPC path.
 
-For board-local IPC/software-bus endpoints, keep the shared schema fixed and provide a second JSON file through
-`SEDSPRINTF_RS_IPC_SCHEMA_PATH` (or `./build.py ipc_schema_path=path/to/ipc_config.json`). That overlay is merged at
-build time. Endpoints from the IPC overlay are treated as link-local automatically; endpoints from the base schema are
-treated as non-link-local automatically.
-
-Note: `TelemetryError` (data type and endpoint) is built-in and must not appear in the JSON schema.
+Built-in internal endpoint/type names for telemetry errors, reliable control, discovery, and time
+sync are reserved. Do not register user handlers for `DISCOVERY` or `TIME_SYNC`.
 
 Note: The editor uses Tkinter. On some Linux distros you may need to install it
 (e.g. `sudo apt install python3-tk`).

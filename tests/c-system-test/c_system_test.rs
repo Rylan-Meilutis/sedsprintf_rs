@@ -121,5 +121,6 @@ mod c_system_test {
         run_exe(&root, "c_system_timesync_test");
         run_exe(&root, "c_system_board_topology_timesync_test");
         run_exe(&root, "c_system_multi_endpoint_topology_test");
+        run_exe(&root, "c_system_runtime_schema_test");
     }
 }

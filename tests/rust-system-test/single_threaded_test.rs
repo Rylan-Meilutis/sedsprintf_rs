@@ -1,15 +1,15 @@
 // tests/rust-system-test/single_threaded_test.rs
 #[cfg(test)]
 mod single_threaded_test {
-    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
+    use sedsprintf_rs::TelemetryResult;
 
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, TryRecvError};
+    use std::sync::Arc;
 
     fn env_usize(name: &str, default: usize) -> usize {
         std::env::var(name)
@@ -32,7 +32,7 @@ mod single_threaded_test {
 
     /// Build a handler that counts packets received on the Radio endpoint.
     fn make_radio_handler(counter: Arc<AtomicUsize>) -> EndpointHandler {
-        EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |_pkt: &Packet| {
+        EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |_pkt: &Packet| {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -40,7 +40,7 @@ mod single_threaded_test {
 
     /// Build a handler that counts packets received on the SdCard endpoint.
     fn make_sd_handler(counter: Arc<AtomicUsize>) -> EndpointHandler {
-        EndpointHandler::new_packet_handler(DataEndpoint::SdCard, move |_pkt: &Packet| {
+        EndpointHandler::new_packet_handler(DataEndpoint::named("SD_CARD"), move |_pkt: &Packet| {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -55,7 +55,13 @@ mod single_threaded_test {
 
     /// Build a packet with endpoints [SD_CARD, Radio], mirroring the C system.
     fn make_packet(ty: DataType, vals: &[f32], ts: u64) -> Packet {
-        Packet::from_f32_slice(ty, vals, &[DataEndpoint::SdCard, DataEndpoint::Radio], ts).unwrap()
+        Packet::from_f32_slice(
+            ty,
+            vals,
+            &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
+            ts,
+        )
+            .unwrap()
     }
 
     /// Drain both buses once and run the relay once.
@@ -247,35 +253,46 @@ mod single_threaded_test {
                 {
                     let node = &mut nodes[0];
                     make_series(&mut gps_buf[..3], 10.0);
-                    let pkt = make_packet(DataType::GpsData, &gps_buf[..3], seq_base);
+                    let pkt = make_packet(DataType::named("GPS_DATA"), &gps_buf[..3], seq_base);
                     node.router.tx(pkt).unwrap();
                 }
 
                 {
                     let node = &mut nodes[1];
                     make_series(&mut gyro_buf[..3], 0.5);
-                    let pkt1 = make_packet(DataType::GpsData, &gyro_buf[..3], seq_base + 10_000);
+                    let pkt1 = make_packet(
+                        DataType::named("GPS_DATA"),
+                        &gyro_buf[..3],
+                        seq_base + 10_000,
+                    );
                     node.router.tx(pkt1).unwrap();
 
                     make_series(&mut baro_buf[..3], 101.3);
-                    let pkt2 = make_packet(DataType::GpsData, &baro_buf[..3], seq_base + 20_000);
+                    let pkt2 = make_packet(
+                        DataType::named("GPS_DATA"),
+                        &baro_buf[..3],
+                        seq_base + 20_000,
+                    );
                     node.router.tx(pkt2).unwrap();
                 }
 
                 {
                     let node = &mut nodes[2];
                     make_series(&mut batt_buf[..2], 3.7);
-                    let pkt1 =
-                        make_packet(DataType::BatteryStatus, &batt_buf[..2], seq_base + 30_000);
+                    let pkt1 = make_packet(
+                        DataType::named("BATTERY_STATUS"),
+                        &batt_buf[..2],
+                        seq_base + 30_000,
+                    );
                     node.router.tx(pkt1).unwrap();
 
                     let pkt2 = Packet::from_str_slice(
                         DataType::TelemetryError,
                         msg,
-                        &[DataEndpoint::SdCard, DataEndpoint::Radio],
+                        &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
                         seq_base + 40_000,
                     )
-                    .unwrap();
+                        .unwrap();
                     node.router.tx(pkt2).unwrap();
                 }
 

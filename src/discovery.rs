@@ -4,7 +4,14 @@ use alloc::vec::Vec;
 
 use crate::router::encode_slice_le;
 use crate::{
-    packet::Packet, try_enum_from_u32, DataEndpoint, DataType, TelemetryError, TelemetryResult,
+    config::{
+        export_schema, message_class_code, message_class_from_code,
+        message_data_type_code, message_data_type_from_code, reliable_code, reliable_from_code,
+        OwnedDataTypeDefinition, OwnedEndpointDefinition, OwnedRuntimeSchemaSnapshot, RuntimeSchemaSnapshot,
+    }, packet::Packet, try_enum_from_u32, DataEndpoint, DataType,
+    MessageElement,
+    TelemetryError,
+    TelemetryResult,
 };
 
 pub const DISCOVERY_ROUTE_TTL_MS: u64 = 30_000;
@@ -101,6 +108,7 @@ pub const fn is_discovery_type(ty: DataType) -> bool {
         DataType::DiscoveryAnnounce
             | DataType::DiscoveryTimeSyncSources
             | DataType::DiscoveryTopology
+            | DataType::DiscoverySchema
     )
 }
 
@@ -171,7 +179,7 @@ pub fn build_discovery_announce(
     timestamp_ms: u64,
     endpoints: &[DataEndpoint],
 ) -> TelemetryResult<Packet> {
-    let payload_words: Vec<u32> = endpoints.iter().copied().map(|ep| ep as u32).collect();
+    let payload_words: Vec<u32> = endpoints.iter().copied().map(|ep| ep.as_u32()).collect();
     Packet::new(
         DataType::DiscoveryAnnounce,
         &[DataEndpoint::Discovery],
@@ -311,7 +319,7 @@ pub fn build_discovery_topology(
 
         payload.extend_from_slice(&(board.reachable_endpoints.len() as u32).to_le_bytes());
         for ep in board.reachable_endpoints {
-            payload.extend_from_slice(&(ep as u32).to_le_bytes());
+            payload.extend_from_slice(&(ep.as_u32()).to_le_bytes());
         }
 
         payload.extend_from_slice(&(board.reachable_timesync_sources.len() as u32).to_le_bytes());
@@ -472,4 +480,201 @@ pub fn decode_discovery_topology_payload(
 
     normalize_topology_boards(&mut boards);
     Ok(boards)
+}
+
+fn encode_string(payload: &mut Vec<u8>, value: &str) -> TelemetryResult<()> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| TelemetryError::Serialize("discovery schema string too long"))?;
+    payload.extend_from_slice(&len.to_le_bytes());
+    payload.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn read_u8(payload: &[u8], cursor: &mut usize, label: &'static str) -> TelemetryResult<u8> {
+    if payload.len().saturating_sub(*cursor) < 1 {
+        return Err(TelemetryError::Deserialize(label));
+    }
+    let out = payload[*cursor];
+    *cursor += 1;
+    Ok(out)
+}
+
+fn read_u32(payload: &[u8], cursor: &mut usize, label: &'static str) -> TelemetryResult<u32> {
+    if payload.len().saturating_sub(*cursor) < 4 {
+        return Err(TelemetryError::Deserialize(label));
+    }
+    let out = u32::from_le_bytes(
+        payload[*cursor..*cursor + 4]
+            .try_into()
+            .expect("4-byte u32"),
+    );
+    *cursor += 4;
+    Ok(out)
+}
+
+/// Builds a discovery packet containing the complete runtime schema snapshot.
+pub fn build_discovery_schema(sender: &'static str, timestamp_ms: u64) -> TelemetryResult<Packet> {
+    build_discovery_schema_from_snapshot(sender, timestamp_ms, export_schema())
+}
+
+/// Builds a discovery schema packet from an explicit snapshot.
+pub fn build_discovery_schema_from_snapshot(
+    sender: &'static str,
+    timestamp_ms: u64,
+    mut schema: RuntimeSchemaSnapshot,
+) -> TelemetryResult<Packet> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&2u32.to_le_bytes());
+
+    schema.endpoints.sort_unstable_by_key(|def| def.id.as_u32());
+    schema.types.sort_unstable_by_key(|def| def.id.as_u32());
+
+    payload.extend_from_slice(&(schema.endpoints.len() as u32).to_le_bytes());
+    for ep in schema.endpoints {
+        payload.extend_from_slice(&ep.id.as_u32().to_le_bytes());
+        payload.push(ep.link_local_only as u8);
+        encode_string(&mut payload, ep.name)?;
+        encode_string(&mut payload, ep.description)?;
+    }
+
+    payload.extend_from_slice(&(schema.types.len() as u32).to_le_bytes());
+    for ty in schema.types {
+        payload.extend_from_slice(&ty.id.as_u32().to_le_bytes());
+        encode_string(&mut payload, ty.name)?;
+        encode_string(&mut payload, ty.description)?;
+        match ty.element {
+            MessageElement::Static(count, data_type, class) => {
+                payload.push(0);
+                payload.extend_from_slice(&(count as u32).to_le_bytes());
+                payload.push(message_data_type_code(data_type));
+                payload.push(message_class_code(class));
+            }
+            MessageElement::Dynamic(data_type, class) => {
+                payload.push(1);
+                payload.extend_from_slice(&0u32.to_le_bytes());
+                payload.push(message_data_type_code(data_type));
+                payload.push(message_class_code(class));
+            }
+        }
+        payload.push(reliable_code(ty.reliable));
+        payload.push(ty.priority);
+        payload.extend_from_slice(&(ty.endpoints.len() as u32).to_le_bytes());
+        for ep in ty.endpoints {
+            payload.extend_from_slice(&ep.as_u32().to_le_bytes());
+        }
+    }
+
+    Packet::new(
+        DataType::DiscoverySchema,
+        &[DataEndpoint::Discovery],
+        sender,
+        timestamp_ms,
+        payload.into(),
+    )
+}
+
+/// Decodes a discovery schema packet.
+pub fn decode_discovery_schema(pkt: &Packet) -> TelemetryResult<OwnedRuntimeSchemaSnapshot> {
+    if pkt.data_type() != DataType::DiscoverySchema {
+        return Err(TelemetryError::InvalidType);
+    }
+    decode_discovery_schema_payload(pkt.payload())
+}
+
+/// Decodes a discovery schema payload into runtime definitions.
+pub fn decode_discovery_schema_payload(
+    payload: &[u8],
+) -> TelemetryResult<OwnedRuntimeSchemaSnapshot> {
+    let mut cursor = 0usize;
+    let version = read_u32(payload, &mut cursor, "discovery schema version")?;
+    if version != 1 && version != 2 {
+        return Err(TelemetryError::Deserialize("discovery schema version"));
+    }
+
+    let endpoint_count =
+        read_u32(payload, &mut cursor, "discovery schema endpoint count")? as usize;
+    let mut endpoints = Vec::with_capacity(endpoint_count);
+    for _ in 0..endpoint_count {
+        let id = DataEndpoint(read_u32(
+            payload,
+            &mut cursor,
+            "discovery schema endpoint id",
+        )?);
+        let link_local_only =
+            read_u8(payload, &mut cursor, "discovery schema endpoint flags")? != 0;
+        let name = decode_string(payload, &mut cursor, "discovery schema endpoint name")?;
+        let description = if version >= 2 {
+            decode_string(
+                payload,
+                &mut cursor,
+                "discovery schema endpoint description",
+            )?
+        } else {
+            String::new()
+        };
+        endpoints.push(OwnedEndpointDefinition {
+            id,
+            name,
+            description,
+            link_local_only,
+        });
+    }
+
+    let type_count = read_u32(payload, &mut cursor, "discovery schema type count")? as usize;
+    let mut types = Vec::with_capacity(type_count);
+    for _ in 0..type_count {
+        let id = DataType(read_u32(payload, &mut cursor, "discovery schema type id")?);
+        let name = decode_string(payload, &mut cursor, "discovery schema type name")?;
+        let description = if version >= 2 {
+            decode_string(payload, &mut cursor, "discovery schema type description")?
+        } else {
+            String::new()
+        };
+        let element_kind = read_u8(payload, &mut cursor, "discovery schema element kind")?;
+        let count = read_u32(payload, &mut cursor, "discovery schema element count")? as usize;
+        let data_type = message_data_type_from_code(read_u8(
+            payload,
+            &mut cursor,
+            "discovery schema data type",
+        )?)
+            .ok_or(TelemetryError::Deserialize("discovery schema data type"))?;
+        let class =
+            message_class_from_code(read_u8(payload, &mut cursor, "discovery schema class")?)
+                .ok_or(TelemetryError::Deserialize("discovery schema class"))?;
+        let element = match element_kind {
+            0 => MessageElement::Static(count, data_type, class),
+            1 => MessageElement::Dynamic(data_type, class),
+            _ => return Err(TelemetryError::Deserialize("discovery schema element kind")),
+        };
+        let reliable =
+            reliable_from_code(read_u8(payload, &mut cursor, "discovery schema reliable")?)
+                .ok_or(TelemetryError::Deserialize("discovery schema reliable"))?;
+        let priority = read_u8(payload, &mut cursor, "discovery schema priority")?;
+        let endpoint_count =
+            read_u32(payload, &mut cursor, "discovery schema type endpoint count")? as usize;
+        let mut type_endpoints = Vec::with_capacity(endpoint_count);
+        for _ in 0..endpoint_count {
+            type_endpoints.push(DataEndpoint(read_u32(
+                payload,
+                &mut cursor,
+                "discovery schema type endpoint",
+            )?));
+        }
+        types.push(OwnedDataTypeDefinition {
+            id,
+            name,
+            description,
+            element,
+            endpoints: type_endpoints,
+            reliable,
+            priority,
+        });
+    }
+
+    if cursor != payload.len() {
+        return Err(TelemetryError::Deserialize(
+            "discovery schema trailing bytes",
+        ));
+    }
+    Ok(OwnedRuntimeSchemaSnapshot { endpoints, types })
 }

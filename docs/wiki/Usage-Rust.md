@@ -17,11 +17,39 @@ sedsprintf_rs = { git = "https://github.com/Rylan-Meilutis/sedsprintf_rs.git", b
 ## Minimal router example
 
 ```rust
+use sedsprintf_rs::config::{
+    register_data_type_id_with_description, register_endpoint_id_with_description,
+};
 use sedsprintf_rs::router::{EndpointHandler, Router, RouterConfig};
-use sedsprintf_rs::{DataEndpoint, DataType, TelemetryResult};
+use sedsprintf_rs::{
+    DataEndpoint, DataType, MessageClass, MessageDataType, MessageElement, ReliableMode,
+    TelemetryResult,
+};
 
 fn main() -> TelemetryResult<()> {
-    let handler = EndpointHandler::new_packet_handler(DataEndpoint::SdCard, |pkt| {
+    let sd_card = register_endpoint_id_with_description(
+        DataEndpoint(100),
+        "SD_CARD",
+        "Local storage endpoint",
+        false,
+    )?;
+    let radio = register_endpoint_id_with_description(
+        DataEndpoint(101),
+        "RADIO",
+        "External radio link",
+        false,
+    )?;
+    register_data_type_id_with_description(
+        DataType(100),
+        "GPS_DATA",
+        "Three f32 GPS values",
+        MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+        &[sd_card, radio],
+        ReliableMode::None,
+        80,
+    )?;
+
+    let handler = EndpointHandler::new_packet_handler(DataEndpoint::named("SD_CARD"), |pkt| {
         println!("rx: {pkt}");
         Ok(())
     });
@@ -33,7 +61,7 @@ fn main() -> TelemetryResult<()> {
         Ok(())
     });
 
-    router.log(DataType::GpsData, &[1.0_f32, 2.0, 3.0])?;
+    router.log(DataType::named("GPS_DATA"), &[1.0_f32, 2.0, 3.0])?;
     router.process_all_queues()?;
     Ok(())
 }
@@ -41,6 +69,25 @@ fn main() -> TelemetryResult<()> {
 
 On `std` builds, `Router::new(...)` uses an internal monotonic clock. For tests, simulation, or
 `no_std`, use `Router::new_with_clock(...)`.
+
+## Runtime schema
+
+User endpoints and data types are registered at runtime. There are no generated Rust variants for
+application schema entries in v4.0.0.
+
+Common options:
+
+- call `register_endpoint(...)` / `register_data_type(...)` when the process starts
+- call the `_id` variants when you need stable numeric IDs on the wire
+- load a JSON seed with `register_schema_json_file(...)`, `register_schema_json_path(...)`, or
+  `register_schema_json_bytes(...)`
+- use `DataEndpoint::named("GROUNDSTATION")` and `DataType::named("GPS_DATA")` after registration
+- use `try_named(...)` or `endpoint_definition_by_name(...)` / `data_type_definition_by_name(...)`
+  when missing schema should be handled as a normal error path
+
+Registering an endpoint handler for a missing endpoint auto-creates that endpoint in `std` builds
+and broadcasts the new schema through discovery. Registering a data type or endpoint with the same
+name/ID and a different shape returns an error.
 
 ## Sides and routing
 
@@ -71,7 +118,7 @@ let side_c = router.add_side_serialized("C", tx_c);
 router.set_route(None, side_b, false)?;        // local TX does not go to B
 router.set_route(Some(side_a), side_b, true)?; // allow A -> B
 router.set_route(Some(side_b), side_a, false)?;// block B -> A
-router.set_typed_route(None, DataType::GpsData, side_c, true)?;
+router.set_typed_route(None, DataType::named("GPS_DATA"), side_c, true)?;
 router.set_side_egress_enabled(side_c, false)?; // ingress only
 ```
 

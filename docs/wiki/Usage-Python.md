@@ -21,9 +21,6 @@ maturin develop
 ```python
 import sedsprintf_rs as seds
 
-DT = seds.DataType
-EP = seds.DataEndpoint
-
 
 def tx(bytes_buf):
     pass
@@ -33,16 +30,51 @@ def on_packet(pkt):
     print(pkt)
 
 
+schema = b"""
+{
+  "endpoints": [
+    {"rust": "SdCard", "name": "SD_CARD", "description": "Local storage endpoint"},
+    {"rust": "Radio", "name": "RADIO", "description": "External radio link"}
+  ],
+  "types": [
+    {
+      "rust": "GpsData",
+      "name": "GPS_DATA",
+      "description": "Three f32 GPS values",
+      "priority": 80,
+      "class": "Data",
+      "element": {"kind": "Static", "data_type": "Float32", "count": 3},
+      "endpoints": ["Radio", "SdCard"]
+    }
+  ]
+}
+"""
+seds.register_schema_json_bytes(schema)
+sd_card = seds.endpoint_info_by_name("SD_CARD")["id"]
+gps_data = seds.data_type_info_by_name("GPS_DATA")["id"]
+
 router = seds.Router(
-    handlers=[(int(EP.SD_CARD), on_packet, None)],
+    handlers=[(sd_card, on_packet, None)],
 )
 
 router.add_side_serialized("RADIO", tx, reliable_enabled=True)
-router.log_f32(int(DT.GPS_DATA), [1.0, 2.0, 3.0])
+router.log_f32(gps_data, [1.0, 2.0, 3.0])
 router.process_all_queues()
 ```
 
 If you need a custom monotonic source for tests or simulation, pass `now_ms=...`.
+
+## Runtime schema
+
+Python exposes the same runtime registry as Rust and C:
+
+- `register_endpoint(...)` and `register_data_type(...)` add explicit entries
+- `register_schema_json_file(...)` and `register_schema_json_bytes(...)` seed entries from JSON
+- `endpoint_info_by_name(...)` and `data_type_info_by_name(...)` return IDs and metadata
+- `remove_endpoint_by_name(...)` and `remove_data_type_by_name(...)` remove user entries
+
+The `DataType` and `DataEndpoint` enums only contain built-in control IDs. Application schema IDs
+should be looked up by string name after registration or JSON seeding.
 
 ## Routing model
 
@@ -112,7 +144,8 @@ Useful maintenance calls:
 - `periodic_no_timesync(timeout_ms)` when time sync is enabled but should be skipped for one loop
 
 Router and relay queue-backed state shares one dynamic `MAX_QUEUE_BUDGET`. RX work, TX work,
-recent packet IDs, reliable buffers/replay state, and discovery topology all count against it.
+recent packet IDs, reliable buffers/replay state, discovery topology, and runtime schema registry
+memory all count against it.
 Recent packet ID caches preallocate their final storage and reserve that byte cost immediately.
 Discovery topology eviction emits a warning in `std` builds.
 

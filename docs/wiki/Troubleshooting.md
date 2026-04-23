@@ -1,31 +1,32 @@
 # Troubleshooting
 
-## Header or enums not updating
+## Schema names are missing
 
-- Run a build that triggers
-  build.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/build.rs)) (
-  for example `cargo build` or `./build.py release`).
-- Ensure
-  telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json))
-  is valid JSON.
-- If you override the schema path, set `SEDSPRINTF_RS_SCHEMA_PATH`.
-- If you use a board-local IPC overlay, also check `SEDSPRINTF_RS_IPC_SCHEMA_PATH`.
+- v4.0.0 does not generate application endpoint/type constants at compile time.
+- Register endpoints and data types at startup, seed them from JSON, or wait for discovery sync.
+- For runtime JSON seeding, use `SEDSPRINTF_RS_STATIC_SCHEMA_PATH`,
+  `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH`, or the explicit JSON file/bytes API for your language.
+- Use name lookup helpers such as `DataEndpoint::try_named(...)`,
+  `seds_endpoint_get_info_by_name(...)`, or `endpoint_info_by_name(...)` before logging.
 
 ## Schema mismatch between systems
 
-All nodes must use the exact same
-telemetry_config.json ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/telemetry_config.json))
-order and definitions. Mismatches cause decode errors or
-undefined behavior.
+Nodes synchronize runtime schema through discovery when that feature is enabled. Compatible
+endpoint/type definitions merge as nodes learn from each other. Direct registration of the same
+name or ID with a different shape returns an error.
 
 Symptoms:
 
-- Invalid DataType/DataEndpoint errors.
-- Packets decode into the wrong types.
+- Unknown `DataType` / `DataEndpoint` errors before discovery converges.
+- Registration errors for an existing type with a different size or element shape.
+- Discovery warnings for conflicting schema definitions.
 
 Fix:
 
-- Redeploy the same schema and regenerated bindings everywhere.
+- Prefer stable names and IDs for long-lived schemas.
+- Seed shared required entries from JSON on every node when you need them available immediately.
+- If two nodes define the same type differently, rename one of them or change the payload shape so
+  the definition is identical everywhere.
 
 ## Size mismatch errors
 
@@ -63,8 +64,9 @@ If you see packets bouncing endlessly:
 ## Dropped packets or queue evictions
 
 Queues are bounded by one shared `MAX_QUEUE_BUDGET` per router or relay. RX work, TX work,
-recent packet IDs, reliable buffers/replay state, and discovery topology all draw from that same
-budget. Recent packet ID caches reserve their final storage up front, so a large
+recent packet IDs, reliable buffers/replay state, discovery topology, and runtime schema registry
+memory all draw from that same budget. Recent packet ID caches reserve their final storage up
+front, so a large
 `MAX_RECENT_RX_IDS` leaves less budget for active packet queues. If traffic is bursty:
 
 - Increase `MAX_QUEUE_BUDGET` or `QUEUE_GROW_STEP`.
@@ -90,4 +92,5 @@ If C system tests print warnings like "object file ... built for newer 'macOS' v
 - Ensure you built the extension: `./build.py python` or `maturin develop`. (
   build.py: [source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/build.py))
 - Verify you are using the same Python interpreter/venv used for the build.
-- If the module loads but symbols are missing, rebuild after schema changes.
+- If runtime schema names are missing, seed/register the schema in that process; rebuilding is only
+  needed after Python API changes.

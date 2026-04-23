@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.0.0
+
+- Removed compile-time user schema generation. `build.rs` no longer turns
+  `telemetry_config.json` into Rust `DataType` / `DataEndpoint` variants or generated schema
+  constants. User endpoints and data types are runtime registry entries.
+- Added runtime schema registration and lookup APIs:
+    - Rust: `register_endpoint*`, `register_data_type*`, `endpoint_definition_by_name`,
+      `data_type_definition_by_name`, `DataEndpoint::named(...)`, and `DataType::named(...)`.
+    - C ABI: endpoint/type register, info, info-by-name, JSON registration, and removal functions.
+    - Python: matching register, info, info-by-name, JSON registration, and removal functions.
+- Endpoint and data type definitions now include human-readable `description` metadata. Runtime
+  JSON accepts both `description` and legacy `doc` fields.
+- Handler registration now auto-creates missing runtime endpoints. If an endpoint handler is
+  registered for an unknown endpoint ID, the registry creates a named placeholder and advertises it
+  through schema discovery.
+- Added schema discovery sync. Nodes now advertise the current runtime schema, merge compatible
+  endpoint/type definitions, and resolve conflicts deterministically when IDs or names collide.
+  Type shape conflicts remain rejected by direct registration.
+- Schema registry memory is now part of the same shared router/relay queue budget used for RX/TX
+  queues, reliable state, recent packet IDs, discovery topology, and other queue-backed state.
+- Static JSON config is now runtime seeding only. `SEDSPRINTF_RS_STATIC_SCHEMA_PATH` and
+  `SEDSPRINTF_RS_STATIC_IPC_SCHEMA_PATH` can seed the registry at startup, and explicit path/bytes
+  APIs are available for Rust/C/Python. Default `build.py` builds do not include application JSON.
+- Embedded builds include `telemetry_config.json` bytes only when that file exists, then decode
+  those bytes through the normal runtime JSON parser. Builds remain publishable without a required
+  local JSON file.
+- Runtime removal APIs can remove user endpoints or data types by ID or name. Built-in internal
+  discovery, time-sync, telemetry-error, and reliable-control entries remain protected.
+- Updated Rust tests and benches to use readable runtime names such as
+  `DataEndpoint::named("RADIO")` and `DataType::named("GPS_DATA")` instead of raw legacy IDs.
+- Added regression coverage for schema sync, deterministic conflict resolution, budget accounting,
+  runtime string lookups, description metadata, handler construction from endpoint definitions, and
+  runtime schema removal.
+
 ## 3.12.0
 
 - Queue sizing now uses one shared dynamic `MAX_QUEUE_BUDGET` across router and relay internals
@@ -32,12 +66,12 @@
   belong to which router, and which routers are connected to each other when that topology is
   forwarded across the network.
 - `export_topology()` now exposes:
-  - a top-level `routers` list with per-router endpoints, time-sync source IDs, and connections
-  - per-side announcer detail so applications can see which upstream router advertised each
-    portion of the graph
+    - a top-level `routers` list with per-router endpoints, time-sync source IDs, and connections
+    - per-side announcer detail so applications can see which upstream router advertised each
+      portion of the graph
 - Added client-facing topology export parity:
-  - Python `Router.export_topology()` / `Relay.export_topology()`
-  - C `seds_router_export_topology[_len]` / `seds_relay_export_topology[_len]` JSON exports
+    - Python `Router.export_topology()` / `Relay.export_topology()`
+    - C `seds_router_export_topology[_len]` / `seds_relay_export_topology[_len]` JSON exports
 - Updated discovery, time-sync, Rust, Python, and C/C++ documentation to describe the richer
   topology model and export surfaces.
 

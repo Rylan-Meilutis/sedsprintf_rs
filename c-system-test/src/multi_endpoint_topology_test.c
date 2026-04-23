@@ -7,6 +7,11 @@
 
 #include "sedsprintf.h"
 
+enum {
+    TEST_EP_SD_CARD = 100,
+    TEST_EP_RADIO = 101
+};
+
 typedef struct
 {
     unsigned packet_handler_hits;
@@ -59,11 +64,11 @@ static SedsResult capture_tx(const uint8_t *bytes, size_t len, void *user)
     {
         for (int32_t i = 0; i < got; ++i)
         {
-            if (endpoints[i] == (uint32_t)SEDS_EP_RADIO)
+            if (endpoints[i] == (uint32_t)TEST_EP_RADIO)
             {
                 state->saw_radio_endpoint = 1U;
             }
-            if (endpoints[i] == (uint32_t)SEDS_EP_SD_CARD)
+            if (endpoints[i] == (uint32_t)TEST_EP_SD_CARD)
             {
                 state->saw_sdcard_endpoint = 1U;
             }
@@ -80,13 +85,13 @@ int main(void)
     bool did_queue = false;
     const SedsLocalEndpointDesc locals[] = {
         {
-            .endpoint = SEDS_EP_RADIO,
+            .endpoint = TEST_EP_RADIO,
             .packet_handler = noop_packet_handler,
             .serialized_handler = NULL,
             .user = &state,
         },
         {
-            .endpoint = SEDS_EP_SD_CARD,
+            .endpoint = TEST_EP_SD_CARD,
             .packet_handler = noop_packet_handler,
             .serialized_handler = NULL,
             .user = &state,

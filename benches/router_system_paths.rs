@@ -1,22 +1,24 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use sedsprintf_rs::TelemetryResult;
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
 use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
+use sedsprintf_rs::TelemetryResult;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
-const ENDPOINTS: &[DataEndpoint] = &[DataEndpoint::SdCard, DataEndpoint::Radio];
 
 fn zero_clock() -> Box<dyn Clock + Send + Sync> {
     Box::new(|| 0u64)
 }
 
+fn endpoints() -> [DataEndpoint; 2] {
+    [DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")]
+}
+
 fn next_gps_packet(counter: &AtomicU64) -> Packet {
     let ts = counter.fetch_add(1, Ordering::Relaxed);
     let vals = [ts as f32, ts as f32 + 0.25, ts as f32 + 0.5];
-    Packet::from_f32_slice(DataType::GpsData, &vals, ENDPOINTS, ts).unwrap()
+    Packet::from_f32_slice(DataType::named("GPS_DATA"), &vals, &endpoints(), ts).unwrap()
 }
 
 fn benchmark_router_system_paths(c: &mut Criterion) {
@@ -28,11 +30,16 @@ fn benchmark_router_system_paths(c: &mut Criterion) {
     let sink = {
         let delivered = delivered.clone();
         let handlers = vec![
-            EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |_pkt: &Packet| {
-                delivered.fetch_add(1, Ordering::Relaxed);
+            EndpointHandler::new_packet_handler(
+                DataEndpoint::named("RADIO"),
+                move |_pkt: &Packet| {
+                    delivered.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+            ),
+            EndpointHandler::new_packet_handler(DataEndpoint::named("SD_CARD"), |_pkt: &Packet| {
                 Ok(())
             }),
-            EndpointHandler::new_packet_handler(DataEndpoint::SdCard, |_pkt: &Packet| Ok(())),
         ];
         Router::new_with_clock(RouterConfig::new(handlers), zero_clock())
     };

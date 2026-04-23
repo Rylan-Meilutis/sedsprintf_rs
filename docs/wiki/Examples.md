@@ -45,7 +45,7 @@ What it demonstrates:
 
 - Installing the Python package.
 - Logging packets and decoding values.
-- Using the generated enums.
+- Looking up runtime schema names and using the returned IDs.
 - Type-specific routing to two dedicated command links without weighted or failover path selection.
 - Time sync announce/request/response and offset math.
 

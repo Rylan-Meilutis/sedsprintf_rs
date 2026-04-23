@@ -25,14 +25,11 @@
 //! - [`packet`]: `Packet` and friends.
 //! - [`serialize`]: wire serialization helpers.
 //!
-//! Version 3.3.0 highlights:
-//! - Optional built-in discovery control traffic for routers and relays, with learned reachability,
-//!   adaptive discovery cadence, and topology export.
-//! - Selective forwarding informed by discovered routes, with flood fallback when topology is incomplete.
-//! - Link-local/software-bus endpoint support for IPC, including per-side discovery filtering and routing isolation.
-//! - Board-local IPC schema overlays via `SEDSPRINTF_RS_IPC_SCHEMA_PATH` so shared schemas can remain constant across
-//!   boards while local IPC endpoints/types vary.
-//! - Split-file telemetry schema editing in the GUI editor for shared base schemas and per-board IPC overlays.
+//! Version 4.0.0 highlights:
+//! - Telemetry endpoints and data types are runtime IDs with process-local registry metadata.
+//! - The build no longer reads `telemetry_config.json` or generates schema-specific Rust enums.
+//! - A JSON schema can still seed the runtime registry with `SEDSPRINTF_RS_STATIC_SCHEMA_PATH`.
+//! - Nodes can export known endpoints/types and register new ones over time.
 
 extern crate alloc;
 extern crate core;
@@ -42,8 +39,8 @@ extern crate std;
 use std::io::Error;
 
 use crate::config::{
-    get_endpoint_meta, get_message_meta, DataEndpoint, DataType, STATIC_HEX_LENGTH,
-    STATIC_STRING_LENGTH,
+    get_endpoint_meta, get_message_meta, max_data_type_id, max_endpoint_id, DataEndpoint,
+    DataType, STATIC_HEX_LENGTH, STATIC_STRING_LENGTH,
 };
 use crate::macros::{ReprI32Enum, ReprU32Enum};
 use alloc::string::ToString;
@@ -51,7 +48,6 @@ use alloc::sync::Arc;
 use core::fmt::Formatter;
 use core::mem::size_of;
 use core::ops::Mul;
-use strum::EnumCount;
 
 // ============================================================================
 //  Test / Python FFI modules (std-only)
@@ -186,19 +182,41 @@ pub mod timesync;
 // ============================================================================
 
 /// Maximum enum value for `DataEndpoint` (inclusive), derived from the schema.
-pub const MAX_VALUE_DATA_ENDPOINT: u32 = (DataEndpoint::COUNT - 1) as u32;
+pub const MAX_VALUE_DATA_ENDPOINT: u32 = 255;
 
 /// Maximum enum value for `DataType` (inclusive), derived from the schema.
-pub const MAX_VALUE_DATA_TYPE: u32 = (DataType::COUNT - 1) as u32;
+pub const MAX_VALUE_DATA_TYPE: u32 = 4095;
 
 /// Maximum enum value for `RouteSelectionMode` (inclusive).
 pub const MAX_VALUE_ROUTE_SELECTION_MODE: i32 = 2;
 
-/// Implement `ReprU32Enum` helpers for `DataType`.
-impl_repr_u32_enum!(DataType, MAX_VALUE_DATA_TYPE);
+impl crate::macros::ReprU32Enum for DataType {
+    const MAX: u32 = MAX_VALUE_DATA_TYPE;
 
-/// Implement `ReprU32Enum` helpers for `DataEndpoint`.
-impl_repr_u32_enum!(DataEndpoint, MAX_VALUE_DATA_ENDPOINT);
+    #[inline]
+    fn from_u32(x: u32) -> Option<Self> {
+        DataType::try_from_u32(x)
+    }
+}
+
+impl crate::macros::ReprU32Enum for DataEndpoint {
+    const MAX: u32 = MAX_VALUE_DATA_ENDPOINT;
+
+    #[inline]
+    fn from_u32(x: u32) -> Option<Self> {
+        DataEndpoint::try_from_u32(x)
+    }
+}
+
+#[inline]
+pub fn current_max_endpoint_id() -> u32 {
+    max_endpoint_id()
+}
+
+#[inline]
+pub fn current_max_data_type_id() -> u32 {
+    max_data_type_id()
+}
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -345,9 +363,12 @@ pub const fn parse_u128(s: &str) -> u128 {
 // ============================================================================
 //  Message metadata (element counts, data types, sizes)
 // ============================================================================
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct EndpointMeta {
     /// Static name of the endpoint
     name: &'static str,
+    /// Human-readable description used by schema lookup APIs.
+    description: &'static str,
     /// Restrict remote forwarding to link-local/software-bus sides only.
     link_local_only: bool,
 }
@@ -360,6 +381,12 @@ impl EndpointMeta {
     /// external tooling.
     pub fn as_str(&self) -> &'static str {
         self.name
+    }
+
+    /// Return the human-readable endpoint description.
+    #[inline]
+    pub fn description(&self) -> &'static str {
+        self.description
     }
 
     /// Return whether this endpoint is restricted to link-local/software-bus sides.
@@ -377,6 +404,11 @@ impl DataEndpoint {
     /// external tooling.
     pub fn as_str(&self) -> &'static str {
         get_endpoint_meta(*self).name
+    }
+
+    /// Return the human-readable endpoint description.
+    pub fn description(&self) -> &'static str {
+        get_endpoint_meta(*self).description
     }
 
     /// Return whether this endpoint is restricted to link-local/software-bus sides.
@@ -434,6 +466,8 @@ pub enum ReliableMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct MessageMeta {
     name: &'static str,
+    /// Human-readable description used by schema lookup APIs.
+    description: &'static str,
     /// How many elements are present (fixed vs dynamic).
     element: MessageElement,
     /// Allowed endpoints for this message type.
@@ -446,8 +480,13 @@ pub struct MessageMeta {
 
 impl DataType {
     /// Get the string representation of the DataType
-    pub const fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         get_message_meta(*self).name
+    }
+
+    /// Return the human-readable data type description.
+    pub fn description(&self) -> &'static str {
+        get_message_meta(*self).description
     }
 }
 /// Lookup `MessageMeta` for a given [`DataType`] using the generated config.
@@ -462,19 +501,19 @@ pub fn message_meta(ty: DataType) -> MessageMeta {
 
 /// Return whether the given [`DataType`] is configured for reliable delivery.
 #[inline]
-pub const fn is_reliable_type(ty: DataType) -> bool {
+pub fn is_reliable_type(ty: DataType) -> bool {
     !matches!(get_message_meta(ty).reliable, ReliableMode::None)
 }
 
 /// Return the reliable delivery mode for the given [`DataType`].
 #[inline]
-pub const fn reliable_mode(ty: DataType) -> ReliableMode {
+pub fn reliable_mode(ty: DataType) -> ReliableMode {
     get_message_meta(ty).reliable
 }
 
 /// Return the queue priority for the given [`DataType`].
 #[inline]
-pub const fn message_priority(ty: DataType) -> u8 {
+pub fn message_priority(ty: DataType) -> u8 {
     get_message_meta(ty).priority
 }
 
@@ -532,7 +571,7 @@ pub fn get_needed_message_size(ty: DataType) -> usize {
 /// # Returns
 /// - `MessageType` enum value.
 #[inline]
-pub const fn get_info_type(ty: DataType) -> MessageClass {
+pub fn get_info_type(ty: DataType) -> MessageClass {
     get_message_meta(ty).element.message_type()
 }
 
@@ -543,7 +582,7 @@ pub const fn get_info_type(ty: DataType) -> MessageClass {
 /// # Returns
 /// - `MessageDataType` enum value.
 #[inline]
-pub const fn get_data_type(ty: DataType) -> MessageDataType {
+pub fn get_data_type(ty: DataType) -> MessageDataType {
     get_message_meta(ty).element.data_type()
 }
 
@@ -553,7 +592,7 @@ pub const fn get_data_type(ty: DataType) -> MessageDataType {
 /// # Returns
 /// - Static string name of the message type.
 #[inline]
-pub const fn get_message_name(ty: DataType) -> &'static str {
+pub fn get_message_name(ty: DataType) -> &'static str {
     get_message_meta(ty).name
 }
 
@@ -563,7 +602,7 @@ pub const fn get_message_name(ty: DataType) -> &'static str {
 /// # Returns
 /// - Slice of allowed `DataEndpoint` values.
 #[inline]
-pub const fn endpoints_from_datatype(ty: DataType) -> &'static [DataEndpoint] {
+pub fn endpoints_from_datatype(ty: DataType) -> &'static [DataEndpoint] {
     get_message_meta(ty).endpoints
 }
 
@@ -849,10 +888,7 @@ pub fn try_enum_from_u32<E: ReprU32Enum>(x: u32) -> Option<E> {
     if x > E::MAX {
         return None;
     }
-
-    // SAFETY: `E` is promised to be a fieldless #[repr(u32)] enum (thus 4 bytes, Copy).
-    let e = unsafe { (&x as *const u32 as *const E).read() };
-    Some(e)
+    E::from_u32(x)
 }
 
 /// Try to convert an `i32` into a `#[repr(i32)]` enum `E`.

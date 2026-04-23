@@ -3,6 +3,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+    TEST_DT_GPS_DATA = 100,
+    TEST_DT_IMU_DATA = 101,
+    TEST_DT_BATTERY_STATUS = 102,
+    TEST_DT_BAROMETER_DATA = 104,
+    TEST_DT_MESSAGE_DATA = 105,
+    TEST_DT_HEARTBEAT = 106,
+    TEST_EP_SD_CARD = 100,
+    TEST_EP_RADIO = 101
+};
+
 #ifdef __cplusplus
 extern "C" {
 

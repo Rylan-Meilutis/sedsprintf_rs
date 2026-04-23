@@ -365,6 +365,7 @@ impl RelayInner {
             .saturating_add(self.replay_queue.bytes_used())
             .saturating_add(self.recent_rx.max_bytes())
             .saturating_add(self.reliable_rx_buffered_bytes())
+            .saturating_add(crate::config::schema_bytes_used())
             .saturating_add({
                 #[cfg(feature = "discovery")]
                 {
@@ -787,11 +788,11 @@ impl Relay {
         if st
             .typed_route_overrides
             .keys()
-            .any(|(typed_src, typed_ty, _)| *typed_src == src && *typed_ty == ty as u32)
+            .any(|(typed_src, typed_ty, _)| *typed_src == src && *typed_ty == ty.as_u32())
         {
             return st
                 .typed_route_overrides
-                .get(&(src, ty as u32, dst))
+                .get(&(src, ty.as_u32(), dst))
                 .copied()
                 .unwrap_or(false);
         }
@@ -1050,7 +1051,7 @@ impl Relay {
 
     #[inline]
     fn reliable_key(side: RelaySideId, ty: crate::DataType) -> (RelaySideId, u32) {
-        (side, ty as u32)
+        (side, ty.as_u32())
     }
 
     fn reliable_tx_state_mut<'a>(
@@ -1121,7 +1122,7 @@ impl Relay {
             message_meta(control_ty).endpoints,
             "RELAY",
             self.clock.now_ms(),
-            crate::router::encode_slice_le(&[ty as u32, seq]),
+            crate::router::encode_slice_le(&[ty.as_u32(), seq]),
         )
     }
 
@@ -1449,11 +1450,11 @@ impl Relay {
                 }
                 if restrict_link_local
                     && st
-                        .sides
-                        .get(side)
-                        .and_then(|side| side.as_ref())
-                        .map(|s| !s.opts.link_local_enabled)
-                        .unwrap_or(true)
+                    .sides
+                    .get(side)
+                    .and_then(|side| side.as_ref())
+                    .map(|s| !s.opts.link_local_enabled)
+                    .unwrap_or(true)
                 {
                     continue;
                 }
@@ -1898,6 +1899,15 @@ impl Relay {
         };
         let mut st = self.state.lock();
         for (dst, endpoints, timesync_sources, topology) in per_side {
+            let pkt = discovery::build_discovery_schema("RELAY", now_ms)?;
+            let data = RelayItem::Packet(Arc::new(pkt));
+            let priority = Self::relay_item_priority(&data)?;
+            st.push_tx(RelayTxItem {
+                src: None,
+                dst,
+                data,
+                priority,
+            })?;
             if !endpoints.is_empty() {
                 let pkt =
                     discovery::build_discovery_announce("RELAY", now_ms, endpoints.as_slice())?;
@@ -1963,23 +1973,8 @@ impl Relay {
                 ) {
                     return false;
                 }
-                !self
-                    .advertised_discovery_endpoints_for_link_locked(
-                        &st,
-                        now_ms,
-                        side.opts.link_local_enabled,
-                    )
-                    .is_empty()
-                    || !self
-                        .advertised_discovery_timesync_sources_for_link_locked(&st, now_ms)
-                        .is_empty()
-                    || !self
-                        .advertised_discovery_topology_for_link_locked(
-                            &st,
-                            now_ms,
-                            side.opts.link_local_enabled,
-                        )
-                        .is_empty()
+                let _ = side;
+                true
             });
             if !st.sides.iter().any(|side| side.is_some()) || !has_any {
                 return Ok(false);
@@ -2012,6 +2007,21 @@ impl Relay {
         };
 
         let now_ms = self.clock.now_ms();
+        if pkt.data_type() == crate::DataType::DiscoverySchema {
+            let snapshot = discovery::decode_discovery_schema(&pkt)?;
+            let incoming_cost = crate::config::owned_schema_byte_cost(&snapshot);
+            let mut st = self.state.lock();
+            st.make_shared_queue_room(incoming_cost, RelayQueueKind::Discovery)?;
+            drop(st);
+            let report =
+                crate::config::merge_owned_schema_snapshot_with_budget(snapshot, MAX_QUEUE_BUDGET)?;
+            if report.changed() {
+                let mut st = self.state.lock();
+                st.fit_discovery_budget();
+                Self::note_discovery_topology_change_locked(&mut st, now_ms);
+            }
+            return Ok(());
+        }
         let mut st = self.state.lock();
         let mut route = st.discovery_routes.get(&src).cloned().unwrap_or_default();
         let side_link_local_enabled = st
@@ -2059,6 +2069,7 @@ impl Relay {
                 Self::refresh_sender_topology_state(&mut sender_state);
                 changed
             }
+            crate::DataType::DiscoverySchema => false,
             _ => false,
         };
         sender_state.last_seen_ms = now_ms;
@@ -2493,7 +2504,7 @@ impl Relay {
             let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
         }
         st.typed_route_overrides
-            .insert((src, ty as u32, dst), enabled);
+            .insert((src, ty.as_u32(), dst), enabled);
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
@@ -2512,7 +2523,7 @@ impl Relay {
         if let Some(src) = src {
             let _ = Self::side_ref(&st, src).map_err(|_| TelemetryError::BadArg)?;
         }
-        st.typed_route_overrides.remove(&(src, ty as u32, dst));
+        st.typed_route_overrides.remove(&(src, ty.as_u32(), dst));
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, now_ms);
         Ok(())
@@ -2701,10 +2712,10 @@ impl Relay {
                     matches!(side_ref.tx_handler, RelayTxHandlerFn::Serialized(_)),
                     opts.reliable_enabled
                         && !self.side_has_multiple_announcers_locked(
-                            &st,
-                            item.src,
-                            self.clock.now_ms(),
-                        ),
+                        &st,
+                        item.src,
+                        self.clock.now_ms(),
+                    ),
                 )
             };
 
@@ -2861,7 +2872,7 @@ impl Relay {
                     {
                         if let Ok(packet_id) = Self::decode_end_to_end_reliable_ack(pkt.payload())
                             && let Some(sender_hash) =
-                                Self::decode_end_to_end_ack_sender_hash(pkt.sender())
+                            Self::decode_end_to_end_ack_sender_hash(pkt.sender())
                         {
                             let mut st = self.state.lock();
                             Self::note_end_to_end_acked_destination_locked(

@@ -14,7 +14,15 @@
 #[cfg(feature = "timesync")]
 use crate::timesync::{NetworkTimeReading, PartialNetworkTime, TimeSyncConfig};
 use crate::{
-    config::DataEndpoint, do_vec_log_typed, get_needed_message_size, message_meta, packet::Packet,
+    config::{
+        data_type_definition, data_type_definition_by_name, data_type_exists, endpoint_definition,
+        endpoint_definition_by_name, endpoint_exists, message_class_code, message_class_from_code,
+        message_data_type_code, message_data_type_from_code, register_data_type_id,
+        register_data_type_id_with_description, register_endpoint_id, register_endpoint_id_with_description,
+        register_schema_json_bytes, reliable_code, reliable_from_code,
+        remove_data_type, remove_data_type_by_name, remove_endpoint, remove_endpoint_by_name,
+        DataEndpoint,
+    }, do_vec_log_typed, get_needed_message_size, message_meta, packet::Packet,
     router::{endpoint_is_router_internal, Clock, LeBytes, RouterSideOptions},
     router::{EndpointHandler, Router, RouterConfig},
     serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet}, DataType, MessageElement,
@@ -51,7 +59,7 @@ enum SedsResult {
 #[repr(C)]
 pub struct SedsOwnedPacket {
     inner: Packet,
-    // cache endpoints as u32 so the view can point at stable memory
+    // cache endpoints.as_u32() so the view can point at stable memory
     endpoints_u32: Vec<u32>,
 }
 
@@ -61,7 +69,7 @@ pub struct SedsOwnedPacket {
 pub struct SedsOwnedHeader {
     ty: u32,
     sender: Arc<str>,        // own the sender so view can borrow it
-    endpoints_u32: Vec<u32>, // own endpoints as u32 for stable pointers
+    endpoints_u32: Vec<u32>, // own endpoints.as_u32() for stable pointers
     timestamp: u64,
 }
 
@@ -177,12 +185,6 @@ fn dtype_from_u32(x: u32) -> TelemetryResult<DataType> {
     DataType::try_from_u32(x).ok_or(TelemetryError::InvalidType)
 }
 
-/// Convert a C-side `u32` endpoint into a Rust `DataEndpoint`.
-#[inline]
-fn endpoint_from_u32(x: u32) -> TelemetryResult<DataEndpoint> {
-    DataEndpoint::try_from_u32(x).ok_or(TelemetryError::Deserialize("bad endpoint"))
-}
-
 #[inline]
 fn route_selection_mode_from_i32(x: i32) -> TelemetryResult<RouteSelectionMode> {
     match x {
@@ -217,6 +219,36 @@ pub struct SedsPacketView {
     payload_len: usize,
 }
 
+#[repr(C)]
+pub struct SedsEndpointInfo {
+    exists: bool,
+    id: u32,
+    link_local_only: bool,
+    name: *const c_char,
+    name_len: usize,
+    description: *const c_char,
+    description_len: usize,
+}
+
+#[repr(C)]
+pub struct SedsDataTypeInfo {
+    exists: bool,
+    id: u32,
+    is_static: bool,
+    element_count: usize,
+    message_data_type: u8,
+    message_class: u8,
+    reliable: u8,
+    priority: u8,
+    fixed_size: usize,
+    endpoints: *const u32,
+    num_endpoints: usize,
+    name: *const c_char,
+    name_len: usize,
+    description: *const c_char,
+    description_len: usize,
+}
+
 /// Transmit callback signature used from C (legacy).
 type CTransmit = Option<extern "C" fn(bytes: *const u8, len: usize, user: *mut c_void) -> i32>;
 
@@ -225,12 +257,12 @@ type CEndpointHandler = Option<extern "C" fn(pkt: *const SedsPacketView, user: *
 
 /// Endpoint handler callback (serialized bytes) (legacy).
 type CSerializedHandler =
-    Option<extern "C" fn(bytes: *const u8, len: usize, user: *mut c_void) -> i32>;
+Option<extern "C" fn(bytes: *const u8, len: usize, user: *mut c_void) -> i32>;
 
 /// C-facing endpoint descriptor (legacy, must match C header).
 #[repr(C)]
 pub struct SedsLocalEndpointDesc {
-    endpoint: u32,                          // DataEndpoint as u32
+    endpoint: u32,                          // DataEndpoint.as_u32()
     packet_handler: CEndpointHandler,       // optional
     serialized_handler: CSerializedHandler, // optional
     user: *mut c_void,
@@ -362,7 +394,7 @@ fn topology_snapshot_to_json(snap: &crate::discovery::TopologySnapshot) -> Strin
             &board
                 .reachable_endpoints
                 .iter()
-                .map(|ep| *ep as u32)
+                .map(|ep| ep.as_u32())
                 .collect::<Vec<u32>>(),
         );
         out.push_str(",\"reachable_timesync_sources\":");
@@ -380,7 +412,7 @@ fn topology_snapshot_to_json(snap: &crate::discovery::TopologySnapshot) -> Strin
         &snap
             .advertised_endpoints
             .iter()
-            .map(|ep| *ep as u32)
+            .map(|ep| ep.as_u32())
             .collect::<Vec<u32>>(),
     );
     out.push_str(",\"advertised_timesync_sources\":");
@@ -409,7 +441,7 @@ fn topology_snapshot_to_json(snap: &crate::discovery::TopologySnapshot) -> Strin
             &route
                 .reachable_endpoints
                 .iter()
-                .map(|ep| *ep as u32)
+                .map(|ep| ep.as_u32())
                 .collect::<Vec<u32>>(),
         );
         out.push_str(",\"reachable_timesync_sources\":");
@@ -428,7 +460,7 @@ fn topology_snapshot_to_json(snap: &crate::discovery::TopologySnapshot) -> Strin
                 &announcer
                     .reachable_endpoints
                     .iter()
-                    .map(|ep| *ep as u32)
+                    .map(|ep| ep.as_u32())
                     .collect::<Vec<u32>>(),
             );
             out.push_str(",\"reachable_timesync_sources\":");
@@ -613,10 +645,7 @@ pub extern "C" fn seds_router_new(
         v.reserve(n_handlers.saturating_mul(2));
         let slice = unsafe { slice::from_raw_parts(handlers, n_handlers) };
         for desc in slice {
-            let endpoint = match endpoint_from_u32(desc.endpoint) {
-                Ok(e) => e,
-                Err(_) => return ptr::null_mut(),
-            };
+            let endpoint = DataEndpoint(desc.endpoint);
             if endpoint_is_router_internal(endpoint) {
                 return ptr::null_mut();
             }
@@ -636,13 +665,13 @@ pub extern "C" fn seds_router_new(
                         Option<Vec<u32>>,
                     ) = if pkt.endpoints().len() <= STACK_EPS {
                         for (i, e) in pkt.endpoints().iter().enumerate() {
-                            stack_eps[i] = *e as u32;
+                            stack_eps[i] = e.as_u32();
                         }
                         (stack_eps.as_ptr(), pkt.endpoints().len(), None)
                     } else {
                         let mut eps_u32 = Vec::with_capacity(pkt.endpoints().len());
                         for e in pkt.endpoints().iter() {
-                            eps_u32.push(*e as u32);
+                            eps_u32.push(e.as_u32());
                         }
                         let ptr = eps_u32.as_ptr();
                         let len = eps_u32.len();
@@ -651,7 +680,7 @@ pub extern "C" fn seds_router_new(
 
                     let sender_bytes = pkt.sender().as_bytes();
                     let view = SedsPacketView {
-                        ty: pkt.data_type() as u32,
+                        ty: pkt.data_type().as_u32(),
                         data_size: pkt.data_size(),
                         sender: sender_bytes.as_ptr() as *const c_char,
                         sender_len: sender_bytes.len(),
@@ -1141,13 +1170,13 @@ pub extern "C" fn seds_router_add_side_packet(
         let (endpoints_ptr, num_endpoints, _owned_vec): (*const u32, usize, Option<Vec<u32>>) =
             if pkt.endpoints().len() <= STACK_EPS {
                 for (i, e) in pkt.endpoints().iter().enumerate() {
-                    stack_eps[i] = *e as u32;
+                    stack_eps[i] = e.as_u32();
                 }
                 (stack_eps.as_ptr(), pkt.endpoints().len(), None)
             } else {
                 let mut eps_u32 = Vec::with_capacity(pkt.endpoints().len());
                 for e in pkt.endpoints().iter() {
-                    eps_u32.push(*e as u32);
+                    eps_u32.push(e.as_u32());
                 }
                 let ptr = eps_u32.as_ptr();
                 let len = eps_u32.len();
@@ -1156,7 +1185,7 @@ pub extern "C" fn seds_router_add_side_packet(
 
         let sender_bytes = pkt.sender().as_bytes();
         let view = SedsPacketView {
-            ty: pkt.data_type() as u32,
+            ty: pkt.data_type().as_u32(),
             data_size: pkt.data_size(),
             sender: sender_bytes.as_ptr() as *const c_char,
             sender_len: sender_bytes.len(),
@@ -1432,6 +1461,463 @@ pub extern "C" fn seds_dtype_expected_size(ty_u32: u32) -> i32 {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_exists(endpoint: u32) -> bool {
+    endpoint_exists(DataEndpoint(endpoint))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_dtype_exists(ty: u32) -> bool {
+    data_type_exists(DataType(ty))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_register(
+    endpoint: u32,
+    name: *const c_char,
+    name_len: usize,
+    link_local_only: bool,
+) -> i32 {
+    if name.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("endpoint name"));
+    };
+    ok_or_status(register_endpoint_id(DataEndpoint(endpoint), name, link_local_only).map(|_| ()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_register_ex(
+    endpoint: u32,
+    name: *const c_char,
+    name_len: usize,
+    description: *const c_char,
+    description_len: usize,
+    link_local_only: bool,
+) -> i32 {
+    if name.is_null() || (description.is_null() && description_len != 0) {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let name_bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(name_bytes) else {
+        return status_from_err(TelemetryError::Deserialize("endpoint name"));
+    };
+    let description = if description_len == 0 {
+        ""
+    } else {
+        let bytes =
+            unsafe { slice::from_raw_parts(c_char_ptr_as_u8(description), description_len) };
+        let Ok(description) = from_utf8(bytes) else {
+            return status_from_err(TelemetryError::Deserialize("endpoint description"));
+        };
+        description
+    };
+    ok_or_status(
+        register_endpoint_id_with_description(
+            DataEndpoint(endpoint),
+            name,
+            description,
+            link_local_only,
+        )
+            .map(|_| ()),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_dtype_register(
+    ty: u32,
+    name: *const c_char,
+    name_len: usize,
+    is_static: bool,
+    element_count: usize,
+    message_data_type: u8,
+    message_class: u8,
+    reliable: u8,
+    priority: u8,
+    endpoints: *const u32,
+    num_endpoints: usize,
+) -> i32 {
+    if name.is_null() || (num_endpoints > 0 && endpoints.is_null()) {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("data type name"));
+    };
+    let Some(data_type) = message_data_type_from_code(message_data_type) else {
+        return status_from_err(TelemetryError::BadArg);
+    };
+    let Some(class) = message_class_from_code(message_class) else {
+        return status_from_err(TelemetryError::BadArg);
+    };
+    let Some(reliable) = reliable_from_code(reliable) else {
+        return status_from_err(TelemetryError::BadArg);
+    };
+    let element = if is_static {
+        MessageElement::Static(element_count, data_type, class)
+    } else {
+        MessageElement::Dynamic(data_type, class)
+    };
+    let endpoint_ids = if num_endpoints == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(endpoints, num_endpoints) }
+    };
+    let eps: Vec<DataEndpoint> = endpoint_ids.iter().copied().map(DataEndpoint).collect();
+    ok_or_status(
+        register_data_type_id(DataType(ty), name, element, &eps, reliable, priority).map(|_| ()),
+    )
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn seds_dtype_register_ex(
+    ty: u32,
+    name: *const c_char,
+    name_len: usize,
+    description: *const c_char,
+    description_len: usize,
+    is_static: bool,
+    element_count: usize,
+    message_data_type: u8,
+    message_class: u8,
+    reliable: u8,
+    priority: u8,
+    endpoints: *const u32,
+    num_endpoints: usize,
+) -> i32 {
+    if name.is_null()
+        || (description.is_null() && description_len != 0)
+        || (num_endpoints > 0 && endpoints.is_null())
+    {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let name_bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(name_bytes) else {
+        return status_from_err(TelemetryError::Deserialize("data type name"));
+    };
+    let description = if description_len == 0 {
+        ""
+    } else {
+        let bytes =
+            unsafe { slice::from_raw_parts(c_char_ptr_as_u8(description), description_len) };
+        let Ok(description) = from_utf8(bytes) else {
+            return status_from_err(TelemetryError::Deserialize("data type description"));
+        };
+        description
+    };
+    let Some(data_type) = message_data_type_from_code(message_data_type) else {
+        return status_from_err(TelemetryError::BadArg);
+    };
+    let Some(class) = message_class_from_code(message_class) else {
+        return status_from_err(TelemetryError::BadArg);
+    };
+    let Some(reliable) = reliable_from_code(reliable) else {
+        return status_from_err(TelemetryError::BadArg);
+    };
+    let element = if is_static {
+        MessageElement::Static(element_count, data_type, class)
+    } else {
+        MessageElement::Dynamic(data_type, class)
+    };
+    let endpoint_ids = if num_endpoints == 0 {
+        &[][..]
+    } else {
+        unsafe { slice::from_raw_parts(endpoints, num_endpoints) }
+    };
+    let eps: Vec<DataEndpoint> = endpoint_ids.iter().copied().map(DataEndpoint).collect();
+    ok_or_status(
+        register_data_type_id_with_description(
+            DataType(ty),
+            name,
+            description,
+            element,
+            &eps,
+            reliable,
+            priority,
+        )
+            .map(|_| ()),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_schema_register_json_bytes(json: *const u8, json_len: usize) -> i32 {
+    if json.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(json, json_len) };
+    ok_or_status(register_schema_json_bytes(bytes))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_schema_register_json_file(path: *const c_char, path_len: usize) -> i32 {
+    if path.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(path), path_len) };
+    let Ok(path) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("schema json path"));
+    };
+    #[cfg(feature = "std")]
+    {
+        ok_or_status(crate::config::register_schema_json_path(path))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = path;
+        status_from_err(TelemetryError::BadArg)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_get_info(endpoint: u32, out: *mut SedsEndpointInfo) -> i32 {
+    if out.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let Some(def) = endpoint_definition(DataEndpoint(endpoint)) else {
+        unsafe {
+            *out = SedsEndpointInfo {
+                exists: false,
+                id: endpoint,
+                link_local_only: false,
+                name: ptr::null(),
+                name_len: 0,
+                description: ptr::null(),
+                description_len: 0,
+            };
+        }
+        return status_from_result_code(SedsResult::SedsOk);
+    };
+    unsafe {
+        *out = SedsEndpointInfo {
+            exists: true,
+            id: def.id.as_u32(),
+            link_local_only: def.link_local_only,
+            name: def.name.as_ptr() as *const c_char,
+            name_len: def.name.len(),
+            description: def.description.as_ptr() as *const c_char,
+            description_len: def.description.len(),
+        };
+    }
+    status_from_result_code(SedsResult::SedsOk)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_get_info_by_name(
+    name: *const c_char,
+    name_len: usize,
+    out: *mut SedsEndpointInfo,
+) -> i32 {
+    if name.is_null() || out.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("endpoint name"));
+    };
+    let Some(def) = endpoint_definition_by_name(name) else {
+        unsafe {
+            *out = SedsEndpointInfo {
+                exists: false,
+                id: 0,
+                link_local_only: false,
+                name: ptr::null(),
+                name_len: 0,
+                description: ptr::null(),
+                description_len: 0,
+            };
+        }
+        return status_from_result_code(SedsResult::SedsOk);
+    };
+    unsafe {
+        *out = SedsEndpointInfo {
+            exists: true,
+            id: def.id.as_u32(),
+            link_local_only: def.link_local_only,
+            name: def.name.as_ptr() as *const c_char,
+            name_len: def.name.len(),
+            description: def.description.as_ptr() as *const c_char,
+            description_len: def.description.len(),
+        };
+    }
+    status_from_result_code(SedsResult::SedsOk)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_dtype_get_info(
+    ty: u32,
+    endpoints_out: *mut u32,
+    endpoints_cap: usize,
+    out: *mut SedsDataTypeInfo,
+) -> i32 {
+    if out.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let Some(def) = data_type_definition(DataType(ty)) else {
+        unsafe {
+            *out = SedsDataTypeInfo {
+                exists: false,
+                id: ty,
+                is_static: false,
+                element_count: 0,
+                message_data_type: 0,
+                message_class: 0,
+                reliable: 0,
+                priority: 0,
+                fixed_size: 0,
+                endpoints: ptr::null(),
+                num_endpoints: 0,
+                name: ptr::null(),
+                name_len: 0,
+                description: ptr::null(),
+                description_len: 0,
+            };
+        }
+        return status_from_result_code(SedsResult::SedsOk);
+    };
+    if def.endpoints.len() > endpoints_cap || (!def.endpoints.is_empty() && endpoints_out.is_null())
+    {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    for (idx, ep) in def.endpoints.iter().enumerate() {
+        unsafe {
+            *endpoints_out.add(idx) = ep.as_u32();
+        }
+    }
+    let (is_static, count, data_type, class) = match def.element {
+        MessageElement::Static(count, data_type, class) => (true, count, data_type, class),
+        MessageElement::Dynamic(data_type, class) => (false, 0, data_type, class),
+    };
+    unsafe {
+        *out = SedsDataTypeInfo {
+            exists: true,
+            id: def.id.as_u32(),
+            is_static,
+            element_count: count,
+            message_data_type: message_data_type_code(data_type),
+            message_class: message_class_code(class),
+            reliable: reliable_code(def.reliable),
+            priority: def.priority,
+            fixed_size: fixed_payload_size_if_static(def.id).unwrap_or(0),
+            endpoints: endpoints_out,
+            num_endpoints: def.endpoints.len(),
+            name: def.name.as_ptr() as *const c_char,
+            name_len: def.name.len(),
+            description: def.description.as_ptr() as *const c_char,
+            description_len: def.description.len(),
+        };
+    }
+    status_from_result_code(SedsResult::SedsOk)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_dtype_get_info_by_name(
+    name: *const c_char,
+    name_len: usize,
+    endpoints_out: *mut u32,
+    endpoints_cap: usize,
+    out: *mut SedsDataTypeInfo,
+) -> i32 {
+    if name.is_null() || out.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("data type name"));
+    };
+    let Some(def) = data_type_definition_by_name(name) else {
+        unsafe {
+            *out = SedsDataTypeInfo {
+                exists: false,
+                id: 0,
+                is_static: false,
+                element_count: 0,
+                message_data_type: 0,
+                message_class: 0,
+                reliable: 0,
+                priority: 0,
+                fixed_size: 0,
+                endpoints: ptr::null(),
+                num_endpoints: 0,
+                name: ptr::null(),
+                name_len: 0,
+                description: ptr::null(),
+                description_len: 0,
+            };
+        }
+        return status_from_result_code(SedsResult::SedsOk);
+    };
+    if def.endpoints.len() > endpoints_cap || (!def.endpoints.is_empty() && endpoints_out.is_null())
+    {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    for (idx, ep) in def.endpoints.iter().enumerate() {
+        unsafe {
+            *endpoints_out.add(idx) = ep.as_u32();
+        }
+    }
+    let (is_static, count, data_type, class) = match def.element {
+        MessageElement::Static(count, data_type, class) => (true, count, data_type, class),
+        MessageElement::Dynamic(data_type, class) => (false, 0, data_type, class),
+    };
+    unsafe {
+        *out = SedsDataTypeInfo {
+            exists: true,
+            id: def.id.as_u32(),
+            is_static,
+            element_count: count,
+            message_data_type: message_data_type_code(data_type),
+            message_class: message_class_code(class),
+            reliable: reliable_code(def.reliable),
+            priority: def.priority,
+            fixed_size: fixed_payload_size_if_static(def.id).unwrap_or(0),
+            endpoints: endpoints_out,
+            num_endpoints: def.endpoints.len(),
+            name: def.name.as_ptr() as *const c_char,
+            name_len: def.name.len(),
+            description: def.description.as_ptr() as *const c_char,
+            description_len: def.description.len(),
+        };
+    }
+    status_from_result_code(SedsResult::SedsOk)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_remove(endpoint: u32) -> i32 {
+    ok_or_status(remove_endpoint(DataEndpoint(endpoint)).map(|_| ()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_endpoint_remove_by_name(name: *const c_char, name_len: usize) -> i32 {
+    if name.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("endpoint name"));
+    };
+    ok_or_status(remove_endpoint_by_name(name).map(|_| ()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_dtype_remove(ty: u32) -> i32 {
+    ok_or_status(remove_data_type(DataType(ty)).map(|_| ()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_dtype_remove_by_name(name: *const c_char, name_len: usize) -> i32 {
+    if name.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(name), name_len) };
+    let Ok(name) = from_utf8(bytes) else {
+        return status_from_err(TelemetryError::Deserialize("data type name"));
+    };
+    ok_or_status(remove_data_type_by_name(name).map(|_| ()))
+}
+
 // ============================================================================
 //  FFI: Relay lifecycle (new / free)
 // ============================================================================
@@ -1644,13 +2130,13 @@ pub extern "C" fn seds_relay_add_side_packet(
         let (endpoints_ptr, num_endpoints, _owned_vec): (*const u32, usize, Option<Vec<u32>>) =
             if pkt.endpoints().len() <= STACK_EPS {
                 for (i, e) in pkt.endpoints().iter().enumerate() {
-                    stack_eps[i] = *e as u32;
+                    stack_eps[i] = e.as_u32();
                 }
                 (stack_eps.as_ptr(), pkt.endpoints().len(), None)
             } else {
                 let mut eps_u32 = Vec::with_capacity(pkt.endpoints().len());
                 for e in pkt.endpoints().iter() {
-                    eps_u32.push(*e as u32);
+                    eps_u32.push(e.as_u32());
                 }
                 let ptr = eps_u32.as_ptr();
                 let len = eps_u32.len();
@@ -1659,7 +2145,7 @@ pub extern "C" fn seds_relay_add_side_packet(
 
         let sender_bytes = pkt.sender().as_bytes();
         let view = SedsPacketView {
-            ty: pkt.data_type() as u32,
+            ty: pkt.data_type().as_u32(),
             data_size: pkt.data_size(),
             sender: sender_bytes.as_ptr() as *const c_char,
             sender_len: sender_bytes.len(),
@@ -3058,7 +3544,7 @@ pub extern "C" fn seds_pkt_deserialize_owned(bytes: *const u8, len: usize) -> *m
         return ptr::null_mut();
     }
 
-    let endpoints_u32: Vec<u32> = tpkt.endpoints().iter().map(|e| *e as u32).collect();
+    let endpoints_u32: Vec<u32> = tpkt.endpoints().iter().map(|e| e.as_u32()).collect();
     let owned = SedsOwnedPacket {
         inner: tpkt,
         endpoints_u32,
@@ -3090,7 +3576,7 @@ pub extern "C" fn seds_owned_pkt_view(
     let sender_bytes = inner.sender().as_bytes();
 
     let view = SedsPacketView {
-        ty: inner.data_type() as u32,
+        ty: inner.data_type().as_u32(),
         data_size: inner.data_size(),
         sender: sender_bytes.as_ptr() as *const c_char,
         sender_len: sender_bytes.len(),
@@ -3137,9 +3623,9 @@ pub extern "C" fn seds_pkt_deserialize_header_owned(
         Err(_) => return ptr::null_mut(),
     };
 
-    let endpoints_u32: Vec<u32> = env.endpoints.iter().map(|&e| e as u32).collect();
+    let endpoints_u32: Vec<u32> = env.endpoints.iter().map(|&e| e.as_u32()).collect();
     let owned = SedsOwnedHeader {
-        ty: env.ty as u32,
+        ty: env.ty.as_u32(),
         sender: env.sender,
         endpoints_u32,
         timestamp: env.timestamp_ms,
@@ -3244,7 +3730,7 @@ mod tests {
     #[test]
     fn router_c_abi_rejects_reserved_discovery_endpoint_handler() {
         let desc = SedsLocalEndpointDesc {
-            endpoint: DataEndpoint::Discovery as u32,
+            endpoint: DataEndpoint::Discovery.as_u32(),
             packet_handler: Some(pkt_counter_cb),
             serialized_handler: None,
             user: ptr::null_mut(),
@@ -3258,7 +3744,7 @@ mod tests {
     #[test]
     fn router_c_abi_rejects_reserved_timesync_endpoint_handler() {
         let desc = SedsLocalEndpointDesc {
-            endpoint: DataEndpoint::TimeSync as u32,
+            endpoint: DataEndpoint::TimeSync.as_u32(),
             packet_handler: Some(pkt_counter_cb),
             serialized_handler: None,
             user: ptr::null_mut(),
@@ -3277,7 +3763,7 @@ mod tests {
 
         let router = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint(101),
                 |_pkt| Ok(()),
             )]),
             Box::new(TestClock {
@@ -3300,13 +3786,13 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
 
         now_ms.store(DISCOVERY_FAST_INTERVAL_MS, Ordering::SeqCst);
         assert_eq!(seds_router_poll_discovery(router, &mut did_queue), 0);
         assert!(did_queue);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 4);
+        assert_eq!(hits.load(Ordering::SeqCst), 6);
 
         seds_router_free(router);
     }
@@ -3340,13 +3826,8 @@ mod tests {
         );
         assert!(side_b >= 0);
 
-        let pkt = Packet::from_f32_slice(
-            DataType::GpsData,
-            &[1.0, 2.0, 3.0],
-            &[DataEndpoint::Radio],
-            33,
-        )
-        .unwrap();
+        let pkt = Packet::from_f32_slice(DataType(100), &[1.0, 2.0, 3.0], &[DataEndpoint(101)], 33)
+            .unwrap();
         let wire = serialize_packet(&pkt);
 
         assert_eq!(
@@ -3376,7 +3857,7 @@ mod tests {
 
         let router = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint(101),
                 |_pkt| Ok(()),
             )]),
             Box::new(TestClock {
@@ -3413,7 +3894,7 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
 
         seds_router_free(router);
     }
@@ -3455,8 +3936,7 @@ mod tests {
             status_from_err(TelemetryError::BadArg)
         );
 
-        let discovery_pkt =
-            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_pkt = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
         unsafe {
             (*relay)
                 .inner
@@ -3468,7 +3948,7 @@ mod tests {
 
         assert_eq!(seds_relay_announce_discovery(relay), 0);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
 
         seds_relay_free(relay);
     }
@@ -3481,7 +3961,7 @@ mod tests {
 
         let router = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint(101),
                 |_pkt| Ok(()),
             )]),
             Box::new(TestClock {
@@ -3514,7 +3994,7 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
 
         seds_router_free(router);
     }
@@ -3528,7 +4008,7 @@ mod tests {
 
         let router = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint(101),
                 |_pkt| Ok(()),
             )]),
             Box::new(TestClock {
@@ -3556,9 +4036,9 @@ mod tests {
             false,
         );
         let discovery_pkt_a =
-            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
         let discovery_pkt_b =
-            build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio]).unwrap();
+            build_discovery_announce("REMOTE_B", 1, &[DataEndpoint(101)]).unwrap();
         unsafe {
             (*router)
                 .inner
@@ -3578,12 +4058,12 @@ mod tests {
 
         for seq in 0..6 {
             let pkt = Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType(100),
                 &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint(101)],
                 seq as u64,
             )
-            .unwrap();
+                .unwrap();
             unsafe {
                 (*router).inner.tx(pkt).unwrap();
             }
@@ -3643,21 +4123,16 @@ mod tests {
         assert!(side_c >= 0);
 
         assert_eq!(
-            seds_router_set_typed_route(router, -1, DataType::GpsData as u32, side_b, true),
+            seds_router_set_typed_route(router, -1, DataType(100).as_u32(), side_b, true),
             0
         );
         assert_eq!(
-            seds_router_set_typed_route(router, -1, DataType::GpsData as u32, side_c, true),
+            seds_router_set_typed_route(router, -1, DataType(100).as_u32(), side_c, true),
             0
         );
 
-        let pkt = Packet::from_f32_slice(
-            DataType::GpsData,
-            &[1.0, 2.0, 3.0],
-            &[DataEndpoint::Radio],
-            1,
-        )
-        .unwrap();
+        let pkt = Packet::from_f32_slice(DataType(100), &[1.0, 2.0, 3.0], &[DataEndpoint(101)], 1)
+            .unwrap();
         unsafe {
             assert_eq!(ok_or_status((*router).inner.tx(pkt)), 0);
         }
@@ -3666,21 +4141,16 @@ mod tests {
         assert_eq!(hits_c.load(Ordering::SeqCst), 1);
 
         assert_eq!(
-            seds_router_clear_typed_route(router, -1, DataType::GpsData as u32, side_b),
+            seds_router_clear_typed_route(router, -1, DataType(100).as_u32(), side_b),
             0
         );
         assert_eq!(
-            seds_router_clear_typed_route(router, -1, DataType::GpsData as u32, side_c),
+            seds_router_clear_typed_route(router, -1, DataType(100).as_u32(), side_c),
             0
         );
 
-        let pkt = Packet::from_f32_slice(
-            DataType::GpsData,
-            &[4.0, 5.0, 6.0],
-            &[DataEndpoint::Radio],
-            2,
-        )
-        .unwrap();
+        let pkt = Packet::from_f32_slice(DataType(100), &[4.0, 5.0, 6.0], &[DataEndpoint(101)], 2)
+            .unwrap();
         unsafe {
             assert_eq!(ok_or_status((*router).inner.tx(pkt)), 0);
         }
@@ -3698,7 +4168,7 @@ mod tests {
 
         let router = Router::new_with_clock(
             RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint::Radio,
+                DataEndpoint(101),
                 |_pkt| Ok(()),
             )]),
             Box::new(TestClock {
@@ -3720,7 +4190,7 @@ mod tests {
         assert!(side_id >= 0);
 
         assert_eq!(seds_router_periodic_no_timesync(router, 0), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
 
         seds_router_free(router);
     }
@@ -3760,8 +4230,7 @@ mod tests {
         assert!(side_b >= 0);
         assert_eq!(seds_relay_set_route(relay, side_a, side_b, false), 0);
 
-        let discovery_pkt =
-            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_pkt = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
         unsafe {
             (*relay)
                 .inner
@@ -3774,13 +4243,13 @@ mod tests {
 
         assert_eq!(seds_relay_announce_discovery(relay), 0);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 4);
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 6);
 
         now_ms.store(DISCOVERY_FAST_INTERVAL_MS, Ordering::SeqCst);
         assert_eq!(seds_relay_poll_discovery(relay, &mut did_queue), 0);
         assert!(did_queue);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 8);
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 12);
 
         seds_relay_free(relay);
     }
@@ -3817,8 +4286,7 @@ mod tests {
         assert!(side_a >= 0);
         assert!(side_b >= 0);
 
-        let discovery_pkt =
-            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_pkt = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
         unsafe {
             (*relay)
                 .inner
@@ -3829,7 +4297,7 @@ mod tests {
         assert_eq!(seds_relay_periodic(relay, 0), 0);
         let hits_after_learning = hits.load(Ordering::SeqCst);
         assert_eq!(seds_relay_periodic(relay, 0), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 4);
+        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 6);
 
         seds_relay_free(relay);
     }
@@ -3867,8 +4335,7 @@ mod tests {
         assert!(side_a >= 0);
         assert!(side_b >= 0);
 
-        let discovery_pkt =
-            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_pkt = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
         unsafe {
             (*relay)
                 .inner
@@ -3945,21 +4412,16 @@ mod tests {
         assert!(side_d >= 0);
 
         assert_eq!(
-            seds_relay_set_typed_route(relay, side_a, DataType::GpsData as u32, side_b, true),
+            seds_relay_set_typed_route(relay, side_a, DataType(100).as_u32(), side_b, true),
             0
         );
         assert_eq!(
-            seds_relay_set_typed_route(relay, side_a, DataType::GpsData as u32, side_d, true),
+            seds_relay_set_typed_route(relay, side_a, DataType(100).as_u32(), side_d, true),
             0
         );
 
-        let pkt = Packet::from_f32_slice(
-            DataType::GpsData,
-            &[1.0, 2.0, 3.0],
-            &[DataEndpoint::Radio],
-            1,
-        )
-        .unwrap();
+        let pkt = Packet::from_f32_slice(DataType(100), &[1.0, 2.0, 3.0], &[DataEndpoint(101)], 1)
+            .unwrap();
         unsafe {
             (*relay)
                 .inner

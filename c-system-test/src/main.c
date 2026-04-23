@@ -113,7 +113,7 @@ static void * sender_A(void * arg)
     for (int i = 0; i < 5; ++i)
     {
         make_series(buf, 3, 10.0f);
-        assert(node_log(A, SEDS_DT_GPS_DATA, buf, 3, sizeof(buf[0])) == SEDS_OK);
+        assert(node_log(A, TEST_DT_GPS_DATA, buf, 3, sizeof(buf[0])) == SEDS_OK);
         usleep(gen_random_us());
     }
     return NULL;
@@ -126,14 +126,14 @@ static void * sender_B(void * arg)
     for (int i = 0; i < 5; ++i)
     {
         make_series(buf, 6, 0.5f);
-        assert(node_log(B, SEDS_DT_IMU_DATA, buf, 6, sizeof(buf[0])) == SEDS_OK);
+        assert(node_log(B, TEST_DT_IMU_DATA, buf, 6, sizeof(buf[0])) == SEDS_OK);
         usleep(gen_random_us());
 
         make_series(buf, 3, 101.3f);
-        assert(node_log(B, SEDS_DT_BAROMETER_DATA, buf, 3, sizeof(buf[0])) == SEDS_OK);
+        assert(node_log(B, TEST_DT_BAROMETER_DATA, buf, 3, sizeof(buf[0])) == SEDS_OK);
         usleep(gen_random_us());
         uint8_t buff[0];
-        assert(node_log(B, SEDS_DT_HEARTBEAT, buff, 0, 0) == SEDS_OK);
+        assert(node_log(B, TEST_DT_HEARTBEAT, buff, 0, 0) == SEDS_OK);
         usleep(gen_random_us());
     }
     return NULL;
@@ -146,11 +146,11 @@ static void * sender_C(void * arg)
     for (int i = 0; i < 5; ++i)
     {
         make_series(buf, 2, 3.7f);
-        assert(node_log(C, SEDS_DT_BATTERY_STATUS, buf, 2, sizeof(buf[0])) == SEDS_OK);
+        assert(node_log(C, TEST_DT_BATTERY_STATUS, buf, 2, sizeof(buf[0])) == SEDS_OK);
         usleep(gen_random_us());
 
         const char * msg = "hello world!";
-        assert(node_log(C, SEDS_DT_MESSAGE_DATA, msg, strlen(msg), sizeof(msg[0])) == SEDS_OK);
+        assert(node_log(C, TEST_DT_MESSAGE_DATA, msg, strlen(msg), sizeof(msg[0])) == SEDS_OK);
         usleep(gen_random_us());
     }
     return NULL;
@@ -164,11 +164,11 @@ static void * sender_D(void * arg)
     for (int i = 0; i < 5; ++i)
     {
         make_series(buf, 6, 3.5f);
-        assert(node_log(D, SEDS_DT_IMU_DATA, buf, 6, sizeof(buf[0])) == SEDS_OK);
+        assert(node_log(D, TEST_DT_IMU_DATA, buf, 6, sizeof(buf[0])) == SEDS_OK);
         usleep(gen_random_us());
 
         const char * msg = "hello world from the valve board!";
-        assert(node_log(D, SEDS_DT_MESSAGE_DATA, msg, strlen(msg), sizeof(msg[0])) == SEDS_OK);
+        assert(node_log(D, TEST_DT_MESSAGE_DATA, msg, strlen(msg), sizeof(msg[0])) == SEDS_OK);
         usleep(gen_random_us());
     }
     return NULL;

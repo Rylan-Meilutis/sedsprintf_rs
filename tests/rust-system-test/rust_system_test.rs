@@ -1,18 +1,18 @@
 #[cfg(test)]
 mod threaded_system_tests {
-    use sedsprintf_rs::RouteSelectionMode;
-    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
-    use sedsprintf_rs::discovery::{DISCOVERY_ROUTE_TTL_MS, build_discovery_announce};
+    use sedsprintf_rs::discovery::{build_discovery_announce, DISCOVERY_ROUTE_TTL_MS};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
+    use sedsprintf_rs::RouteSelectionMode;
+    use sedsprintf_rs::TelemetryResult;
 
-    use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ mod threaded_system_tests {
     /// Build a handler that counts packets received on the Radio endpoint
     /// (this plays the role of the "radio" handler in the C test).
     fn make_radio_handler(counter: Arc<AtomicUsize>) -> EndpointHandler {
-        EndpointHandler::new_packet_handler(DataEndpoint::Radio, move |_pkt: &Packet| {
+        EndpointHandler::new_packet_handler(DataEndpoint::named("RADIO"), move |_pkt: &Packet| {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -49,7 +49,7 @@ mod threaded_system_tests {
     /// Build a handler that counts packets received on the SdCard endpoint
     /// (this plays the role of the "SD" handler in the C test).
     fn make_sd_handler(counter: Arc<AtomicUsize>) -> EndpointHandler {
-        EndpointHandler::new_packet_handler(DataEndpoint::SdCard, move |_pkt: &Packet| {
+        EndpointHandler::new_packet_handler(DataEndpoint::named("SD_CARD"), move |_pkt: &Packet| {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -65,7 +65,13 @@ mod threaded_system_tests {
     /// Build a packet with endpoints [SD_CARD, Radio], mirroring the C
     /// system’s idea that every message goes to both "radio" and "SD".
     fn make_packet(ty: DataType, vals: &[f32], ts: u64) -> Packet {
-        Packet::from_f32_slice(ty, vals, &[DataEndpoint::SdCard, DataEndpoint::Radio], ts).unwrap()
+        Packet::from_f32_slice(
+            ty,
+            vals,
+            &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
+            ts,
+        )
+            .unwrap()
     }
 
     #[test]
@@ -91,7 +97,8 @@ mod threaded_system_tests {
             Ok(())
         });
 
-        let discovery_a = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_a =
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::named("RADIO")]).unwrap();
         router
             .rx_serialized_queue_from_side(
                 &sedsprintf_rs::serialize::serialize_packet(&discovery_a),
@@ -103,9 +110,9 @@ mod threaded_system_tests {
         let discovery_b = build_discovery_announce(
             "REMOTE_B",
             DISCOVERY_ROUTE_TTL_MS / 2,
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
         )
-        .unwrap();
+            .unwrap();
         router
             .rx_serialized_queue_from_side(
                 &sedsprintf_rs::serialize::serialize_packet(&discovery_b),
@@ -124,12 +131,12 @@ mod threaded_system_tests {
 
         for seq in 0..6 {
             let pkt = Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 seq as u64,
             )
-            .unwrap();
+                .unwrap();
             router.tx_queue(pkt).unwrap();
         }
         router.process_tx_queue().unwrap();
@@ -144,12 +151,12 @@ mod threaded_system_tests {
         now_ms.store(DISCOVERY_ROUTE_TTL_MS + 1, Ordering::SeqCst);
 
         let failover_pkt = Packet::from_f32_slice(
-            DataType::BatteryStatus,
+            DataType::named("BATTERY_STATUS"),
             &[7.0, 8.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             99,
         )
-        .unwrap();
+            .unwrap();
         router.tx_queue(failover_pkt).unwrap();
         router.process_tx_queue().unwrap();
 
@@ -178,7 +185,8 @@ mod threaded_system_tests {
         });
         let ingress = relay.add_side_packet("INGRESS", |_pkt: &Packet| Ok(()));
 
-        let discovery_a = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio]).unwrap();
+        let discovery_a =
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::named("RADIO")]).unwrap();
         relay
             .rx_serialized_from_side(
                 side_a,
@@ -190,9 +198,9 @@ mod threaded_system_tests {
         let discovery_b = build_discovery_announce(
             "REMOTE_B",
             DISCOVERY_ROUTE_TTL_MS / 2,
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
         )
-        .unwrap();
+            .unwrap();
         relay
             .rx_serialized_from_side(
                 side_b,
@@ -211,12 +219,12 @@ mod threaded_system_tests {
 
         for seq in 0..6 {
             let pkt = Packet::from_f32_slice(
-                DataType::GpsData,
+                DataType::named("GPS_DATA"),
                 &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
-                &[DataEndpoint::Radio],
+                &[DataEndpoint::named("RADIO")],
                 seq as u64,
             )
-            .unwrap();
+                .unwrap();
             relay.rx_from_side(ingress, pkt).unwrap();
         }
         relay.process_all_queues().unwrap();
@@ -231,12 +239,12 @@ mod threaded_system_tests {
         relay.remove_side(side_a).unwrap();
 
         let failover_pkt = Packet::from_f32_slice(
-            DataType::BatteryStatus,
+            DataType::named("BATTERY_STATUS"),
             &[7.0, 8.0],
-            &[DataEndpoint::Radio],
+            &[DataEndpoint::named("RADIO")],
             99,
         )
-        .unwrap();
+            .unwrap();
         relay.rx_from_side(ingress, failover_pkt).unwrap();
         relay.process_all_queues().unwrap();
 
@@ -479,7 +487,7 @@ mod threaded_system_tests {
             let mut buf = [0.0_f32; 8];
             for i in 0..5 {
                 make_series(&mut buf[..3], 10.0);
-                let pkt = make_packet(DataType::GpsData, &buf[..3], i);
+                let pkt = make_packet(DataType::named("GPS_DATA"), &buf[..3], i);
                 radio_router.tx(pkt).unwrap();
                 thread::sleep(Duration::from_millis(5));
             }
@@ -491,13 +499,13 @@ mod threaded_system_tests {
             for i in 0..5 {
                 // IMU-like data
                 make_series(&mut buf[..3], 0.5);
-                let pkt1 = make_packet(DataType::GpsData, &buf[..3], i);
+                let pkt1 = make_packet(DataType::named("GPS_DATA"), &buf[..3], i);
                 flight_router.tx(pkt1).unwrap();
                 thread::sleep(Duration::from_millis(5));
 
                 // BARO-like data
                 make_series(&mut buf[..3], 101.3);
-                let pkt2 = make_packet(DataType::GpsData, &buf[..3], i + 100);
+                let pkt2 = make_packet(DataType::named("GPS_DATA"), &buf[..3], i + 100);
                 flight_router.tx(pkt2).unwrap();
                 thread::sleep(Duration::from_millis(5));
             }
@@ -508,7 +516,7 @@ mod threaded_system_tests {
             let mut buf = [0.0_f32; 8];
             for i in 0..5 {
                 make_series(&mut buf[..2], 3.7);
-                let pkt1 = make_packet(DataType::BatteryStatus, &buf[..2], i + 200);
+                let pkt1 = make_packet(DataType::named("BATTERY_STATUS"), &buf[..2], i + 200);
                 power_router.tx(pkt1).unwrap();
                 thread::sleep(Duration::from_millis(5));
 
@@ -516,10 +524,10 @@ mod threaded_system_tests {
                 let pkt2 = Packet::from_str_slice(
                     DataType::TelemetryError,
                     msg,
-                    &[DataEndpoint::SdCard, DataEndpoint::Radio],
+                    &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
                     i + 300,
                 )
-                .unwrap();
+                    .unwrap();
                 power_router.tx(pkt2).unwrap();
                 thread::sleep(Duration::from_millis(5));
             }

@@ -1,10 +1,10 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use sedsprintf_rs::RouteSelectionMode;
-use sedsprintf_rs::TelemetryResult;
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
 use sedsprintf_rs::router::{Clock, Router, RouterConfig};
+use sedsprintf_rs::RouteSelectionMode;
+use sedsprintf_rs::TelemetryResult;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -15,12 +15,12 @@ fn zero_clock() -> Box<dyn Clock + Send + Sync> {
 fn next_packet(counter: &AtomicU64) -> Packet {
     let ts = counter.fetch_add(1, Ordering::Relaxed);
     Packet::from_f32_slice(
-        DataType::GpsData,
+        DataType::named("GPS_DATA"),
         &[ts as f32, ts as f32 + 1.0, ts as f32 + 2.0],
-        &[DataEndpoint::Radio],
+        &[DataEndpoint::named("RADIO")],
         ts,
     )
-    .unwrap()
+        .unwrap()
 }
 
 fn benchmark_route_selection_paths(c: &mut Criterion) {
@@ -43,12 +43,18 @@ fn benchmark_route_selection_paths(c: &mut Criterion) {
             Ok(())
         })
     };
-    let discovery_a =
-        sedsprintf_rs::discovery::build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio])
-            .unwrap();
-    let discovery_b =
-        sedsprintf_rs::discovery::build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio])
-            .unwrap();
+    let discovery_a = sedsprintf_rs::discovery::build_discovery_announce(
+        "REMOTE_A",
+        0,
+        &[DataEndpoint::named("RADIO")],
+    )
+        .unwrap();
+    let discovery_b = sedsprintf_rs::discovery::build_discovery_announce(
+        "REMOTE_B",
+        1,
+        &[DataEndpoint::named("RADIO")],
+    )
+        .unwrap();
     router.rx_from_side(&discovery_a, side_a).unwrap();
     router.rx_from_side(&discovery_b, side_b).unwrap();
     router
@@ -86,12 +92,18 @@ fn benchmark_route_selection_paths(c: &mut Criterion) {
             Ok(())
         })
     };
-    let relay_discovery_a =
-        sedsprintf_rs::discovery::build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::Radio])
-            .unwrap();
-    let relay_discovery_b =
-        sedsprintf_rs::discovery::build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::Radio])
-            .unwrap();
+    let relay_discovery_a = sedsprintf_rs::discovery::build_discovery_announce(
+        "REMOTE_A",
+        0,
+        &[DataEndpoint::named("RADIO")],
+    )
+        .unwrap();
+    let relay_discovery_b = sedsprintf_rs::discovery::build_discovery_announce(
+        "REMOTE_B",
+        1,
+        &[DataEndpoint::named("RADIO")],
+    )
+        .unwrap();
     relay.rx_from_side(path_a, relay_discovery_a).unwrap();
     relay.rx_from_side(path_b, relay_discovery_b).unwrap();
     relay.process_all_queues().unwrap();

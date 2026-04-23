@@ -35,7 +35,15 @@ use std::sync::{Arc as SArc, Mutex, OnceLock};
 #[cfg(feature = "timesync")]
 use crate::timesync::TimeSyncConfig;
 use crate::{
-    config::{DataEndpoint, DataType}, get_message_name, get_needed_message_size, message_meta,
+    config::{
+        data_type_definition, data_type_definition_by_name, data_type_exists, endpoint_definition,
+        endpoint_definition_by_name, endpoint_exists, message_class_code, message_class_from_code,
+        message_data_type_code, message_data_type_from_code, register_data_type_id_with_description,
+        register_endpoint_id_with_description, register_schema_json_bytes,
+        reliable_code, reliable_from_code, remove_data_type,
+        remove_data_type_by_name, remove_endpoint, remove_endpoint_by_name, DataEndpoint,
+        DataType,
+    }, get_message_name, get_needed_message_size, message_meta,
     packet::Packet, relay::{Relay, RelaySideOptions}, router::{Clock, EndpointHandler, LeBytes, Router, RouterConfig, RouterSideOptions},
     serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet},
     try_enum_from_i32, try_enum_from_u32, MessageElement,
@@ -144,7 +152,7 @@ fn build_endpoint_handlers(
             }
 
             let ep_u32: u32 = tup.get_item(0)?.extract()?;
-            let endpoint = endpoint_from_u32(ep_u32).map_err(py_err_from)?;
+            let endpoint = DataEndpoint(ep_u32);
 
             if !tup.get_item(1)?.is_none() {
                 let cb: Py<PyAny> = tup.get_item(1)?.extract()?;
@@ -298,7 +306,7 @@ fn topology_snapshot_to_pydict(
         "advertised_endpoints",
         snap.advertised_endpoints
             .iter()
-            .map(|ep| *ep as u32)
+            .map(|ep| ep.as_u32())
             .collect::<Vec<u32>>(),
     )?;
     out.set_item(
@@ -315,7 +323,7 @@ fn topology_snapshot_to_pydict(
             board
                 .reachable_endpoints
                 .iter()
-                .map(|ep| *ep as u32)
+                .map(|ep| ep.as_u32())
                 .collect::<Vec<u32>>(),
         )?;
         item.set_item(
@@ -337,7 +345,7 @@ fn topology_snapshot_to_pydict(
             route
                 .reachable_endpoints
                 .iter()
-                .map(|ep| *ep as u32)
+                .map(|ep| ep.as_u32())
                 .collect::<Vec<u32>>(),
         )?;
         route_dict.set_item(
@@ -353,7 +361,7 @@ fn topology_snapshot_to_pydict(
                 announcer
                     .reachable_endpoints
                     .iter()
-                    .map(|ep| *ep as u32)
+                    .map(|ep| ep.as_u32())
                     .collect::<Vec<u32>>(),
             )?;
             announcer_dict.set_item(
@@ -369,7 +377,7 @@ fn topology_snapshot_to_pydict(
                     board
                         .reachable_endpoints
                         .iter()
-                        .map(|ep| *ep as u32)
+                        .map(|ep| ep.as_u32())
                         .collect::<Vec<u32>>(),
                 )?;
                 board_dict.set_item(
@@ -435,7 +443,7 @@ impl PyPacket {
     /// DataType as an integer (see `DataType` IntEnum).
     #[getter]
     fn ty(&self) -> u32 {
-        self.inner.data_type() as u32
+        self.inner.data_type().as_u32()
     }
 
     /// Declared data size for the packet payload, in bytes.
@@ -453,7 +461,7 @@ impl PyPacket {
     /// Endpoints as integer IDs (see `DataEndpoint` IntEnum).
     #[getter]
     fn endpoints(&self) -> Vec<u32> {
-        self.inner.endpoints().iter().map(|e| *e as u32).collect()
+        self.inner.endpoints().iter().map(|e| e.as_u32()).collect()
     }
 
     /// Packet timestamp in milliseconds (source-defined semantics).
@@ -755,7 +763,7 @@ impl PyRouter {
             dst_side_id as usize,
             enabled,
         )
-        .map_err(py_err_from)
+            .map_err(py_err_from)
     }
 
     fn clear_route(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
@@ -784,7 +792,7 @@ impl PyRouter {
             dst_side_id as usize,
             enabled,
         )
-        .map_err(py_err_from)
+            .map_err(py_err_from)
     }
 
     fn clear_typed_route(
@@ -802,7 +810,7 @@ impl PyRouter {
             dtype_from_u32(ty).map_err(py_err_from)?,
             dst_side_id as usize,
         )
-        .map_err(py_err_from)
+            .map_err(py_err_from)
     }
 
     fn set_source_route_mode(&self, src_side_id: Option<u32>, mode: i32) -> PyResult<()> {
@@ -844,7 +852,7 @@ impl PyRouter {
             dst_side_id as usize,
             weight,
         )
-        .map_err(py_err_from)
+            .map_err(py_err_from)
     }
 
     fn clear_route_weight(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
@@ -871,7 +879,7 @@ impl PyRouter {
             dst_side_id as usize,
             priority,
         )
-        .map_err(py_err_from)
+            .map_err(py_err_from)
     }
 
     fn clear_route_priority(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
@@ -1861,13 +1869,13 @@ pub fn peek_header_py(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<Py
     let env = peek_envelope(bytes).map_err(py_err_from)?;
 
     let out = PyDict::new(py);
-    out.set_item("ty", env.ty as u32)?;
+    out.set_item("ty", env.ty.as_u32())?;
     out.set_item("sender", env.sender.as_ref())?;
     out.set_item(
         "endpoints",
         env.endpoints
             .iter()
-            .map(|e| *e as u32)
+            .map(|e| e.as_u32())
             .collect::<Vec<u32>>(),
     )?;
     out.set_item("timestamp_ms", env.timestamp_ms)?;
@@ -1903,6 +1911,214 @@ pub fn make_packet(
     Ok(Py::new(py, PyPacket { inner: pkt })?.into_any())
 }
 
+#[pyfunction(name = "endpoint_exists")]
+pub fn endpoint_exists_py(endpoint: u32) -> bool {
+    endpoint_exists(DataEndpoint(endpoint))
+}
+
+#[pyfunction(name = "data_type_exists")]
+pub fn data_type_exists_py(ty: u32) -> bool {
+    data_type_exists(DataType(ty))
+}
+
+#[pyfunction(name = "register_endpoint")]
+#[pyo3(signature = (endpoint, name, link_local_only=false, description=""))]
+pub fn register_endpoint_py(
+    endpoint: u32,
+    name: &str,
+    link_local_only: bool,
+    description: &str,
+) -> PyResult<u32> {
+    register_endpoint_id_with_description(
+        DataEndpoint(endpoint),
+        name,
+        description,
+        link_local_only,
+    )
+        .map(|ep| ep.as_u32())
+        .map_err(py_err_from)
+}
+
+#[pyfunction(name = "register_data_type")]
+#[pyo3(signature = (ty, name, is_static, element_count, message_data_type, message_class, endpoints, reliable=0, priority=0, description="")
+)]
+#[allow(clippy::too_many_arguments)]
+pub fn register_data_type_py(
+    ty: u32,
+    name: &str,
+    is_static: bool,
+    element_count: usize,
+    message_data_type: u8,
+    message_class: u8,
+    endpoints: Vec<u32>,
+    reliable: u8,
+    priority: u8,
+    description: &str,
+) -> PyResult<u32> {
+    let data_type = message_data_type_from_code(message_data_type)
+        .ok_or_else(|| PyValueError::new_err("bad message_data_type"))?;
+    let class = message_class_from_code(message_class)
+        .ok_or_else(|| PyValueError::new_err("bad message_class"))?;
+    let reliable =
+        reliable_from_code(reliable).ok_or_else(|| PyValueError::new_err("bad reliable"))?;
+    let element = if is_static {
+        MessageElement::Static(element_count, data_type, class)
+    } else {
+        MessageElement::Dynamic(data_type, class)
+    };
+    let eps = endpoints.into_iter().map(DataEndpoint).collect::<Vec<_>>();
+    register_data_type_id_with_description(
+        DataType(ty),
+        name,
+        description,
+        element,
+        &eps,
+        reliable,
+        priority,
+    )
+        .map(|dt| dt.as_u32())
+        .map_err(py_err_from)
+}
+
+#[pyfunction(name = "endpoint_info")]
+pub fn endpoint_info_py(py: Python<'_>, endpoint: u32) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    if let Some(def) = endpoint_definition(DataEndpoint(endpoint)) {
+        out.set_item("exists", true)?;
+        out.set_item("id", def.id.as_u32())?;
+        out.set_item("name", def.name)?;
+        out.set_item("description", def.description)?;
+        out.set_item("link_local_only", def.link_local_only)?;
+    } else {
+        out.set_item("exists", false)?;
+        out.set_item("id", endpoint)?;
+    }
+    Ok(out.unbind().into_any())
+}
+
+#[pyfunction(name = "data_type_info")]
+pub fn data_type_info_py(py: Python<'_>, ty: u32) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    if let Some(def) = data_type_definition(DataType(ty)) {
+        let (is_static, count, data_type, class) = match def.element {
+            MessageElement::Static(count, data_type, class) => (true, count, data_type, class),
+            MessageElement::Dynamic(data_type, class) => (false, 0, data_type, class),
+        };
+        out.set_item("exists", true)?;
+        out.set_item("id", def.id.as_u32())?;
+        out.set_item("name", def.name)?;
+        out.set_item("description", def.description)?;
+        out.set_item("is_static", is_static)?;
+        out.set_item("element_count", count)?;
+        out.set_item("message_data_type", message_data_type_code(data_type))?;
+        out.set_item("message_class", message_class_code(class))?;
+        out.set_item("reliable", reliable_code(def.reliable))?;
+        out.set_item("priority", def.priority)?;
+        out.set_item("fixed_size", get_needed_message_size(def.id))?;
+        out.set_item(
+            "endpoints",
+            def.endpoints
+                .iter()
+                .map(|ep| ep.as_u32())
+                .collect::<Vec<_>>(),
+        )?;
+    } else {
+        out.set_item("exists", false)?;
+        out.set_item("id", ty)?;
+    }
+    Ok(out.unbind().into_any())
+}
+
+#[pyfunction(name = "endpoint_info_by_name")]
+pub fn endpoint_info_by_name_py(py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    if let Some(def) = endpoint_definition_by_name(name) {
+        out.set_item("exists", true)?;
+        out.set_item("id", def.id.as_u32())?;
+        out.set_item("name", def.name)?;
+        out.set_item("description", def.description)?;
+        out.set_item("link_local_only", def.link_local_only)?;
+    } else {
+        out.set_item("exists", false)?;
+        out.set_item("name", name)?;
+    }
+    Ok(out.unbind().into_any())
+}
+
+#[pyfunction(name = "data_type_info_by_name")]
+pub fn data_type_info_by_name_py(py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    if let Some(def) = data_type_definition_by_name(name) {
+        let (is_static, count, data_type, class) = match def.element {
+            MessageElement::Static(count, data_type, class) => (true, count, data_type, class),
+            MessageElement::Dynamic(data_type, class) => (false, 0, data_type, class),
+        };
+        out.set_item("exists", true)?;
+        out.set_item("id", def.id.as_u32())?;
+        out.set_item("name", def.name)?;
+        out.set_item("description", def.description)?;
+        out.set_item("is_static", is_static)?;
+        out.set_item("element_count", count)?;
+        out.set_item("message_data_type", message_data_type_code(data_type))?;
+        out.set_item("message_class", message_class_code(class))?;
+        out.set_item("reliable", reliable_code(def.reliable))?;
+        out.set_item("priority", def.priority)?;
+        out.set_item("fixed_size", get_needed_message_size(def.id))?;
+        out.set_item(
+            "endpoints",
+            def.endpoints
+                .iter()
+                .map(|ep| ep.as_u32())
+                .collect::<Vec<_>>(),
+        )?;
+    } else {
+        out.set_item("exists", false)?;
+        out.set_item("name", name)?;
+    }
+    Ok(out.unbind().into_any())
+}
+
+#[pyfunction(name = "remove_endpoint")]
+pub fn remove_endpoint_py(endpoint: u32) -> PyResult<bool> {
+    remove_endpoint(DataEndpoint(endpoint)).map_err(py_err_from)
+}
+
+#[pyfunction(name = "remove_endpoint_by_name")]
+pub fn remove_endpoint_by_name_py(name: &str) -> PyResult<bool> {
+    remove_endpoint_by_name(name).map_err(py_err_from)
+}
+
+#[pyfunction(name = "remove_data_type")]
+pub fn remove_data_type_py(ty: u32) -> PyResult<bool> {
+    remove_data_type(DataType(ty)).map_err(py_err_from)
+}
+
+#[pyfunction(name = "remove_data_type_by_name")]
+pub fn remove_data_type_by_name_py(name: &str) -> PyResult<bool> {
+    remove_data_type_by_name(name).map_err(py_err_from)
+}
+
+#[pyfunction(name = "register_schema_json_bytes")]
+pub fn register_schema_json_bytes_py(data: &Bound<'_, PyAny>) -> PyResult<()> {
+    let bytes: &[u8] = data.extract()?;
+    register_schema_json_bytes(bytes).map_err(py_err_from)
+}
+
+#[pyfunction(name = "register_schema_json_file")]
+pub fn register_schema_json_file_py(path: &str) -> PyResult<()> {
+    #[cfg(feature = "std")]
+    {
+        crate::config::register_schema_json_path(path).map_err(py_err_from)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = path;
+        Err(PyRuntimeError::new_err(
+            "schema JSON file loading requires std",
+        ))
+    }
+}
+
 // ============================================================================
 //  Module init: classes, functions, dynamic enums
 // ============================================================================
@@ -1917,6 +2133,20 @@ pub fn sedsprintf_rs(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deserialize_packet_py, m)?)?;
     m.add_function(wrap_pyfunction!(peek_header_py, m)?)?;
     m.add_function(wrap_pyfunction!(make_packet, m)?)?;
+    m.add_function(wrap_pyfunction!(endpoint_exists_py, m)?)?;
+    m.add_function(wrap_pyfunction!(data_type_exists_py, m)?)?;
+    m.add_function(wrap_pyfunction!(register_endpoint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(register_data_type_py, m)?)?;
+    m.add_function(wrap_pyfunction!(register_schema_json_bytes_py, m)?)?;
+    m.add_function(wrap_pyfunction!(register_schema_json_file_py, m)?)?;
+    m.add_function(wrap_pyfunction!(endpoint_info_py, m)?)?;
+    m.add_function(wrap_pyfunction!(data_type_info_py, m)?)?;
+    m.add_function(wrap_pyfunction!(endpoint_info_by_name_py, m)?)?;
+    m.add_function(wrap_pyfunction!(data_type_info_by_name_py, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_endpoint_py, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_endpoint_by_name_py, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_data_type_py, m)?)?;
+    m.add_function(wrap_pyfunction!(remove_data_type_by_name_py, m)?)?;
 
     let enum_mod = PyModule::import(py, "enum")?;
     let int_enum = enum_mod.getattr("IntEnum")?;
