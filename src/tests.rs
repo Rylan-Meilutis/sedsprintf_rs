@@ -4681,6 +4681,136 @@ mod router_tests {
         }
 
         #[test]
+        fn in_flight_end_to_end_destinations_survive_topology_reachability_changes() {
+            let router = Router::new_with_clock(
+                RouterConfig::default().with_sender("SRC"),
+                StepClock::new_box(0, 0),
+            );
+            let side = router.add_side_serialized_with_options(
+                "link",
+                |_bytes| Ok(()),
+                crate::router::RouterSideOptions {
+                    reliable_enabled: true,
+                    link_local_enabled: false,
+                    ..crate::router::RouterSideOptions::default()
+                },
+            );
+
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_A", 0, &[DataEndpoint::named("RADIO")])
+                        .unwrap(),
+                    side,
+                )
+                .unwrap();
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_B", 0, &[DataEndpoint::named("RADIO")])
+                        .unwrap(),
+                    side,
+                )
+                .unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::named("GPS_DATA"),
+                &[21.0, 0.0, 0.0],
+                &[DataEndpoint::named("RADIO")],
+                21,
+            )
+            .unwrap();
+            let packet_id = pkt.packet_id();
+            router.tx(pkt).unwrap();
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                Some(2)
+            );
+
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_A", 1, &[DataEndpoint::named("SD_CARD")])
+                        .unwrap(),
+                    side,
+                )
+                .unwrap();
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_B", 1, &[DataEndpoint::named("SD_CARD")])
+                        .unwrap(),
+                    side,
+                )
+                .unwrap();
+
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                Some(2)
+            );
+        }
+
+        #[test]
+        fn in_flight_end_to_end_destinations_survive_runtime_data_type_removal() {
+            use crate::config::{
+                register_data_type_with_description, remove_data_type_by_name,
+            };
+            use crate::{MessageClass, MessageDataType, MessageElement, ReliableMode};
+
+            let type_name = "DISCOVERY_INFLIGHT_TYPE_9101";
+            let _ = remove_data_type_by_name(type_name);
+            let custom_ty = register_data_type_with_description(
+                type_name,
+                "inflight custom type",
+                MessageElement::Dynamic(MessageDataType::Binary, MessageClass::Data),
+                &[DataEndpoint::named("RADIO")],
+                ReliableMode::Ordered,
+                3,
+            )
+            .unwrap();
+
+            let router = Router::new_with_clock(
+                RouterConfig::default().with_sender("SRC"),
+                StepClock::new_box(0, 0),
+            );
+            let side = router.add_side_serialized_with_options(
+                "link",
+                |_bytes| Ok(()),
+                crate::router::RouterSideOptions {
+                    reliable_enabled: true,
+                    link_local_enabled: false,
+                    ..crate::router::RouterSideOptions::default()
+                },
+            );
+
+            router
+                .rx_from_side(
+                    &build_discovery_announce("DEST_A", 0, &[DataEndpoint::named("RADIO")])
+                        .unwrap(),
+                    side,
+                )
+                .unwrap();
+
+            let pkt = Packet::new(
+                custom_ty,
+                &[DataEndpoint::named("RADIO")],
+                "SRC",
+                0,
+                Arc::<[u8]>::from(vec![1u8, 2, 3, 4]),
+            )
+            .unwrap();
+            let packet_id = pkt.packet_id();
+            router.tx(pkt).unwrap();
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                Some(1)
+            );
+
+            assert!(remove_data_type_by_name(type_name).unwrap());
+            router.periodic_no_timesync(0).unwrap();
+            assert_eq!(
+                router.debug_end_to_end_pending_destination_count(packet_id),
+                Some(1)
+            );
+        }
+
+        #[test]
         fn reliable_router_state_stays_bounded_under_unacked_traffic() {
             let router = Router::new_with_clock(
                 RouterConfig::default().with_sender("SRC"),
@@ -6492,6 +6622,73 @@ mod router_tests {
             assert_eq!(
                 relay.debug_end_to_end_acked_destination_count(packet_id),
                 None
+            );
+        }
+
+        #[test]
+        fn relay_keeps_forwarding_to_unacked_destinations_after_reachability_changes() {
+            let seen: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_c = seen.clone();
+            let relay = Relay::new(zero_clock());
+            let ingress =
+                relay.add_side_packet("INGRESS", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+            let link = relay.add_side_packet("LINK", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            relay
+                .rx_from_side(
+                    link,
+                    build_discovery_announce("DEST_A", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
+                )
+                .unwrap();
+            relay
+                .rx_from_side(
+                    link,
+                    build_discovery_announce("DEST_B", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
+                )
+                .unwrap();
+            relay.process_all_queues().unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::named("GPS_DATA"),
+                &[31.0, 0.0, 0.0],
+                &[DataEndpoint::named("RADIO")],
+                31,
+            )
+            .unwrap();
+            let packet_id = pkt.packet_id();
+            relay.rx_from_side(ingress, pkt.clone()).unwrap();
+            relay.process_all_queues().unwrap();
+            seen.lock().unwrap().clear();
+
+            let ack = Packet::new(
+                DataType::ReliableAck,
+                crate::message_meta(DataType::ReliableAck).endpoints,
+                "E2EACK:DEST_A",
+                0,
+                Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
+            )
+            .unwrap();
+            relay.rx_from_side(link, ack).unwrap();
+            relay.process_all_queues().unwrap();
+
+            relay
+                .rx_from_side(
+                    link,
+                    build_discovery_announce("DEST_B", 1, &[DataEndpoint::named("SD_CARD")]).unwrap(),
+                )
+                .unwrap();
+            relay.process_all_queues().unwrap();
+
+            relay.rx_from_side(ingress, pkt).unwrap();
+            relay.process_all_queues().unwrap();
+            assert!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.data_type() == DataType::named("GPS_DATA"))
             );
         }
 

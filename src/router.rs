@@ -1651,6 +1651,7 @@ impl Router {
         &self,
         st: &mut RouterInner,
     ) -> TelemetryResult<()> {
+        let active_destinations = self.active_end_to_end_destinations_locked(st);
         let packet_ids: Vec<u64> = st.end_to_end_reliable_tx.keys().copied().collect();
         let mut completed = Vec::new();
 
@@ -1669,14 +1670,18 @@ impl Router {
             if !sent.tracked_destinations {
                 continue;
             }
-            sent.pending_destinations
-                .retain(|sender_hash, side| match expected.get(sender_hash) {
-                    Some(next_side) => {
+            sent.pending_destinations.retain(|sender_hash, side| {
+                match (
+                    expected.get(sender_hash),
+                    active_destinations.get(sender_hash),
+                ) {
+                    (Some(next_side), _) | (None, Some(next_side)) => {
                         *side = *next_side;
                         true
                     }
-                    None => false,
-                });
+                    (None, None) => false,
+                }
+            });
             if sent.pending_destinations.is_empty() {
                 completed.push(packet_id);
             }
@@ -1687,6 +1692,35 @@ impl Router {
         }
 
         Ok(())
+    }
+
+    #[cfg(feature = "discovery")]
+    fn active_end_to_end_destinations_locked(
+        &self,
+        st: &RouterInner,
+    ) -> BTreeMap<u64, RouterSideId> {
+        let now_ms = self.clock.now_ms();
+        let mut out = BTreeMap::new();
+        for (&side, route) in st.discovery_routes.iter() {
+            if now_ms.saturating_sub(route.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                continue;
+            }
+            for sender_state in route.announcers.values() {
+                if now_ms.saturating_sub(sender_state.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                    continue;
+                }
+                for board in sender_state.topology_boards.iter() {
+                    if !Self::is_end_to_end_destination_sender(&board.sender_id) {
+                        continue;
+                    }
+                    out.insert(Self::sender_hash(&board.sender_id), side);
+                    if out.len() >= RELIABLE_MAX_END_TO_END_PENDING.max(1) {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn side_supports_end_to_end_reliable_locked(st: &RouterInner, side: RouterSideId) -> bool {

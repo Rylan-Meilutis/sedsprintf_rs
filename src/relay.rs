@@ -1577,6 +1577,7 @@ impl Relay {
         let Some(acked) = st.end_to_end_acked_destinations.get(&packet_id) else {
             return Ok(sides);
         };
+        let now_ms = self.clock.now_ms();
         let mut filtered = Vec::new();
         for side in sides {
             let Some(route) = st.discovery_routes.get(&side) else {
@@ -1586,20 +1587,30 @@ impl Relay {
             let mut still_pending = false;
             let mut had_destination_board = false;
             for sender_state in route.announcers.values() {
+                if now_ms.saturating_sub(sender_state.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                    continue;
+                }
                 for board in sender_state.topology_boards.iter() {
                     if !Self::is_end_to_end_destination_sender(&board.sender_id) {
                         continue;
                     }
                     had_destination_board = true;
+                    let sender_hash = Self::sender_hash(&board.sender_id);
+                    if acked.contains(&sender_hash) {
+                        continue;
+                    }
                     if eps
                         .iter()
                         .copied()
                         .any(|ep| board.reachable_endpoints.contains(&ep))
-                        && !acked.contains(&Self::sender_hash(&board.sender_id))
                     {
                         still_pending = true;
                         break;
                     }
+                    // Keep forwarding while any discovered destination sender for this packet
+                    // remains unacked, even if topology/schema metadata changed for new packets.
+                    still_pending = true;
+                    break;
                 }
                 if still_pending {
                     break;
