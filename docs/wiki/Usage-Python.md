@@ -116,7 +116,9 @@ With `discovery` enabled:
   piece of topology
 
 Reliable delivery is enabled on a per-side basis with `reliable_enabled=True` for serialized
-sides.
+sides. Packets already in flight also carry a compact internal wire contract so topology or
+runtime-schema changes do not redirect them to the wrong holder or make them undecodable mid-flight.
+Applications do not construct that contract directly; routers and relays manage it internally.
 
 As of `3.11.0`, reliable delivery is end-to-end verified:
 
@@ -155,6 +157,7 @@ When built with `timesync`, `Router` keeps an internal network clock and handles
 traffic internally.
 
 Construct `Router(..., timesync_enabled=False)` if the extension was built with `timesync` but you
-do not want time sync for a particular instance.
+do not want time sync for a particular instance. `TIME_SYNC` and `DISCOVERY` remain reserved
+internal endpoints; do not register handlers for them or try to emit those packets manually.
 
 See [Time-Sync](Time-Sync) for protocol details.

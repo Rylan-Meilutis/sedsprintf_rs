@@ -979,6 +979,14 @@ impl Relay {
         sender != "RELAY" && !Self::is_end_to_end_ack_sender(sender)
     }
 
+    /// Extract the logical packet ID targeted by an end-to-end reliable ACK item.
+    ///
+    /// Relay queues can hold either decoded packets or serialized frames. This
+    /// helper normalizes both forms so relay ACK-routing logic can treat them
+    /// uniformly.
+    ///
+    /// Only relay-visible end-to-end `ReliableAck` packets qualify here.
+    /// Unrelated traffic returns `Ok(None)`.
     fn reliable_control_target_packet_id(data: &RelayItem) -> TelemetryResult<Option<u64>> {
         match data {
             RelayItem::Packet(pkt) => {
@@ -1008,6 +1016,11 @@ impl Relay {
             .insert(packet_id, ReliableReturnRouteState { side });
     }
 
+    /// Refresh or insert `packet_id` in the bounded reliable return-route cache.
+    ///
+    /// The relay uses this cache to route end-to-end acknowledgements back
+    /// toward the source side that most recently forwarded the corresponding
+    /// reliable data packet.
     fn remember_reliable_return_route_locked(st: &mut RelayInner, packet_id: u64) {
         let cap = RELIABLE_MAX_RETURN_ROUTES.max(1);
         st.reliable_return_route_order
@@ -1373,6 +1386,41 @@ impl Relay {
         !eps.is_empty() && eps.iter().all(|ep| ep.is_link_local_only())
     }
 
+    fn item_target_senders(&self, data: &RelayItem) -> TelemetryResult<Arc<[u64]>> {
+        match data {
+            RelayItem::Packet(pkt) => Ok(Arc::from(pkt.wire_target_senders())),
+            RelayItem::Serialized(bytes) => {
+                Ok(serialize::peek_envelope(bytes.as_ref())?.target_senders)
+            }
+        }
+    }
+
+    #[cfg(feature = "discovery")]
+    fn side_matches_target_senders_locked(
+        st: &RelayInner,
+        side: RelaySideId,
+        target_senders: &[u64],
+        now_ms: u64,
+    ) -> bool {
+        st.discovery_routes
+            .get(&side)
+            .map(|route| {
+                if now_ms.saturating_sub(route.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                    return false;
+                }
+                route.announcers.values().any(|sender_state| {
+                    if now_ms.saturating_sub(sender_state.last_seen_ms) > DISCOVERY_ROUTE_TTL_MS {
+                        return false;
+                    }
+                    sender_state
+                        .topology_boards
+                        .iter()
+                        .any(|board| target_senders.contains(&Self::sender_hash(&board.sender_id)))
+                })
+            })
+            .unwrap_or(false)
+    }
+
     fn remote_side_plan(
         &self,
         data: &RelayItem,
@@ -1381,6 +1429,7 @@ impl Relay {
         #[cfg(feature = "discovery")]
         {
             let (eps, ty) = self.item_route_info(data)?;
+            let target_senders = self.item_target_senders(data)?;
             let preferred_packet_id = Self::reliable_control_target_packet_id(data)?;
             if discovery::is_discovery_type(ty) {
                 let mut st = self.state.lock();
@@ -1450,15 +1499,20 @@ impl Relay {
                 }
                 if restrict_link_local
                     && st
-                    .sides
-                    .get(side)
-                    .and_then(|side| side.as_ref())
-                    .map(|s| !s.opts.link_local_enabled)
-                    .unwrap_or(true)
+                        .sides
+                        .get(side)
+                        .and_then(|side| side.as_ref())
+                        .map(|s| !s.opts.link_local_enabled)
+                        .unwrap_or(true)
                 {
                     continue;
                 }
                 if !self.route_allowed_locked(&st, Some(exclude), Some(ty), side) {
+                    continue;
+                }
+                if !target_senders.is_empty()
+                    && !Self::side_matches_target_senders_locked(&st, side, &target_senders, now_ms)
+                {
                     continue;
                 }
                 if preferred_timesync_source.as_deref().is_some_and(|source| {
@@ -1501,6 +1555,19 @@ impl Relay {
                     Some(exclude),
                     targets,
                     discovered_origin,
+                )))
+            } else if !target_senders.is_empty() {
+                let targets = self.eligible_side_ids_locked(
+                    &st,
+                    Some(exclude),
+                    Some(ty),
+                    restrict_link_local,
+                );
+                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
+                    &mut st,
+                    Some(exclude),
+                    targets,
+                    RouteSelectionOrigin::Flood,
                 )))
             } else if restrict_link_local {
                 let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), true);
@@ -2723,10 +2790,10 @@ impl Relay {
                     matches!(side_ref.tx_handler, RelayTxHandlerFn::Serialized(_)),
                     opts.reliable_enabled
                         && !self.side_has_multiple_announcers_locked(
-                        &st,
-                        item.src,
-                        self.clock.now_ms(),
-                    ),
+                            &st,
+                            item.src,
+                            self.clock.now_ms(),
+                        ),
                 )
             };
 
@@ -2883,7 +2950,7 @@ impl Relay {
                     {
                         if let Ok(packet_id) = Self::decode_end_to_end_reliable_ack(pkt.payload())
                             && let Some(sender_hash) =
-                            Self::decode_end_to_end_ack_sender_hash(pkt.sender())
+                                Self::decode_end_to_end_ack_sender_hash(pkt.sender())
                         {
                             let mut st = self.state.lock();
                             Self::note_end_to_end_acked_destination_locked(

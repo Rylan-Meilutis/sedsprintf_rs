@@ -16,29 +16,24 @@ typedef struct {
 extern RouterState g_router;
 
 SedsResult tx_send(const uint8_t *bytes, size_t len, void *user);
-
 SedsResult on_radio_packet(const SedsPacketView *pkt, void *user);
-SedsResult on_time_sync_packet(const SedsPacketView *pkt, void *user);
 
 SedsResult init_telemetry_router(void);
 
 SedsResult log_telemetry_synchronous(SedsDataType data_type, const void *data,
                                      size_t element_count, size_t element_size);
-
 SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
                                       size_t element_count, size_t element_size);
-
 SedsResult log_telemetry_string_asynchronous(SedsDataType data_type, const char *str);
 
 SedsResult dispatch_tx_queue(void);
-
-void rx_asynchronous(const uint8_t *bytes, size_t len);
-
 SedsResult process_rx_queue(void);
-
 SedsResult dispatch_tx_queue_timeout(uint32_t timeout_ms);
 SedsResult process_rx_queue_timeout(uint32_t timeout_ms);
 SedsResult process_all_queues_timeout(uint32_t timeout_ms);
+SedsResult telemetry_periodic(uint32_t timeout_ms);
+
+void rx_asynchronous(const uint8_t *bytes, size_t len);
 
 SedsResult print_telemetry_error(int32_t error_code);
 SedsResult log_error_asynchronous(const char *fmt, ...);

@@ -1,24 +1,23 @@
-use sedsprintf_rs::config::{DataEndpoint, DataType};
-use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
-use sedsprintf_rs::telemetry_packet::Packet;
-use sedsprintf_rs::TelemetryResult;
+use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
+use sedsprintf_rs::{DataEndpoint, DataType, Packet, TelemetryResult};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-struct FixedClock;
+struct StepClock(AtomicU64);
 
-impl Clock for FixedClock {
+impl Clock for StepClock {
     fn now_ms(&self) -> u64 {
-        0
+        self.0.fetch_add(1, Ordering::SeqCst)
     }
 }
 
 fn main() -> TelemetryResult<()> {
+    // This example assumes MESSAGE_DATA, GPS_DATA, and RADIO are already seeded.
     let router = Router::new_with_clock(
-        RouterMode::Sink,
         RouterConfig::new([EndpointHandler::new_packet_handler(
-            DataEndpoint::Radio,
+            DataEndpoint::named("RADIO"),
             |_pkt| Ok(()),
         )]),
-        Box::new(FixedClock),
+        Box::new(StepClock(AtomicU64::new(0))),
     );
 
     let telemetry = router.add_side_packet("TELEMETRY", |pkt| {
@@ -34,31 +33,28 @@ fn main() -> TelemetryResult<()> {
         Ok(())
     });
 
-    // Keep ordinary local traffic off the command links.
     router.set_route(None, command_a, false)?;
     router.set_route(None, command_b, false)?;
-
-    // Treat MessageData as a stand-in for "command" traffic and fan it out to
-    // both command links. No weighted/failover route mode is enabled here.
-    router.set_typed_route(None, DataType::MessageData, command_a, true)?;
-    router.set_typed_route(None, DataType::MessageData, command_b, true)?;
+    router.set_typed_route(None, DataType::named("MESSAGE_DATA"), command_a, true)?;
+    router.set_typed_route(None, DataType::named("MESSAGE_DATA"), command_b, true)?;
 
     let telemetry_pkt = Packet::from_f32_slice(
-        DataType::GpsData,
+        DataType::named("GPS_DATA"),
         &[1.0, 2.0, 3.0],
-        &[DataEndpoint::Radio],
+        &[DataEndpoint::named("RADIO")],
         1,
     )?;
     router.tx(telemetry_pkt)?;
 
     let command_pkt = Packet::from_str_slice(
-        DataType::MessageData,
+        DataType::named("MESSAGE_DATA"),
         &["ARM PAYLOAD"],
-        &[DataEndpoint::Radio],
+        &[DataEndpoint::named("RADIO")],
         2,
     )?;
     router.tx(command_pkt)?;
 
+    router.process_all_queues_with_timeout(0)?;
     let _ = telemetry;
     Ok(())
 }

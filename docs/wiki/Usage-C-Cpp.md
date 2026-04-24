@@ -226,6 +226,11 @@ These return a JSON snapshot. The top-level `routers` array contains each discov
 endpoints/time-sync source IDs it owns, and its connections. Per-side route entries also include
 their upstream announcer detail.
 
+Packets already in flight also carry a compact internal wire contract so topology or runtime-schema
+changes do not redirect them to the wrong holder or make them undecodable mid-flight. That contract
+is attached by the router or relay automatically; C callers continue to use the same public packet
+and logging APIs.
+
 ## Sending and receiving
 
 Common calls:

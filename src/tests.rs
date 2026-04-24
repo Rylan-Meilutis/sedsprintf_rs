@@ -42,7 +42,7 @@ mod compression_memory_tests {
             ts,
             Arc::<[u8]>::from(payload),
         )
-            .expect("packet build failed")
+        .expect("packet build failed")
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests2 {
             endpoints,
             0,
         )
-            .unwrap();
+        .unwrap();
 
         pkt.validate().unwrap();
 
@@ -369,14 +369,14 @@ mod tests2 {
             &[DataEndpoint::named("RADIO")],
             1,
         )
-            .unwrap();
+        .unwrap();
         let pkt_failover = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0, 5.0, 6.0],
             &[DataEndpoint::named("RADIO")],
             2,
         )
-            .unwrap();
+        .unwrap();
         router.tx(pkt.clone()).unwrap();
 
         router
@@ -443,7 +443,7 @@ mod tests2 {
             &[DataEndpoint::named("RADIO")],
             2,
         )
-            .unwrap();
+        .unwrap();
         relay.rx_from_side(ingress, pkt).unwrap();
         relay.process_all_queues().unwrap();
 
@@ -589,7 +589,7 @@ fn fake_telemetry_packet_bytes() -> Packet {
         &endpoints,
         1123581321,
     )
-        .unwrap()
+    .unwrap()
 }
 
 /// Copy helper that mirrors the C++ behavior, but uses raw pointers so we can
@@ -622,7 +622,7 @@ unsafe fn copy_telemetry_packet_raw(
         s.timestamp(),
         payload_arc,
     )
-        .map_err(|_| "packet validation failed")?;
+    .map_err(|_| "packet validation failed")?;
 
     *d = new_pkt;
     Ok(())
@@ -663,7 +663,7 @@ fn helpers_copy_telemetry_packet() {
         src.timestamp(),
         Arc::from(src.payload()), // deep copy payload
     )
-        .expect("src packet should be valid");
+    .expect("src packet should be valid");
 
     let st = unsafe { copy_telemetry_packet_raw(&mut dest as *mut _, &src as *const _) };
     assert!(st.is_ok());
@@ -753,7 +753,7 @@ mod handler_failure_tests {
             ts,
             Arc::<[u8]>::from(payload_for(ty)),
         )
-            .unwrap();
+        .unwrap();
 
         handle_errors(router.tx(pkt));
 
@@ -816,7 +816,7 @@ mod handler_failure_tests {
             ts,
             Arc::<[u8]>::from(payload_for(ty)),
         )
-            .unwrap();
+        .unwrap();
 
         handle_errors(router.tx(pkt));
 
@@ -900,7 +900,7 @@ mod timeout_tests {
             &[DataEndpoint::named("SD_CARD")], // <- only local
             ts,
         )
-            .unwrap()
+        .unwrap()
     }
 
     /// Build a TX function that increments `counter` for each frame sent.
@@ -998,9 +998,9 @@ mod timeout_tests {
                     &[DataEndpoint::named("SD_CARD")],
                     1 + i,
                 )
-                    .unwrap(),
+                .unwrap(),
             )
-                .unwrap();
+            .unwrap();
         }
 
         // Non-zero timeout: must do *some* work, but we no longer require
@@ -1055,9 +1055,9 @@ mod timeout_tests {
                     &[DataEndpoint::named("SD_CARD")],
                     1 + i,
                 )
-                    .unwrap(),
+                .unwrap(),
             )
-                .unwrap();
+            .unwrap();
         }
 
         // Step is 5ms per call; timeout 10ms allows two iterations max
@@ -1255,7 +1255,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             123,
         )
-            .unwrap();
+        .unwrap();
 
         let wire = serialize::serialize_packet(&pkt);
         let hdr = serialize::header_size_bytes(&pkt);
@@ -1299,7 +1299,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         let wire1 = serialize::serialize_packet(&pkt);
         let pkt2 = serialize::deserialize_packet(&wire1).unwrap();
@@ -1337,7 +1337,7 @@ mod tests_extra {
                 ts,
                 Arc::<[u8]>::from(payload),
             )
-                .unwrap()
+            .unwrap()
         }
 
         // Case 1: small (all varints fit in 1 byte)
@@ -1400,7 +1400,7 @@ mod tests_extra {
             123456,
             Arc::<[u8]>::from(payload),
         )
-            .unwrap();
+        .unwrap();
 
         let wire = serialize::serialize_packet(&pkt);
         let back = serialize::deserialize_packet(&wire).unwrap();
@@ -1430,7 +1430,7 @@ mod tests_extra {
             ts,
             Arc::<[u8]>::from(payload),
         )
-            .unwrap();
+        .unwrap();
 
         let wire = serialize::serialize_packet(&pkt);
         let env = serialize::peek_envelope(&wire).unwrap();
@@ -1475,7 +1475,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD")],
             123,
         )
-            .unwrap();
+        .unwrap();
         let mut wire = serialize::serialize_packet(&pkt).to_vec();
 
         // Compute where endpoint bits start (right after header varints)
@@ -1519,7 +1519,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             999,
         )
-            .unwrap();
+        .unwrap();
 
         let wire = serialize::serialize_packet(&pkt);
         let hdr = serialize::header_size_bytes(&pkt);
@@ -1549,7 +1549,7 @@ mod tests_extra {
             0,
             Arc::<[u8]>::from(buf),
         )
-            .unwrap();
+        .unwrap();
 
         assert_eq!(pkt.data_as_utf8_ref(), Some("hello"));
     }
@@ -1589,14 +1589,14 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt_rx = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD")], // only local to avoid extra TX during receive
             0,
         )
-            .unwrap();
+        .unwrap();
 
         r.tx_queue(pkt_tx).unwrap();
         r.rx_queue(pkt_rx).unwrap();
@@ -1649,7 +1649,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         // Sending should surface a HandlerError after all retries.
         let res = r.tx(pkt);
@@ -1681,7 +1681,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD")],
             12345,
         )
-            .unwrap();
+        .unwrap();
 
         assert_eq!(pkt.payload().len(), 12);
         assert_eq!(pkt.data_size(), 12);
@@ -1698,7 +1698,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD")],
             12345,
         )
-            .unwrap();
+        .unwrap();
 
         assert_eq!(pkt.payload().len(), 0);
         assert_eq!(pkt.data_size(), 0);
@@ -1719,7 +1719,7 @@ mod tests_extra {
             endpoints,
             42,
         )
-            .unwrap();
+        .unwrap();
         let wire = serialize::serialize_packet(&pkt);
 
         let env = serialize::peek_envelope(&wire).unwrap();
@@ -1770,7 +1770,7 @@ mod tests_extra {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             7,
         )
-            .unwrap();
+        .unwrap();
 
         let res = r.tx(pkt);
         match res {
@@ -1866,7 +1866,7 @@ mod tests_more {
             0,
             Arc::<[u8]>::from(vec![0u8; need + 1]),
         )
-            .unwrap_err();
+        .unwrap_err();
         assert!(matches!(err, TelemetryError::SizeMismatch { .. }));
     }
 
@@ -1924,7 +1924,7 @@ mod tests_more {
             &[DataEndpoint::named("SD_CARD")],
             123,
         )
-            .unwrap();
+        .unwrap();
         let wire = serialize::serialize_packet(&pkt);
 
         let called = StdArc::new(AtomicUsize::new(0));
@@ -2012,7 +2012,7 @@ mod tests_more {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         r.tx(pkt).unwrap();
 
         assert_eq!(tx_called.load(Ordering::SeqCst), 0);
@@ -2038,7 +2038,7 @@ mod tests_more {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         r.rx(&pkt).unwrap();
 
         assert_eq!(called.load(Ordering::SeqCst), 1);
@@ -2072,7 +2072,7 @@ mod tests_more {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             1,
         )
-            .unwrap();
+        .unwrap();
         let _ = r.tx(pkt);
 
         let s = captured.lock().unwrap().clone();
@@ -2236,7 +2236,7 @@ mod tests_more {
                 &[DataEndpoint::named("SD_CARD")],
                 i as u64,
             )
-                .unwrap();
+            .unwrap();
             router.rx_queue(pkt).unwrap();
         }
 
@@ -2339,7 +2339,7 @@ mod concurrency_tests {
                         &[DataEndpoint::named("SD_CARD")],
                         idx,
                     )
-                        .unwrap();
+                    .unwrap();
                     r_cloned.rx_queue(pkt).unwrap();
                 }
             }));
@@ -2405,7 +2405,7 @@ mod concurrency_tests {
                         &[DataEndpoint::named("SD_CARD")],
                         idx,
                     )
-                        .unwrap();
+                    .unwrap();
                     let wire = serialize::serialize_packet(&pkt);
                     r.rx_serialized_queue(&wire).unwrap();
                 }
@@ -2488,7 +2488,7 @@ mod concurrency_tests {
                         &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
                         idx,
                     )
-                        .unwrap();
+                    .unwrap();
                     let wire = serialize::serialize_packet(&pkt);
                     r.rx_serialized_queue_from_side(&wire, side).unwrap();
                 }
@@ -2567,7 +2567,7 @@ mod concurrency_tests {
             &[DataEndpoint::named("SD_CARD")],
             100,
         )
-            .unwrap();
+        .unwrap();
         router.rx_queue(first).unwrap();
 
         let (tx_done, rx_done) = mpsc::channel();
@@ -2633,7 +2633,7 @@ mod concurrency_tests {
                         &[DataEndpoint::named("SD_CARD")],
                         idx,
                     )
-                        .unwrap();
+                    .unwrap();
                     let wire = serialize::serialize_packet(&pkt);
                     r_cloned
                         .rx_serialized(&wire)
@@ -2780,7 +2780,7 @@ mod concurrency_tests {
                     &[DataEndpoint::named("SD_CARD")],
                     i as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 r_rx.rx_queue(pkt).expect("rx_packet_to_queue failed");
             }
         });
@@ -2907,7 +2907,7 @@ mod relay_tests {
             &[DataEndpoint::named("SD_CARD")],
             v,
         )
-            .unwrap();
+        .unwrap();
         serialize::serialize_packet(&pkt)
     }
 
@@ -3222,7 +3222,7 @@ mod dedupe_tests {
             &[DataEndpoint::named("SD_CARD")],
             v,
         )
-            .unwrap();
+        .unwrap();
         serialize::serialize_packet(&pkt)
     }
 
@@ -3255,7 +3255,7 @@ mod dedupe_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let wire = serialize::serialize_packet(&pkt);
 
         // Feed the identical frame many times.
@@ -3295,7 +3295,7 @@ mod dedupe_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let wire = serialize::serialize_packet(&pkt);
 
         // First time → delivered.
@@ -3334,7 +3334,7 @@ mod dedupe_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let wire_a = serialize::serialize_packet(&pkt_a);
 
         // Frame B (different payload)
@@ -3344,7 +3344,7 @@ mod dedupe_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let wire_b = serialize::serialize_packet(&pkt_b);
 
         r.rx_serialized(&wire_a).unwrap();
@@ -3547,14 +3547,14 @@ mod relay_reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         relay.rx_from_side(0, pkt1).unwrap();
         relay.rx_from_side(0, pkt2).unwrap();
@@ -3672,14 +3672,14 @@ mod relay_reliable_tests {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         relay1.rx_from_side(0, pkt1).unwrap();
         relay1.rx_from_side(0, pkt2).unwrap();
@@ -3747,14 +3747,14 @@ mod relay_reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         let seq1 = serialize::serialize_packet_with_reliable(
             &pkt1,
@@ -3828,14 +3828,14 @@ mod relay_reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD")],
             1,
         )
-            .unwrap();
+        .unwrap();
 
         relay.rx_from_side(0, pkt1).unwrap();
         relay.rx_from_side(0, pkt2).unwrap();
@@ -3934,7 +3934,7 @@ mod reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         sender.tx(pkt).unwrap();
 
@@ -3973,14 +3973,14 @@ mod reliable_tests {
             &[DataEndpoint::named("RADIO")],
             1,
         )
-            .unwrap();
+        .unwrap();
         let second = Packet::from_f32_slice(
             DataType::named("BATTERY_STATUS"),
             &[3.0_f32, 4.0],
             &[DataEndpoint::named("RADIO")],
             2,
         )
-            .unwrap();
+        .unwrap();
 
         let router_for_first = router.clone();
         let first_handle = thread::spawn(move || router_for_first.tx(first));
@@ -4029,14 +4029,14 @@ mod reliable_tests {
             &[DataEndpoint::named("RADIO")],
             1,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[2.0_f32, 0.0, 0.0],
             &[DataEndpoint::named("RADIO")],
             2,
         )
-            .unwrap();
+        .unwrap();
         sender.tx(pkt1).unwrap();
         sender.tx(pkt2).unwrap();
 
@@ -4084,7 +4084,7 @@ mod reliable_tests {
             0,
             crate::router::encode_slice_le(&[DataType::named("GPS_DATA").as_u32(), 1]),
         )
-            .unwrap();
+        .unwrap();
         sender.rx_from_side(&ack1, sender_side).unwrap();
         for control in controls.iter().filter(|frame| {
             serialize::peek_envelope(frame)
@@ -4104,7 +4104,7 @@ mod reliable_tests {
             0,
             crate::router::encode_slice_le(&[DataType::named("GPS_DATA").as_u32(), 2]),
         )
-            .unwrap();
+        .unwrap();
         sender.rx_from_side(&request2, sender_side).unwrap();
         sender.process_tx_queue_with_timeout(0).unwrap();
         assert!(
@@ -4158,14 +4158,14 @@ mod reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         let seq1 = serialize::serialize_packet_with_reliable(
             &pkt1,
@@ -4231,14 +4231,14 @@ mod reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[4.0_f32, 5.0, 6.0],
             &[DataEndpoint::named("SD_CARD")],
             1,
         )
-            .unwrap();
+        .unwrap();
 
         router.tx(pkt1).unwrap();
         router.tx(pkt2).unwrap();
@@ -4290,7 +4290,7 @@ mod reliable_tests {
             &[DataEndpoint::named("SD_CARD")],
             0,
         )
-            .unwrap();
+        .unwrap();
 
         sender.tx(pkt).unwrap();
 
@@ -4409,7 +4409,7 @@ mod router_tests {
             &[DataEndpoint::named("RADIO")],
             7,
         )
-            .unwrap();
+        .unwrap();
         let wire = serialize::serialize_packet(&pkt);
 
         router
@@ -4600,7 +4600,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(msg).unwrap();
 
             let got_a = seen_a.lock().unwrap().clone();
@@ -4650,7 +4650,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 11,
             )
-                .unwrap();
+            .unwrap();
             let packet_id = pkt.packet_id();
             router.tx(pkt).unwrap();
             assert_eq!(
@@ -4665,7 +4665,7 @@ mod router_tests {
                 0,
                 Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
             )
-                .unwrap();
+            .unwrap();
             router.rx_from_side(&ack, side).unwrap();
             assert_eq!(
                 router.debug_end_to_end_pending_destination_count(packet_id),
@@ -4748,9 +4748,7 @@ mod router_tests {
 
         #[test]
         fn in_flight_end_to_end_destinations_survive_runtime_data_type_removal() {
-            use crate::config::{
-                register_data_type_with_description, remove_data_type_by_name,
-            };
+            use crate::config::{register_data_type_with_description, remove_data_type_by_name};
             use crate::{MessageClass, MessageDataType, MessageElement, ReliableMode};
 
             let type_name = "DISCOVERY_INFLIGHT_TYPE_9101";
@@ -4760,7 +4758,7 @@ mod router_tests {
                 "inflight custom type",
                 MessageElement::Dynamic(MessageDataType::Binary, MessageClass::Data),
                 &[DataEndpoint::named("RADIO")],
-                ReliableMode::Ordered,
+                ReliableMode::None,
                 3,
             )
             .unwrap();
@@ -4811,6 +4809,48 @@ mod router_tests {
         }
 
         #[test]
+        fn explicit_target_contract_skips_wrong_local_router_delivery() {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let hits_c = hits.clone();
+            let router = Router::new_with_clock(
+                RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                    DataEndpoint::named("RADIO"),
+                    move |_pkt| {
+                        hits_c.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )])
+                .with_sender("LOCAL"),
+                StepClock::new_box(0, 0),
+            );
+            let side = router.add_side_packet("LINK", |_pkt: &Packet| Ok(()));
+
+            let pkt = Packet::from_f32_slice(
+                DataType::named("GPS_DATA"),
+                &[41.0, 0.0, 0.0],
+                &[DataEndpoint::named("RADIO")],
+                41,
+            )
+            .unwrap();
+            let wire = crate::serialize::serialize_packet_with_wire_contract(
+                &pkt,
+                Some(crate::serialize::ReliableHeader {
+                    flags: crate::serialize::RELIABLE_FLAG_UNSEQUENCED,
+                    seq: 0,
+                    ack: 0,
+                }),
+                Some(crate::message_meta(pkt.data_type()).element),
+                &[crate::packet::hash_bytes_u64(
+                    0x517C_C1B7_2722_0A95,
+                    "OTHER_DEST".as_bytes(),
+                )],
+            )
+            .unwrap();
+            router.rx_serialized_from_side(&wire, side).unwrap();
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
         fn reliable_router_state_stays_bounded_under_unacked_traffic() {
             let router = Router::new_with_clock(
                 RouterConfig::default().with_sender("SRC"),
@@ -4840,7 +4880,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     idx as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 let _ = router.tx(pkt);
             }
 
@@ -4855,7 +4895,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     (1000 + idx) as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 router.rx_from_side(&pkt, side).unwrap();
             }
 
@@ -4884,7 +4924,7 @@ mod router_tests {
                     idx as u64,
                     &boards,
                 )
-                    .unwrap();
+                .unwrap();
                 router.rx_from_side(&pkt, side).unwrap();
             }
 
@@ -4938,7 +4978,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 11,
             )
-                .unwrap();
+            .unwrap();
             router.tx(msg).unwrap();
 
             let got = seen_remote.lock().unwrap().clone();
@@ -4963,7 +5003,7 @@ mod router_tests {
                 0,
                 &[DataEndpoint::named("RADIO"), DataEndpoint::TimeSync],
             )
-                .unwrap();
+            .unwrap();
             router.rx_queue_from_side(discovery_pkt, side_fill).unwrap();
             router.process_all_queues_with_timeout(0).unwrap();
 
@@ -5033,7 +5073,7 @@ mod router_tests {
 
         #[test]
         fn queued_serialized_discovery_from_same_sender_is_ignored_and_local_endpoint_does_not_flood()
-        {
+         {
             use crate::config::DEVICE_IDENTIFIER;
 
             let seen_remote: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5074,7 +5114,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 12,
             )
-                .unwrap();
+            .unwrap();
             router.tx(msg).unwrap();
 
             assert!(seen_remote.lock().unwrap().is_empty());
@@ -5112,7 +5152,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, msg).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -5155,7 +5195,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_a, pkt_a).unwrap();
             relay.process_all_queues().unwrap();
             assert_eq!(seen_b.lock().unwrap().len(), 1);
@@ -5167,7 +5207,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_b, pkt_b).unwrap();
             relay.process_all_queues().unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 0);
@@ -5178,7 +5218,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 3,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, pkt_c).unwrap();
             relay.process_all_queues().unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
@@ -5199,7 +5239,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 4,
             )
-                .unwrap();
+            .unwrap();
 
             match relay.rx_from_side(side, pkt) {
                 Err(TelemetryError::HandlerError(msg)) => {
@@ -5251,7 +5291,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_a, gps_pkt).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -5273,7 +5313,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_a, fallback_pkt).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -5313,7 +5353,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 5,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_b, pkt.clone()).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -5487,7 +5527,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(msg.clone()).unwrap();
 
             assert!(seen_a.lock().unwrap().is_empty());
@@ -5590,7 +5630,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(local_tx).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
             assert!(seen_b.lock().unwrap().is_empty());
@@ -5602,7 +5642,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             router.rx_from_side(&from_a, side_a).unwrap();
             assert_eq!(seen_b.lock().unwrap().len(), 1);
             assert!(seen_c.lock().unwrap().is_empty());
@@ -5613,7 +5653,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 3,
             )
-                .unwrap();
+            .unwrap();
             router.rx_from_side(&from_b, side_b).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
 
@@ -5623,7 +5663,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 4,
             )
-                .unwrap();
+            .unwrap();
             router.rx_from_side(&from_c, side_c).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 2);
             assert_eq!(seen_b.lock().unwrap().len(), 2);
@@ -5666,7 +5706,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(gps_pkt).unwrap();
             assert!(seen_a.lock().unwrap().is_empty());
             assert_eq!(seen_b.lock().unwrap().len(), 1);
@@ -5685,7 +5725,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             router.tx(fallback_pkt).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
             assert_eq!(seen_b.lock().unwrap().len(), 2);
@@ -5722,7 +5762,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(gps_pkt).unwrap();
 
             assert!(seen_a.lock().unwrap().is_empty());
@@ -5777,7 +5817,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     seq as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 router.tx(pkt).unwrap();
             }
 
@@ -5853,7 +5893,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     seq as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 router.tx(pkt).unwrap();
             }
 
@@ -5899,7 +5939,7 @@ mod router_tests {
                 DISCOVERY_ROUTE_TTL_MS / 2,
                 &[DataEndpoint::named("RADIO")],
             )
-                .unwrap();
+            .unwrap();
             router.rx_from_side(&discovery_b, side_b).unwrap();
             seen_a.lock().unwrap().clear();
             seen_b.lock().unwrap().clear();
@@ -5916,7 +5956,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt1).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
             assert_eq!(seen_b.lock().unwrap().len(), 0);
@@ -5928,7 +5968,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt2).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
             assert_eq!(seen_b.lock().unwrap().len(), 1);
@@ -5966,7 +6006,7 @@ mod router_tests {
                 DISCOVERY_ROUTE_TTL_MS / 2,
                 &[DataEndpoint::named("RADIO")],
             )
-                .unwrap();
+            .unwrap();
             router.rx_from_side(&discovery_b, side_b).unwrap();
             seen_a.lock().unwrap().clear();
             seen_b.lock().unwrap().clear();
@@ -5984,7 +6024,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     seq as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 router.tx(pkt).unwrap();
             }
             let before_a = seen_a.lock().unwrap().len();
@@ -5998,7 +6038,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 3,
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt3).unwrap();
 
             assert_eq!(seen_a.lock().unwrap().len(), before_a);
@@ -6043,7 +6083,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt1).unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
             assert_eq!(seen_b.lock().unwrap().len(), 0);
@@ -6055,7 +6095,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt2).unwrap();
 
             let before_a = seen_a.lock().unwrap().len();
@@ -6106,7 +6146,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     seq as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 relay.rx_from_side(side_c, pkt).unwrap();
             }
             relay.process_all_queues().unwrap();
@@ -6148,7 +6188,7 @@ mod router_tests {
                 DISCOVERY_ROUTE_TTL_MS / 2,
                 &[DataEndpoint::named("RADIO")],
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_b, discovery_b).unwrap();
             relay.process_rx_queue().unwrap();
             relay.process_tx_queue().unwrap();
@@ -6167,7 +6207,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, pkt1).unwrap();
             relay.process_all_queues().unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
@@ -6180,7 +6220,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, pkt2).unwrap();
             relay.process_all_queues().unwrap();
             let before_a = seen_a.lock().unwrap().len();
@@ -6220,7 +6260,7 @@ mod router_tests {
                 DISCOVERY_ROUTE_TTL_MS / 2,
                 &[DataEndpoint::named("RADIO")],
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_b, discovery_b).unwrap();
             relay.process_all_queues().unwrap();
             seen_a.lock().unwrap().clear();
@@ -6239,7 +6279,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     seq as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 relay.rx_from_side(side_c, pkt).unwrap();
             }
             relay.process_all_queues().unwrap();
@@ -6254,7 +6294,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 3,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, pkt3).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -6303,7 +6343,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 1,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, pkt1).unwrap();
             relay.process_all_queues().unwrap();
             assert_eq!(seen_a.lock().unwrap().len(), 1);
@@ -6316,7 +6356,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 2,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_c, pkt2).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -6337,7 +6377,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 5,
             )
-                .unwrap();
+            .unwrap();
 
             match router.rx_from_side(&pkt, side) {
                 Err(TelemetryError::HandlerError(msg)) => {
@@ -6517,7 +6557,7 @@ mod router_tests {
                 &[DataEndpoint::named("RADIO")],
                 3,
             )
-                .unwrap();
+            .unwrap();
             router.tx(msg).unwrap();
 
             assert_eq!(seen_a.lock().unwrap().len(), 1);
@@ -6536,7 +6576,7 @@ mod router_tests {
                 0,
                 &[DataEndpoint::named("RADIO"), DataEndpoint::named("SD_CARD")],
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_a, discovery_pkt).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -6609,7 +6649,7 @@ mod router_tests {
                 0,
                 Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side, ack).unwrap();
             relay.process_all_queues().unwrap();
             assert_eq!(
@@ -6677,7 +6717,8 @@ mod router_tests {
             relay
                 .rx_from_side(
                     link,
-                    build_discovery_announce("DEST_B", 1, &[DataEndpoint::named("SD_CARD")]).unwrap(),
+                    build_discovery_announce("DEST_B", 1, &[DataEndpoint::named("SD_CARD")])
+                        .unwrap(),
                 )
                 .unwrap();
             relay.process_all_queues().unwrap();
@@ -6705,7 +6746,7 @@ mod router_tests {
                     &[DataEndpoint::named("RADIO")],
                     idx as u64,
                 )
-                    .unwrap();
+                .unwrap();
                 relay.rx_from_side(side, pkt).unwrap();
             }
             assert!(relay.debug_reliable_return_route_count() <= RELIABLE_MAX_RETURN_ROUTES.max(1));
@@ -6719,7 +6760,7 @@ mod router_tests {
                     idx as u64,
                     Arc::<[u8]>::from(packet_id.to_le_bytes().to_vec()),
                 )
-                    .unwrap();
+                .unwrap();
                 relay.rx_from_side(side, ack).unwrap();
             }
             assert!(
@@ -6737,7 +6778,7 @@ mod router_tests {
                     idx as u64,
                     Arc::<[u8]>::from((10_000u64 + idx as u64).to_le_bytes().to_vec()),
                 )
-                    .unwrap();
+                .unwrap();
                 relay.rx_from_side(side, ack).unwrap();
             }
             assert!(
@@ -6784,7 +6825,7 @@ mod router_tests {
                 7,
                 Arc::<[u8]>::from(b"hello-ipc".as_slice()),
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt).unwrap();
 
             assert!(seen_net.lock().unwrap().is_empty());
@@ -6837,7 +6878,7 @@ mod router_tests {
                 8,
                 Arc::<[u8]>::from(b"stay-local".as_slice()),
             )
-                .unwrap();
+            .unwrap();
             router.tx(pkt).unwrap();
 
             assert!(seen_net.lock().unwrap().is_empty());
@@ -6893,7 +6934,7 @@ mod router_tests {
                 9,
                 Arc::<[u8]>::from(b"relay-local".as_slice()),
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(side_src, pkt).unwrap();
             relay.process_all_queues().unwrap();
 
@@ -7186,7 +7227,7 @@ mod router_tests {
                             .tx(pkt)
                     },
                 )])
-                    .with_sender("A_NODE"),
+                .with_sender("A_NODE"),
                 StepClock::new_default_box(),
             ));
 
@@ -7219,7 +7260,7 @@ mod router_tests {
                             .tx(pkt)
                     },
                 )])
-                    .with_sender("B_NODE"),
+                .with_sender("B_NODE"),
                 StepClock::new_default_box(),
             ));
 
@@ -7265,7 +7306,7 @@ mod router_tests {
                 0,
                 Arc::<[u8]>::from(b"start".as_slice()),
             )
-                .unwrap();
+            .unwrap();
             router_a.tx(first).unwrap();
 
             for _ in 0..8 {
@@ -7403,7 +7444,7 @@ mod router_tests {
                 ReliableMode::Unordered,
                 42,
             )
-                .unwrap();
+            .unwrap();
 
             assert_eq!(DataEndpoint::try_named(ep_name), Some(endpoint));
             assert_eq!(DataType::try_named(ty_name), Some(ty));
@@ -7560,7 +7601,7 @@ mod router_tests {
                     "first endpoint",
                     false,
                 )
-                    .unwrap_err(),
+                .unwrap_err(),
                 TelemetryError::BadArg
             );
             assert_eq!(
@@ -7570,7 +7611,7 @@ mod router_tests {
                     "first endpoint",
                     false,
                 )
-                    .unwrap_err(),
+                .unwrap_err(),
                 TelemetryError::BadArg
             );
 
@@ -7583,7 +7624,7 @@ mod router_tests {
                 ReliableMode::None,
                 1,
             )
-                .unwrap();
+            .unwrap();
             assert!(data_type_exists(ty));
 
             assert!(remove_endpoint(endpoint).unwrap());
@@ -7611,7 +7652,7 @@ mod router_tests {
                 ReliableMode::None,
                 9,
             )
-                .unwrap();
+            .unwrap();
 
             let endpoint_ref = endpoint_definition_by_name(ep_name).unwrap();
             assert_eq!(endpoint_ref.id, endpoint);
@@ -7652,7 +7693,7 @@ mod router_tests {
                 ReliableMode::None,
                 3,
             )
-                .unwrap_err();
+            .unwrap_err();
             assert_eq!(err, TelemetryError::BadArg);
         }
 
@@ -7702,6 +7743,56 @@ mod router_tests {
             assert!(export_schema().types.iter().any(|def| {
                 def.id == DataType(3002) && (def.element == a.element || def.element == b.element)
             }));
+        }
+
+        #[test]
+        fn inline_wire_shape_keeps_old_payload_decodable_after_layout_change() {
+            let endpoint = DataEndpoint::named("RADIO");
+            let ty = DataType(4090);
+            let ty_name = "SCHEMA_WIRE_TYPE_4090";
+            let _ = remove_data_type_by_name(ty_name);
+            register_data_type_id_with_description(
+                ty,
+                ty_name,
+                "wire shape type v1",
+                MessageElement::Static(1, MessageDataType::UInt16, MessageClass::Data),
+                &[endpoint],
+                ReliableMode::None,
+                1,
+            )
+            .unwrap();
+
+            let pkt = Packet::new(
+                ty,
+                &[endpoint],
+                "SRC",
+                0,
+                Arc::<[u8]>::from(7u16.to_le_bytes().to_vec()),
+            )
+            .unwrap();
+            let wire = crate::serialize::serialize_packet_with_wire_contract(
+                &pkt,
+                None,
+                Some(crate::message_meta(ty).element),
+                &[],
+            )
+            .unwrap();
+
+            assert!(remove_data_type_by_name(ty_name).unwrap());
+            register_data_type_id_with_description(
+                ty,
+                ty_name,
+                "wire shape type v2",
+                MessageElement::Static(2, MessageDataType::UInt16, MessageClass::Data),
+                &[endpoint],
+                ReliableMode::None,
+                1,
+            )
+            .unwrap();
+
+            let decoded = crate::serialize::deserialize_packet(&wire).unwrap();
+            decoded.validate().unwrap();
+            assert_eq!(decoded.data_as_u16().unwrap(), vec![7u16]);
         }
 
         #[test]

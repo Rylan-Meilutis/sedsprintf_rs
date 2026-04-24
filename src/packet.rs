@@ -9,9 +9,9 @@
 use crate::config::{StandardSmallPayload, DEVICE_IDENTIFIER, STRING_PRECISION};
 use crate::queue::ByteCost;
 use crate::{
-    config::{DataEndpoint, DataType}, data_type_size, get_data_type, get_info_type, get_message_name,
-    message_meta,
-    router::LeBytes, MessageClass, MessageDataType, MessageElement, TelemetryError,
+    config::{DataEndpoint, DataType}, data_type_size, get_data_type, get_message_name, message_meta,
+    router::LeBytes,
+    MessageClass, MessageDataType, MessageElement, TelemetryError,
     TelemetryResult,
 };
 use crate::{impl_data_as_prim, impl_from_prim_slices, impl_ledecode_auto};
@@ -67,6 +67,12 @@ pub struct Packet {
 
     /// Raw payload bytes, stored via [`SmallPayload`] for small/large optimization.
     payload: StandardSmallPayload,
+
+    /// Inline wire-format shape used when this packet came from a migration-safe frame.
+    wire_shape: Option<MessageElement>,
+
+    /// Explicit destination sender hashes frozen into the wire-format contract.
+    wire_target_senders: Arc<[u64]>,
 }
 
 // ============================================================================
@@ -114,28 +120,24 @@ pub fn hash_bytes_u64(mut h: u64, bytes: &[u8]) -> u64 {
 /// - For `Hex`: no additional validation.
 /// - For numerics/bool: ensures the length is a multiple of the element width.
 #[inline]
-fn validate_dynamic_len_and_content(ty: DataType, bytes: &[u8]) -> TelemetryResult<()> {
-    let dt = get_data_type(ty);
-    match dt {
+fn validate_dynamic_len_and_content_for_element(
+    element: MessageElement,
+    bytes: &[u8],
+) -> TelemetryResult<()> {
+    match element.data_type() {
         MessageDataType::String => {
-            // Trim trailing NULs for validation, but do not copy.
             let end = bytes
                 .iter()
                 .rposition(|&b| b != 0)
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            // Empty string is OK; otherwise ensure valid UTF-8.
             if end > 0 {
                 core::str::from_utf8(&bytes[..end]).map_err(|_| TelemetryError::InvalidUtf8)?;
             }
             Ok(())
         }
-        MessageDataType::Binary => {
-            // No UTF-8 requirement for hex blobs.
-            Ok(())
-        }
-        _ => {
-            // Numeric / bool: length must be a multiple of the element width.
+        MessageDataType::Binary => Ok(()),
+        dt => {
             let w = element_width(dt);
             if w == 0 || !bytes.len().is_multiple_of(w) {
                 return Err(TelemetryError::SizeMismatch {
@@ -179,6 +181,101 @@ impl_ledecode_auto!(i8);
 // ============================================================================
 
 impl Packet {
+    /// Validate `payload` against the provided schema element.
+    ///
+    /// This helper is shared by normal packet construction and by
+    /// `new_with_wire_contract(...)`. The latter matters because a packet that
+    /// was already serialized may need to keep using the element shape it was
+    /// written with even if the local runtime registry has since changed.
+    ///
+    /// # Parameters
+    /// - `element`: Effective schema element to validate against. This may come
+    ///   from the current runtime registry or from the inline wire contract.
+    /// - `payload`: Raw payload bytes to validate.
+    ///
+    /// # Returns
+    /// - `Ok(())` when the payload is compatible with `element`.
+    /// - `Err(TelemetryError)` when the payload length or encoding does not
+    ///   match the required shape.
+    #[inline]
+    fn validate_payload_against_element(
+        element: MessageElement,
+        payload: &[u8],
+    ) -> TelemetryResult<()> {
+        match element {
+            MessageElement::Static(need, dt, _) => {
+                let need = need * data_type_size(dt);
+                if payload.len() != need {
+                    return Err(TelemetryError::SizeMismatch {
+                        expected: need,
+                        got: payload.len(),
+                    });
+                }
+                Ok(())
+            }
+            MessageElement::Dynamic(_, _) => {
+                validate_dynamic_len_and_content_for_element(element, payload)
+            }
+        }
+    }
+
+    /// Create a packet while preserving wire-contract metadata from a decoded frame.
+    ///
+    /// This constructor is used by deserialization paths that may carry a
+    /// migration-safe wire contract. The contract can supply:
+    ///
+    /// - `wire_shape`: an inline `MessageElement` that keeps payload decoding
+    ///   stable even if the local runtime schema changed after the packet was
+    ///   serialized.
+    /// - `wire_target_senders`: a frozen list of destination-holder sender
+    ///   hashes that routers and relays use to keep in-flight forwarding bound
+    ///   to the originally intended remote holders.
+    ///
+    /// # Parameters
+    /// - `ty`: Logical message type ID carried by the frame.
+    /// - `endpoints`: Logical destination endpoints from the endpoint bitmap.
+    /// - `sender`: Logical sender string decoded from the frame.
+    /// - `timestamp`: Wire timestamp in milliseconds.
+    /// - `payload`: Payload bytes after any decompression.
+    /// - `wire_shape`: Optional inline payload shape carried by the wire
+    ///   contract. When present, validation uses this value instead of the
+    ///   current runtime schema entry.
+    /// - `wire_target_senders`: Frozen destination-holder hashes carried by the
+    ///   wire contract. These are routing metadata, not application payload.
+    ///
+    /// # Returns
+    /// - `Ok(Packet)` when all packet invariants and payload validation pass.
+    /// - `Err(TelemetryError)` when endpoints are empty or the payload is
+    ///   incompatible with the effective schema element.
+    #[inline]
+    pub(crate) fn new_with_wire_contract(
+        ty: DataType,
+        endpoints: &[DataEndpoint],
+        sender: &str,
+        timestamp: u64,
+        payload: Arc<[u8]>,
+        wire_shape: Option<MessageElement>,
+        wire_target_senders: Arc<[u64]>,
+    ) -> TelemetryResult<Self> {
+        if endpoints.is_empty() {
+            return Err(TelemetryError::EmptyEndpoints);
+        }
+
+        let element = wire_shape.unwrap_or(message_meta(ty).element);
+        Self::validate_payload_against_element(element, &payload)?;
+
+        Ok(Self {
+            ty,
+            data_size: payload.len(),
+            sender: sender.into(),
+            endpoints: Arc::<[DataEndpoint]>::from(endpoints),
+            timestamp,
+            payload: StandardSmallPayload::new(&payload),
+            wire_shape,
+            wire_target_senders,
+        })
+    }
+
     /// Create a packet from a raw payload, validating against `message_meta(ty)`.
     ///
     /// Checks:
@@ -210,34 +307,46 @@ impl Packet {
         timestamp: u64,
         payload: Arc<[u8]>,
     ) -> TelemetryResult<Self> {
-        if endpoints.is_empty() {
-            return Err(TelemetryError::EmptyEndpoints);
-        }
-
-        let meta = message_meta(ty);
-        match meta.element {
-            MessageElement::Static(need, _, _) => {
-                let need = need * data_type_size(get_data_type(ty));
-                if payload.len() != need {
-                    return Err(TelemetryError::SizeMismatch {
-                        expected: need,
-                        got: payload.len(),
-                    });
-                }
-            }
-            MessageElement::Dynamic(_, _) => {
-                validate_dynamic_len_and_content(ty, &payload)?;
-            }
-        }
-
-        Ok(Self {
+        Self::new_with_wire_contract(
             ty,
-            data_size: payload.len(),
-            sender: sender.into(),
-            endpoints: Arc::<[DataEndpoint]>::from(endpoints),
+            endpoints,
+            sender,
             timestamp,
-            payload: StandardSmallPayload::new(&payload),
-        })
+            payload,
+            None,
+            Arc::<[u64]>::from([]),
+        )
+    }
+
+    /// Resolve the schema element this packet should use for validation,
+    /// formatting, and typed payload access.
+    ///
+    /// Normal locally-built packets use the current runtime schema entry for
+    /// `self.ty`. Packets decoded from migration-safe frames may instead carry
+    /// `self.wire_shape`, which takes precedence so an in-flight payload can
+    /// still be interpreted after runtime schema churn.
+    #[inline]
+    fn effective_element(&self) -> MessageElement {
+        self.wire_shape.unwrap_or(message_meta(self.ty).element)
+    }
+
+    /// Return the effective primitive payload kind for this packet.
+    ///
+    /// This is derived from `effective_element()` so typed decode helpers keep
+    /// following any inline wire shape when one is present.
+    #[inline]
+    fn effective_data_type(&self) -> MessageDataType {
+        self.effective_element().data_type()
+    }
+
+    /// Return the effective message class for this packet.
+    ///
+    /// Like `effective_data_type()`, this honors inline wire-shape metadata so
+    /// formatting remains consistent for in-flight packets across schema
+    /// changes.
+    #[inline]
+    fn effective_message_class(&self) -> MessageClass {
+        self.effective_element().message_type()
     }
 
     /// Compute a stable 64-bit identifier for this packet.
@@ -329,22 +438,7 @@ impl Packet {
             });
         }
 
-        let meta = message_meta(self.ty);
-        match meta.element {
-            MessageElement::Static(need, _, _) => {
-                let need = need * data_type_size(get_data_type(self.ty));
-                if self.data_size != need {
-                    return Err(TelemetryError::SizeMismatch {
-                        expected: need,
-                        got: self.data_size,
-                    });
-                }
-            }
-            MessageElement::Dynamic(_, _) => {
-                validate_dynamic_len_and_content(self.ty, &self.payload)?;
-            }
-        }
-        Ok(())
+        Self::validate_payload_against_element(self.effective_element(), &self.payload)
     }
 
     /* ---- Getters ---- */
@@ -384,6 +478,25 @@ impl Packet {
     #[inline]
     pub fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// Return the optional inline wire shape preserved from deserialization.
+    ///
+    /// This is crate-visible because serialization and routing need to keep the
+    /// contract intact when a packet is forwarded again.
+    #[inline]
+    pub(crate) fn wire_shape(&self) -> Option<MessageElement> {
+        self.wire_shape
+    }
+
+    /// Return the frozen destination-holder hashes preserved from the wire contract.
+    ///
+    /// Routers and relays use this list to avoid delivering an in-flight packet
+    /// to newly-learned holders that were not part of the original delivery
+    /// contract when the packet was serialized.
+    #[inline]
+    pub(crate) fn wire_target_senders(&self) -> &[u64] {
+        &self.wire_target_senders
     }
 
     /// Header-only string (no decoded data).
@@ -426,7 +539,7 @@ impl Packet {
     /// - `None` otherwise.
     #[inline]
     pub fn data_as_utf8_ref(&self) -> Option<&str> {
-        if get_data_type(self.ty) != MessageDataType::String {
+        if self.effective_data_type() != MessageDataType::String {
             return None;
         }
         let bytes = &self.payload;
@@ -482,7 +595,7 @@ impl Packet {
             return s;
         }
 
-        match get_info_type(self.ty) {
+        match self.effective_message_class() {
             MessageClass::Data => {
                 s.push_str(", Data: (");
             }
@@ -501,7 +614,7 @@ impl Packet {
             return s;
         }
 
-        match get_data_type(self.ty) {
+        match self.effective_data_type() {
             MessageDataType::Float64 => {
                 self.data_to_string::<f64>(&mut s);
             }
@@ -590,7 +703,7 @@ impl Packet {
     /// Ensure this packet's element type matches `expected`.
     #[inline]
     fn ensure_kind(&self, expected: MessageDataType) -> TelemetryResult<()> {
-        let dt = get_data_type(self.ty);
+        let dt = self.effective_data_type();
         if dt != expected {
             return Err(TelemetryError::TypeMismatch {
                 expected: data_type_size(expected),

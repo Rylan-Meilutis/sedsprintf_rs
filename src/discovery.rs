@@ -637,7 +637,7 @@ pub fn decode_discovery_schema_payload(
             &mut cursor,
             "discovery schema data type",
         )?)
-            .ok_or(TelemetryError::Deserialize("discovery schema data type"))?;
+        .ok_or(TelemetryError::Deserialize("discovery schema data type"))?;
         let class =
             message_class_from_code(read_u8(payload, &mut cursor, "discovery schema class")?)
                 .ok_or(TelemetryError::Deserialize("discovery schema class"))?;

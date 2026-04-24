@@ -257,7 +257,7 @@ type CEndpointHandler = Option<extern "C" fn(pkt: *const SedsPacketView, user: *
 
 /// Endpoint handler callback (serialized bytes) (legacy).
 type CSerializedHandler =
-Option<extern "C" fn(bytes: *const u8, len: usize, user: *mut c_void) -> i32>;
+    Option<extern "C" fn(bytes: *const u8, len: usize, user: *mut c_void) -> i32>;
 
 /// C-facing endpoint descriptor (legacy, must match C header).
 #[repr(C)]
@@ -1521,7 +1521,7 @@ pub extern "C" fn seds_endpoint_register_ex(
             description,
             link_local_only,
         )
-            .map(|_| ()),
+        .map(|_| ()),
     )
 }
 
@@ -1638,7 +1638,7 @@ pub extern "C" fn seds_dtype_register_ex(
             reliable,
             priority,
         )
-            .map(|_| ()),
+        .map(|_| ()),
     )
 }
 
@@ -4063,7 +4063,7 @@ mod tests {
                 &[DataEndpoint(101)],
                 seq as u64,
             )
-                .unwrap();
+            .unwrap();
             unsafe {
                 (*router).inner.tx(pkt).unwrap();
             }

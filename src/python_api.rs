@@ -763,7 +763,7 @@ impl PyRouter {
             dst_side_id as usize,
             enabled,
         )
-            .map_err(py_err_from)
+        .map_err(py_err_from)
     }
 
     fn clear_route(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
@@ -792,7 +792,7 @@ impl PyRouter {
             dst_side_id as usize,
             enabled,
         )
-            .map_err(py_err_from)
+        .map_err(py_err_from)
     }
 
     fn clear_typed_route(
@@ -810,7 +810,7 @@ impl PyRouter {
             dtype_from_u32(ty).map_err(py_err_from)?,
             dst_side_id as usize,
         )
-            .map_err(py_err_from)
+        .map_err(py_err_from)
     }
 
     fn set_source_route_mode(&self, src_side_id: Option<u32>, mode: i32) -> PyResult<()> {
@@ -852,7 +852,7 @@ impl PyRouter {
             dst_side_id as usize,
             weight,
         )
-            .map_err(py_err_from)
+        .map_err(py_err_from)
     }
 
     fn clear_route_weight(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
@@ -879,7 +879,7 @@ impl PyRouter {
             dst_side_id as usize,
             priority,
         )
-            .map_err(py_err_from)
+        .map_err(py_err_from)
     }
 
     fn clear_route_priority(&self, src_side_id: Option<u32>, dst_side_id: u32) -> PyResult<()> {
@@ -1935,8 +1935,8 @@ pub fn register_endpoint_py(
         description,
         link_local_only,
     )
-        .map(|ep| ep.as_u32())
-        .map_err(py_err_from)
+    .map(|ep| ep.as_u32())
+    .map_err(py_err_from)
 }
 
 #[pyfunction(name = "register_data_type")]
@@ -1976,8 +1976,8 @@ pub fn register_data_type_py(
         reliable,
         priority,
     )
-        .map(|dt| dt.as_u32())
-        .map_err(py_err_from)
+    .map(|dt| dt.as_u32())
+    .map_err(py_err_from)
 }
 
 #[pyfunction(name = "endpoint_info")]

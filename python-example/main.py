@@ -1,322 +1,99 @@
 #!/usr/bin/env python3
 import multiprocessing as mp
-import os
 import random
 import sys
 import time
 from queue import Empty
 
-try:
-    import numpy as np
-except ModuleNotFoundError as e:
-    raise SystemExit(
-        "Missing dependency 'numpy'. Install it (for example: `python -m pip install numpy`) and retry."
-    ) from e
-
-try:
-    import sedsprintf_rs as seds
-except ModuleNotFoundError as e:
-    raise SystemExit(
-        "Missing dependency 'sedsprintf_rs'. Build/install the Python package first, then retry."
-    ) from e
+import sedsprintf_rs as seds
 
 DT = seds.DataType
-EP = seds.DataEndpoint
-EK = seds.ElemKind
-RM = seds.RouterMode
 
 
-# ---------------- Enum helpers ----------------
-def enum_to_int(obj):
-    try:
-        return int(obj)
-    except Exception:
-        return obj
-
-
-def deep_coerce_enums(x):
-    if isinstance(x, dict):
-        return {deep_coerce_enums(k): deep_coerce_enums(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        t = type(x)
-        return t(deep_coerce_enums(v) for v in x)
-    return enum_to_int(x)
-
-
-# ---------------- Router callbacks ----------------
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
 def _tx(_bytes_buf: bytes):
-    # Transmission stub (no-op)
     pass
 
 
 def _on_packet(pkt: seds.Packet):
-    print("[RX Packet]")
-    print(pkt)  # pretty header + summary
+    print("[RX Packet]", pkt)
 
 
 def _on_serialized(data: bytes):
-    print(f"[RX Serialized] {len(data)} bytes: {data.hex()}")
+    print(f"[RX Serialized] {len(data)} bytes")
 
 
-_ROUTER = None
-_PENDING_TIMESYNC = []
-
-
-def _on_timesync(pkt: seds.Packet):
-    global _PENDING_TIMESYNC
-    if pkt.ty == int(DT.TIME_SYNC_REQUEST):
-        vals = pkt.data_as_u64()
-        if len(vals) >= 2:
-            seq, t1 = vals[0], vals[1]
-            t2 = _now_ms()
-            t3 = _now_ms()
-            _PENDING_TIMESYNC.append((seq, t1, t2, t3))
-    elif pkt.ty == int(DT.TIME_SYNC_ANNOUNCE):
-        vals = pkt.data_as_u64()
-        if len(vals) >= 2:
-            print(f"[TIME_SYNC] announce priority={vals[0]} time_ms={vals[1]}")
-    elif pkt.ty == int(DT.TIME_SYNC_RESPONSE):
-        vals = pkt.data_as_u64()
-        if len(vals) >= 4:
-            print(f"[TIME_SYNC] response seq={vals[0]} t1={vals[1]} t2={vals[2]} t3={vals[3]}")
-
-
-# ---------------- Server (single-threaded) ----------------
-def router_server(cmd_q: mp.Queue, _done_evt_unused: mp.Event,
-                  pump_period_ms: int = 2,
-                  drain_grace_seconds: float = 3.0,
-                  max_total_seconds: float = 60.0):
-    """
-    Single-threaded server:
-      - Polls cmd_q for work
-      - Calls router.log* directly
-      - Pumps router periodically
-      - On 'shutdown', drains briefly and exits
-    This avoids thread pools / extra threads entirely → deterministic teardown.
-    """
-    handlers = [
-        (int(EP.SD_CARD), _on_packet, None),
-        (int(EP.RADIO), None, _on_serialized),
-        (int(EP.TIME_SYNC), _on_timesync, None),
-    ]
-    router = seds.Router(now_ms=_now_ms, handlers=handlers, mode=RM.Sink)
-    router.add_side_serialized("TX", _tx)
-    global _ROUTER
-    _ROUTER = router
-    announce = np.array([10, _now_ms()], dtype=np.uint64)
-    router.log(
-        ty=int(DT.TIME_SYNC_ANNOUNCE),
-        data=announce,
-        elem_size=8,
-        elem_kind=EK.UNSIGNED,
+def router_server(cmd_q: mp.Queue, pump_period_ms: int = 2, max_total_seconds: float = 10.0):
+    radio = seds.endpoint_info_by_name("RADIO")["id"]
+    sd_card = seds.endpoint_info_by_name("SD_CARD")["id"]
+    router = seds.Router(
+        now_ms=_now_ms,
+        handlers=[
+            (sd_card, _on_packet, None),
+            (radio, None, _on_serialized),
+        ],
+        timesync_enabled=True,
     )
-    print(f"[SERVER] Router up. PID={os.getpid()}")
+    router.add_side_serialized("TX", _tx, reliable_enabled=True)
+    router.set_local_network_datetime_millis(2025, 1, 1, 12, 0, 0, 0)
 
-    shutting_down = False
-    drain_deadline = None
-    last_pump = 0.0
     start_time = time.time()
-
-    def pump_now():
-        nonlocal last_pump
-        try:
-            router.process_all_queues()
-        finally:
-            last_pump = time.time()
-
-    def flush_timesync():
-        global _PENDING_TIMESYNC
-        while _PENDING_TIMESYNC:
-            seq, t1, t2, t3 = _PENDING_TIMESYNC.pop(0)
-            resp = np.array([seq, t1, t2, t3], dtype=np.uint64)
-            router.log(
-                ty=int(DT.TIME_SYNC_RESPONSE),
-                data=resp,
-                elem_size=8,
-                elem_kind=EK.UNSIGNED,
-                timestamp_ms=t3,
-            )
-
-    # Main loop
+    last_pump = 0.0
     while True:
         now = time.time()
-
-        # Safety cap so we don't run forever if something external misbehaves
         if now - start_time > max_total_seconds:
-            print("[SERVER] Max runtime reached; forcing shutdown.")
             break
-
-        # Periodic pump
         if (now - last_pump) * 1000.0 >= pump_period_ms:
-            pump_now()
-        flush_timesync()
+            router.periodic(0)
+            last_pump = now
 
-        # Drain a bit of work from the command queue
         try:
             op, payload = cmd_q.get(timeout=0.05)
         except Empty:
-            op, payload = None, None
+            continue
 
         if op == "shutdown":
-            # Start drain window
-            shutting_down = True
-            if drain_deadline is None:
-                drain_deadline = time.time() + drain_grace_seconds
-        elif op is not None:
-            # Execute immediately in this process (no threads)
-            try:
-                if op == "log":
-                    router.log(ty=payload["ty"], data=payload["data"],
-                               elem_size=payload["elem_size"], elem_kind=payload["elem_kind"])
-                elif op == "log_f32":
-                    router.log_f32(ty=payload["ty"], values=payload["values"])
-                elif op == "log_bytes":
-                    router.log_bytes(ty=payload["ty"], data=payload["data"])
-                elif op == "timesync_request":
-                    router.log(
-                        ty=int(DT.TIME_SYNC_REQUEST),
-                        data=payload["data"],
-                        elem_size=8,
-                        elem_kind=EK.UNSIGNED,
-                        timestamp_ms=payload["timestamp_ms"],
-                    )
-            except Exception as e:
-                print(f"[SERVER] worker op error: {e!r}")
+            break
+        if op == "log_f32":
+            router.log_f32(payload["ty"], payload["values"])
+        elif op == "log_bytes":
+            router.log_bytes(payload["ty"], payload["data"])
 
-        # If in shutdown, keep pumping and stop when quiet or grace expires
-        if shutting_down:
-            pump_now()
-            flush_timesync()
-            # Router queues are internal; we can't query length here,
-            # so just wait for the grace window to pass.
-            if time.time() >= drain_deadline:
-                break
-
-    # Final drain
-    try:
-        pump_now()
-        flush_timesync()
-    except Exception as e:
-        print(f"[SERVER] final drain error: {e!r}")
-    print("[SERVER] Shutdown complete.")
+    router.periodic(0)
+    print(f"[SERVER] network_time_ms={router.network_time_ms()}")
 
 
-# ---------------- Producer processes ----------------
 def producer_proc(name: str, cmd_q: mp.Queue, n_iters: int, seed: int):
-    random.seed(seed + os.getpid())
-    print(f"[{name}] start PID={os.getpid()} iters={n_iters}")
+    random.seed(seed)
     for i in range(n_iters):
-        # 0=log_bytes, 1=log_f32, 2=log, 3=empty NoData packet
-        which = random.randint(0, 3)
-
-        if which == 0:
-            msg = (f"{name} hello there, how is life, it should be good, if not then that is a real trajity and that "
-                   f"would make life really hard now wouldn't it, let's add some more text to make this a bit longer "
-                   f"so we can see how compression works in sedsprintf_rs! Iteration number:"
-                   f" {i}").encode("utf-8")
-            cmd_q.put(deep_coerce_enums(("log_bytes", {
-                "ty": DT.MESSAGE_DATA, "data": msg
-            })))
-
-        elif which == 1:
-            vals = [101325.0 + random.random() * 100.0,
-                    20.0 + random.random() * 10.0,
-                    -0.5 + random.random()]
-            cmd_q.put(deep_coerce_enums(("log_f32", {
-                "ty": DT.BAROMETER_DATA, "values": vals
-            })))
-
-        elif which == 2:
-            arr = np.array([random.randint(0, 1000) for _ in range(8)], dtype=np.uint16)
-            cmd_q.put(deep_coerce_enums(("log", {
-                "ty": DT.GPS_DATA, "data": arr,
-                "elem_size": 2, "elem_kind": EK.UNSIGNED
-            })))
-
+        if random.randint(0, 1) == 0:
+            cmd_q.put(("log_f32", {"ty": int(DT.GPS_DATA), "values": [float(i), 10.0, 20.0]}))
         else:
-            cmd_q.put(deep_coerce_enums(("log_bytes", {
-                "ty": DT.HEARTBEAT,  # or whatever logical DataType uses MessageDataType::NoData
-                "data": b"",
-            })))
-        time.sleep(random.random() * 0.002)  # 0–2ms jitter
-    print(f"[{name}] done")
+            cmd_q.put(("log_bytes", {"ty": int(DT.MESSAGE_DATA), "data": f"{name} iteration {i}".encode()}))
+        time.sleep(random.random() * 0.01)
 
 
-def _router_server_safe(*args):
-    try:
-        router_server(*args)
-    except Exception as e:
-        print(f"[SERVER] Fatal error: {e}", file=sys.stderr)
-        raise SystemExit(1) from e
-
-
-def _producer_safe(*args):
-    try:
-        producer_proc(*args)
-    except Exception as e:
-        name = args[0] if args else "producer"
-        print(f"[{name}] Fatal error: {e}", file=sys.stderr)
-        raise SystemExit(1) from e
-
-
-# ---------------- Main ----------------
-def main():
-    mp.set_start_method("spawn", force=True)
-
-    cmd_q = mp.Queue(maxsize=8192)
-    done_evt = mp.Event()
-
-    server = mp.Process(target=_router_server_safe, args=(cmd_q, done_evt, 2, 3.0, 120.0), daemon=False)
+def main() -> int:
+    cmd_q: mp.Queue = mp.Queue()
+    server = mp.Process(target=router_server, args=(cmd_q,))
     server.start()
 
-    n_producers = 6
-    iters_per = 500
+    producers = [
+        mp.Process(target=producer_proc, args=(f"P{i}", cmd_q, 5, i))
+        for i in range(2)
+    ]
+    for proc in producers:
+        proc.start()
+    for proc in producers:
+        proc.join()
 
-    procs = []
-    for i in range(n_producers):
-        p = mp.Process(target=_producer_safe, args=(f"P{i}", cmd_q, iters_per, 1337 + i), daemon=False)
-        p.start()
-        procs.append(p)
-
-    # Wait for producers
-    for p in procs:
-        p.join()
-
-    ts_req = np.array([1, _now_ms()], dtype=np.uint64)
-    cmd_q.put(deep_coerce_enums(("timesync_request", {
-        "data": ts_req,
-        "timestamp_ms": int(_now_ms()),
-    })))
-
-    # Tell server to finish once queue is drained
-    cmd_q.put(("shutdown", {}))
-    cmd_q.close()
-    cmd_q.join_thread()
-
-    # Give it a short window to shut down gracefully; then enforce
-    server.join(timeout=10)
-    if server.is_alive():
-        print("[MAIN] Server still alive after timeout; terminating…")
-        server.terminate()
-        server.join(timeout=5)
-
-    if server.exitcode not in (0, None):
-        print(f"[MAIN] Server exit code: {server.exitcode} (non-zero)")
-        raise SystemExit(1)
-
-    print("[MAIN] All done ✔️")
+    cmd_q.put(("shutdown", None))
+    server.join()
+    return server.exitcode or 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n[MAIN] Interrupted")
-        raise SystemExit(130)
-    except Exception as e:
-        print(f"[MAIN] Unexpected error: {e}", file=sys.stderr)
-        raise SystemExit(1) from e
+    raise SystemExit(main())

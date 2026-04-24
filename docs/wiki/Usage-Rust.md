@@ -142,6 +142,10 @@ When discovery reports multiple candidate paths:
 - `set_source_route_mode(...)`, `set_route_weight(...)`, and `set_route_priority(...)` can still
   override the defaults
 
+Packets already in flight also carry a compact internal wire contract: a frozen destination holder set
+and enough payload-shape metadata to stay decodable while schema and topology updates are still propagating.
+Applications do not build that contract manually; routers and relays attach and honor it automatically.
+
 ## Reliable delivery
 
 Reliable delivery has two switches:
@@ -233,7 +237,8 @@ Meaning of the variants:
 
 If an immediate router receive/transmit API is called from inside a side TX callback, the router
 now defers that work onto its queue instead of recursively re-entering forwarding on the same
-stack.
+stack. Internal `DISCOVERY` and `TIME_SYNC` traffic stays router-owned; applications should use the
+public discovery/time-sync APIs instead of constructing those packets directly.
 
 Use side-aware ingress only when you need to override the ingress side explicitly:
 

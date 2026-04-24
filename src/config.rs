@@ -377,21 +377,21 @@ impl Registry {
             description: "",
             link_local_only: false,
         })
-            .expect("built-in endpoint");
+        .expect("built-in endpoint");
         reg.register_endpoint_definition(EndpointDefinition {
             id: DataEndpoint::TimeSync,
             name: "TIME_SYNC",
             description: "",
             link_local_only: false,
         })
-            .expect("built-in endpoint");
+        .expect("built-in endpoint");
         reg.register_endpoint_definition(EndpointDefinition {
             id: DataEndpoint::Discovery,
             name: "DISCOVERY",
             description: "",
             link_local_only: false,
         })
-            .expect("built-in endpoint");
+        .expect("built-in endpoint");
 
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::TelemetryError,
@@ -402,7 +402,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 255,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::ReliableAck,
             name: "RELIABLE_ACK",
@@ -412,7 +412,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 250,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::ReliablePacketRequest,
             name: "RELIABLE_PACKET_REQUEST",
@@ -422,7 +422,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 250,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::ReliablePartialAck,
             name: "RELIABLE_PARTIAL_ACK",
@@ -432,7 +432,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 250,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::TimeSyncAnnounce,
             name: "TIME_SYNC_ANNOUNCE",
@@ -442,7 +442,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 245,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::TimeSyncRequest,
             name: "TIME_SYNC_REQUEST",
@@ -452,7 +452,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 245,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::TimeSyncResponse,
             name: "TIME_SYNC_RESPONSE",
@@ -462,7 +462,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 245,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::DiscoveryAnnounce,
             name: "DISCOVERY_ANNOUNCE",
@@ -472,7 +472,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 240,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::DiscoveryTimeSyncSources,
             name: "DISCOVERY_TIMESYNC_SOURCES",
@@ -482,7 +482,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 240,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::DiscoveryTopology,
             name: "DISCOVERY_TOPOLOGY",
@@ -492,7 +492,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 240,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         reg.register_type_definition(DataTypeDefinition {
             id: DataType::DiscoverySchema,
             name: "DISCOVERY_SCHEMA",
@@ -502,7 +502,7 @@ impl Registry {
             reliable: ReliableMode::None,
             priority: 241,
         })
-            .expect("built-in type");
+        .expect("built-in type");
         #[cfg(all(feature = "embedded", sedsprintf_has_telemetry_config_json))]
         if let Ok(snapshot) = bundled_schema_snapshot() {
             let _ = register_schema_snapshot_into(&mut reg, snapshot);

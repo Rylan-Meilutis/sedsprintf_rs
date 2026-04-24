@@ -2,6 +2,10 @@
 
 ## Version 4.0.0 highlights
 
+- Migration-safe wire contract:
+    - In-flight packets can now carry a compact internal contract with inline payload shape and frozen destination sender hashes.
+    - This keeps already-serialized packets decodable and correctly targeted while runtime schema and topology changes are still propagating.
+    - New packets immediately use the latest schema/topology view, while old packets continue under their original delivery/decode contract.
 - Runtime-only schema:
     - User `DataEndpoint` and `DataType` entries are no longer generated at compile time.
     - `build.rs` no longer compiles application schema JSON into Rust enum variants or binding

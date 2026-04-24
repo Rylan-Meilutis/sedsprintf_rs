@@ -1,51 +1,35 @@
 #include "telemetry.h"
 #include "sedsprintf.h"
-#include <unistd.h> // for usleep
+#include <unistd.h>
 
+int main(void) {
+  SedsResult result = init_telemetry_router();
+  if (result != SEDS_OK) {
+    return (int)print_telemetry_error(result);
+  }
 
-int main(void)
-{
-    //synchronous code
-    init_telemetry_router();
-    const float data[3] = {37.7749f, -122.4194f, 30.0f};
-    SedsResult result = log_telemetry_synchronous(SEDS_DT_GPS_DATA, data, 3, sizeof(data[0]));
-    if (result != SEDS_OK)
-    {
-        print_handle_telemetry_error(result);
-    }
-    const uint64_t announce[2] = {10ULL, 1000ULL};
-    result = log_telemetry_synchronous(SEDS_DT_TIME_SYNC_ANNOUNCE, announce, 2, sizeof(announce[0]));
-    if (result != SEDS_OK)
-    {
-        print_handle_telemetry_error(result);
-    }
-    usleep(1000); //simulate some delay
-    //asynchronous code
-    //this would be in send routine of the data collector
-    result = log_telemetry_asynchronous(SEDS_DT_GPS_DATA, data, 3, sizeof(data[0]));
-    if (result != SEDS_OK)
-    {
-        print_handle_telemetry_error(result);
-    }
-    const uint64_t req[2] = {1ULL, 1100ULL};
-    result = log_telemetry_asynchronous(SEDS_DT_TIME_SYNC_REQUEST, req, 2, sizeof(req[0]));
-    if (result != SEDS_OK)
-    {
-        print_handle_telemetry_error(result);
-    }
-    //this would be in the main loop of the program or in a freertos task.
-    result = process_all_queues_timeout(20);
-    if (result != SEDS_OK)
-    {
-        print_handle_telemetry_error(result);
-    }
-    // dispatch_tx_queue_timeout(100);
+  const float gps[3] = {37.7749f, -122.4194f, 30.0f};
+  result = log_telemetry_synchronous(SEDS_DT_GPS_DATA, gps, 3, sizeof(gps[0]));
+  if (result != SEDS_OK) {
+    print_telemetry_error(result);
+  }
 
-    //this would be in the isr of the receiver
-    //rx_asynchronous(received_bytes, received_length);
+  usleep(1000);
 
-    //
+  result = log_telemetry_asynchronous(SEDS_DT_GPS_DATA, gps, 3, sizeof(gps[0]));
+  if (result != SEDS_OK) {
+    print_telemetry_error(result);
+  }
 
+  result = log_telemetry_string_asynchronous(SEDS_DT_MESSAGE_DATA, "hello from the async queue");
+  if (result != SEDS_OK) {
+    print_telemetry_error(result);
+  }
 
-    return 0;
+  result = telemetry_periodic(20);
+  if (result != SEDS_OK) {
+    print_telemetry_error(result);
+  }
+
+  return 0;
 }

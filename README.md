@@ -74,6 +74,11 @@ partial-ACK packets that arrived after a gap, request the missing sequence, and 
 the gap is filled. A partial ACK suppresses timeout retransmission for that exact packet, but an explicit packet request
 can still retransmit it later.
 
+When topology or schema changes are propagating, packets already on the wire now carry a compact frozen delivery and
+decode contract. New packets immediately use the latest endpoint bitmap/schema view, while in-flight packets continue to
+route only to their original intended holders and remain decodable against the shape they were serialized with. The
+contract is encoded compactly with bitmap-oriented metadata and sender hashes so header growth stays small.
+
 The size of the header in a serialized packet is around 20 bytes (the size will change based on the total number of
 endpoints in your system and the length of the sender string), plus a 4-byte CRC32 trailer. As a rough example, a packet
 containing three floats is on the order of mid-30s bytes total. This small size makes it ideal for use in low bandwidth
@@ -194,6 +199,22 @@ Building with python bindings can be done with the build script on posix systems
 When building in an embedded environment the library will compile to a static library that can be linked to your C code.
 this library takes up about 100kb of flash and does require heap allocation to be available through either freertos, or
 by creating shims that expose pvPortMalloc and vPortFree.
+
+
+## Embedded hooks
+
+For embedded integrations, treat the router or relay as a single owner context. The normal application loop should call
+`periodic(...)` and feed ingress bytes into the queued RX APIs.
+
+Rules that matter in practice:
+
+- Do not call router, relay, or packet-to-string APIs from an ISR. Queue the bytes and hand them to a task or worker.
+- If you wrap router calls with a lock, that lock must be recursive-safe because side TX callbacks can trigger deferred
+  queue work in the same logical call chain.
+- `DISCOVERY` and `TIME_SYNC` are reserved internal endpoints. Do not register local handlers for them and do not emit
+  those packets manually from application code. Use the time-sync and discovery APIs instead.
+- When the `timesync` feature is enabled, `periodic(...)` is the expected maintenance entry point. Only use
+  `poll_timesync(...)` / `poll_discovery(...)` directly when you intentionally need manual phase control.
 
 ### build.py usage
 

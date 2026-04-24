@@ -26,8 +26,8 @@ schema metadata (`MessageMeta`, `MessageElement`, `MessageDataType`, `MessageCla
 
 -
 
-src/telemetry_packet.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/telemetry_packet.rs)):
-`Packet` validation, formatting, and packet IDs.
+src/packet.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/packet.rs)):
+`Packet` validation, formatting, packet IDs, and migration-safe wire-contract state.
 
 -
 
@@ -97,6 +97,8 @@ Why these structures exist:
 - `endpoints: Arc<[DataEndpoint]>` (destinations; must be non-empty).
 - `timestamp: u64` (ms; treated as uptime below 1e12, or epoch ms otherwise).
 - `payload: StandardSmallPayload` (inline optimized; see below).
+- `wire_shape: Option<MessageElement>` when the frame carried inline decode metadata.
+- `wire_target_senders: Arc<[u64]>` when the frame carried a frozen destination-holder set.
 
 Validation rules enforced by `Packet::new` and `Packet::validate`:
 
@@ -131,29 +133,15 @@ Why this matters:
 
 The compact v2 wire format is implemented in
 src/serialize.rs ([source](https://github.com/Rylan-Meilutis/sedsprintf_rs/blob/main/src/serialize.rs)).
-A packet is encoded as:
-
-```
-[FLAGS: u8]
-    bit0: payload compressed
-    bit1: sender compressed
-[NEP: u8]                      // number of endpoints (bits set)
-VARINT(ty: u32 as u64)          // ULEB128
-VARINT(data_size: u64)          // logical (uncompressed) payload size
-VARINT(timestamp_ms: u64)
-VARINT(sender_len: u64)         // logical sender length
-[VARINT(sender_wire_len: u64)]  // only if sender compressed
-ENDPOINTS_BITMAP               // 1 bit per DataEndpoint discriminant
-SENDER BYTES                   // raw or compressed
-PAYLOAD BYTES                  // raw or compressed
-```
+A packet is encoded as a compact v2 frame with a fixed-width endpoint bitmap, optional wire contract, optional reliable header, payload bytes, and a CRC32 trailer. See [Technical-Wire-Format](Technical-Wire-Format) for the exact field order.
 
 Design choices:
 
 - **ULEB128 varints** minimize size for small values.
-- **Endpoint bitmap** avoids repeated endpoint IDs; size is based on the highest runtime endpoint
-  ID known to the schema registry.
-- **Sender/payload compression** uses `zstd` (`zstd-safe`) and is applied only when it makes the payload smaller.
+- **Endpoint bitmap** avoids repeated endpoint IDs; width is fixed from `MAX_VALUE_DATA_ENDPOINT`, not from the current runtime registry contents.
+- **Wire contract** carries inline payload shape and frozen destination-holder sender hashes so in-flight packets stay decodable and correctly targeted across topology/schema churn.
+- **Sender/payload compression** is applied independently only when it reduces the wire size.
+- **CRC32 trailer** validates the entire frame before normal decode.
 
 `packet_id_from_wire` parses only as much as needed to compute the same packet ID as `Packet::packet_id`. It
 always hashes **decompressed** sender/payload bytes, so dedupe works across compressed and uncompressed links.
@@ -195,7 +183,7 @@ Receive flow:
    bytes if needed.
 4) If the packet ID is already in the recent cache, it is dropped.
 5) Local endpoint handlers are invoked.
-6) The router forwards the packet according to the current route rules and discovery/path-selection state.
+6) The router forwards the packet according to the current route rules, discovery/path-selection state, and any frozen destination-holder contract attached to the packet.
 
 Forwarding is driven by:
 

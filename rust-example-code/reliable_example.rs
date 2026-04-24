@@ -1,30 +1,36 @@
-use sedsprintf_rs::config::{DataEndpoint, DataType};
-use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterMode};
-use sedsprintf_rs::TelemetryResult;
+use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterSideOptions};
+use sedsprintf_rs::{DataEndpoint, DataType, TelemetryResult};
 
 fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    now.as_millis() as u64
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn main() -> TelemetryResult<()> {
-    // Reliable delivery is enabled by default in RouterConfig.
-    let clock: Box<dyn Clock + Send + Sync> = Box::new(|| now_ms());
+    // This example assumes GPS_DATA is seeded as a reliable type.
+    let router = Router::new_with_clock(
+        RouterConfig::new([EndpointHandler::new_packet_handler(
+            DataEndpoint::named("RADIO"),
+            |pkt| {
+                println!("[RX] {pkt}");
+                Ok(())
+            },
+        )]),
+        Box::new(|| now_ms()),
+    );
+    router.add_side_serialized_with_options(
+        "RADIO",
+        |_bytes| Ok(()),
+        RouterSideOptions {
+            reliable_enabled: true,
+            ..RouterSideOptions::default()
+        },
+    );
 
-    let handler = EndpointHandler::new_packet_handler(DataEndpoint::Radio, |pkt| {
-        println!("[RX] {pkt}");
-        Ok(())
-    });
-    let cfg = RouterConfig::new([handler]);
-    let router = Router::new_with_clock(RouterMode::Sink, cfg, clock);
-    router.add_side_serialized("RADIO", |_bytes| Ok(()));
-
-    // GpsData is marked reliable in the default schema.
-    router.log(DataType::GpsData, &[1.0_f32, 2.0, 3.0])?;
+    router.log_f32(DataType::named("GPS_DATA"), &[1.0_f32, 2.0, 3.0])?;
     router.process_all_queues_with_timeout(0)?;
-
     Ok(())
 }

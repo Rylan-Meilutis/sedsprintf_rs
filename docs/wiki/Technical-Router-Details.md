@@ -91,8 +91,9 @@ Discovery advertisements are adaptive:
 4) Recent‑ID cache drops duplicates.
 5) Local handlers are invoked with retries.
 6) Built-in discovery packets are learned internally when enabled.
-7) Packets that require remote forwarding are forwarded according to the active route rules and the
-   discovery/path-selection state.
+7) Packets that require remote forwarding are forwarded according to the active route rules, the
+   discovery/path-selection state, and any frozen wire-contract destination holder set carried by
+   that packet.
 
 ## Forwarding rules
 
@@ -102,6 +103,7 @@ locally and the active side policy still leaves an eligible remote path.
 With discovery enabled, forwarding also consults the learned side map:
 
 - If candidate sides are known for one or more packet endpoints, the router forwards only to those sides.
+- If the packet carries frozen destination sender hashes from its wire contract, local delivery and remote forwarding are further narrowed to only those intended holders.
 - If no side is known yet, the router falls back to flooding.
 - Link-local-only endpoints are only forwarded to sides marked `link_local_enabled: true`.
 - If typed route overrides exist for `(source side or local TX, packet type)`, only those enabled
