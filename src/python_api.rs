@@ -406,6 +406,198 @@ fn topology_snapshot_to_pydict(
     Ok(out.unbind())
 }
 
+#[cfg(feature = "discovery")]
+fn route_selection_mode_name(mode: RouteSelectionMode) -> &'static str {
+    match mode {
+        RouteSelectionMode::Fanout => "Fanout",
+        RouteSelectionMode::Weighted => "Weighted",
+        RouteSelectionMode::Failover => "Failover",
+    }
+}
+
+#[cfg(feature = "discovery")]
+fn runtime_stats_snapshot_to_pydict(
+    py: Python<'_>,
+    snap: crate::diagnostics::RuntimeStatsSnapshot,
+) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+
+    let sides = PyList::empty(py);
+    for side in snap.sides {
+        let side_dict = PyDict::new(py);
+        side_dict.set_item("side_id", side.side_id)?;
+        side_dict.set_item("side_name", side.side_name)?;
+        side_dict.set_item("reliable_enabled", side.reliable_enabled)?;
+        side_dict.set_item("link_local_enabled", side.link_local_enabled)?;
+        side_dict.set_item("ingress_enabled", side.ingress_enabled)?;
+        side_dict.set_item("egress_enabled", side.egress_enabled)?;
+        side_dict.set_item("tx_packets", side.tx_packets)?;
+        side_dict.set_item("tx_bytes", side.tx_bytes)?;
+        side_dict.set_item("rx_packets", side.rx_packets)?;
+        side_dict.set_item("rx_bytes", side.rx_bytes)?;
+        side_dict.set_item("relayed_tx_packets", side.relayed_tx_packets)?;
+        side_dict.set_item("relayed_tx_bytes", side.relayed_tx_bytes)?;
+        side_dict.set_item("relayed_rx_packets", side.relayed_rx_packets)?;
+        side_dict.set_item("relayed_rx_bytes", side.relayed_rx_bytes)?;
+        side_dict.set_item("local_delivery_packets", side.local_delivery_packets)?;
+        side_dict.set_item("tx_retries", side.tx_retries)?;
+        side_dict.set_item("tx_handler_failures", side.tx_handler_failures)?;
+        side_dict.set_item("local_handler_failures", side.local_handler_failures)?;
+        side_dict.set_item("total_handler_retries", side.total_handler_retries)?;
+
+        let adaptive = PyDict::new(py);
+        adaptive.set_item(
+            "auto_balancing_enabled",
+            side.adaptive.auto_balancing_enabled,
+        )?;
+        adaptive.set_item(
+            "estimated_capacity_bps",
+            side.adaptive.estimated_capacity_bps,
+        )?;
+        adaptive.set_item("peak_capacity_bps", side.adaptive.peak_capacity_bps)?;
+        adaptive.set_item("current_usage_bps", side.adaptive.current_usage_bps)?;
+        adaptive.set_item("peak_usage_bps", side.adaptive.peak_usage_bps)?;
+        adaptive.set_item(
+            "available_headroom_bps",
+            side.adaptive.available_headroom_bps,
+        )?;
+        adaptive.set_item("effective_weight", side.adaptive.effective_weight)?;
+        adaptive.set_item("last_observed_ms", side.adaptive.last_observed_ms)?;
+        adaptive.set_item("sample_count", side.adaptive.sample_count)?;
+        side_dict.set_item("adaptive", adaptive)?;
+
+        let data_types = PyList::empty(py);
+        for data_type in side.data_types {
+            let item = PyDict::new(py);
+            item.set_item("data_type", data_type.data_type.as_u32())?;
+            item.set_item("tx_packets", data_type.tx_packets)?;
+            item.set_item("tx_bytes", data_type.tx_bytes)?;
+            item.set_item("rx_packets", data_type.rx_packets)?;
+            item.set_item("rx_bytes", data_type.rx_bytes)?;
+            item.set_item("relayed_tx_packets", data_type.relayed_tx_packets)?;
+            item.set_item("relayed_tx_bytes", data_type.relayed_tx_bytes)?;
+            item.set_item("relayed_rx_packets", data_type.relayed_rx_packets)?;
+            item.set_item("relayed_rx_bytes", data_type.relayed_rx_bytes)?;
+            item.set_item("tx_retries", data_type.tx_retries)?;
+            item.set_item("handler_failures", data_type.handler_failures)?;
+            data_types.append(item)?;
+        }
+        side_dict.set_item("data_types", data_types)?;
+        sides.append(side_dict)?;
+    }
+    out.set_item("sides", sides)?;
+
+    let route_modes = PyList::empty(py);
+    for mode in snap.route_modes {
+        let item = PyDict::new(py);
+        item.set_item("src_side_id", mode.src_side_id)?;
+        item.set_item(
+            "selection_mode",
+            mode.selection_mode.map(route_selection_mode_name),
+        )?;
+        item.set_item("cursor", mode.cursor)?;
+        route_modes.append(item)?;
+    }
+    out.set_item("route_modes", route_modes)?;
+
+    let route_overrides = PyList::empty(py);
+    for route in snap.route_overrides {
+        let item = PyDict::new(py);
+        item.set_item("src_side_id", route.src_side_id)?;
+        item.set_item("dst_side_id", route.dst_side_id)?;
+        item.set_item("enabled", route.enabled)?;
+        route_overrides.append(item)?;
+    }
+    out.set_item("route_overrides", route_overrides)?;
+
+    let typed_route_overrides = PyList::empty(py);
+    for route in snap.typed_route_overrides {
+        let item = PyDict::new(py);
+        item.set_item("src_side_id", route.src_side_id)?;
+        item.set_item("data_type", route.data_type.as_u32())?;
+        item.set_item("dst_side_id", route.dst_side_id)?;
+        item.set_item("enabled", route.enabled)?;
+        typed_route_overrides.append(item)?;
+    }
+    out.set_item("typed_route_overrides", typed_route_overrides)?;
+
+    let route_weights = PyList::empty(py);
+    for weight in snap.route_weights {
+        let item = PyDict::new(py);
+        item.set_item("src_side_id", weight.src_side_id)?;
+        item.set_item("dst_side_id", weight.dst_side_id)?;
+        item.set_item("weight", weight.weight)?;
+        route_weights.append(item)?;
+    }
+    out.set_item("route_weights", route_weights)?;
+
+    let route_priorities = PyList::empty(py);
+    for priority in snap.route_priorities {
+        let item = PyDict::new(py);
+        item.set_item("src_side_id", priority.src_side_id)?;
+        item.set_item("dst_side_id", priority.dst_side_id)?;
+        item.set_item("priority", priority.priority)?;
+        route_priorities.append(item)?;
+    }
+    out.set_item("route_priorities", route_priorities)?;
+
+    let queues = PyDict::new(py);
+    queues.set_item("rx_len", snap.queues.rx_len)?;
+    queues.set_item("rx_bytes", snap.queues.rx_bytes)?;
+    queues.set_item("tx_len", snap.queues.tx_len)?;
+    queues.set_item("tx_bytes", snap.queues.tx_bytes)?;
+    queues.set_item("replay_len", snap.queues.replay_len)?;
+    queues.set_item("replay_bytes", snap.queues.replay_bytes)?;
+    queues.set_item("recent_rx_len", snap.queues.recent_rx_len)?;
+    queues.set_item("recent_rx_bytes", snap.queues.recent_rx_bytes)?;
+    queues.set_item(
+        "reliable_rx_buffered_len",
+        snap.queues.reliable_rx_buffered_len,
+    )?;
+    queues.set_item(
+        "reliable_rx_buffered_bytes",
+        snap.queues.reliable_rx_buffered_bytes,
+    )?;
+    queues.set_item(
+        "shared_queue_bytes_used",
+        snap.queues.shared_queue_bytes_used,
+    )?;
+    out.set_item("queues", queues)?;
+
+    let reliable = PyDict::new(py);
+    reliable.set_item(
+        "reliable_return_route_count",
+        snap.reliable.reliable_return_route_count,
+    )?;
+    reliable.set_item(
+        "end_to_end_pending_count",
+        snap.reliable.end_to_end_pending_count,
+    )?;
+    reliable.set_item(
+        "end_to_end_pending_destination_count",
+        snap.reliable.end_to_end_pending_destination_count,
+    )?;
+    reliable.set_item(
+        "end_to_end_acked_cache_count",
+        snap.reliable.end_to_end_acked_cache_count,
+    )?;
+    out.set_item("reliable", reliable)?;
+
+    let discovery = PyDict::new(py);
+    discovery.set_item("route_count", snap.discovery.route_count)?;
+    discovery.set_item("announcer_count", snap.discovery.announcer_count)?;
+    discovery.set_item(
+        "current_announce_interval_ms",
+        snap.discovery.current_announce_interval_ms,
+    )?;
+    discovery.set_item("next_announce_ms", snap.discovery.next_announce_ms)?;
+    out.set_item("discovery", discovery)?;
+
+    out.set_item("total_handler_failures", snap.total_handler_failures)?;
+    out.set_item("total_handler_retries", snap.total_handler_retries)?;
+    Ok(out.unbind())
+}
+
 // ============================================================================
 //  Packet (PyPacket)
 // ============================================================================
@@ -1210,6 +1402,15 @@ impl PyRouter {
         topology_snapshot_to_pydict(py, rtr.export_topology())
     }
 
+    #[cfg(feature = "discovery")]
+    fn export_runtime_stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        runtime_stats_snapshot_to_pydict(py, rtr.export_runtime_stats())
+    }
+
     #[cfg(feature = "timesync")]
     fn network_time_ms(&self) -> PyResult<Option<u64>> {
         let rtr = self
@@ -1844,6 +2045,11 @@ impl PyRelay {
     #[cfg(feature = "discovery")]
     fn export_topology(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         topology_snapshot_to_pydict(py, self.inner.export_topology())
+    }
+
+    #[cfg(feature = "discovery")]
+    fn export_runtime_stats(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        runtime_stats_snapshot_to_pydict(py, self.inner.export_runtime_stats())
     }
 }
 

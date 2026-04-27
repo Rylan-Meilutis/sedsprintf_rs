@@ -254,6 +254,24 @@ int32_t seds_router_export_topology_len(SedsRouter * r);
 SedsResult seds_router_export_topology(SedsRouter * r, char * buf, size_t buf_len);
 
 /**
+ * @brief Return the required buffer length for the router runtime stats JSON export.
+ *
+ * The returned size includes the trailing NUL byte.
+ * Requires a build with the `discovery` feature.
+ */
+int32_t seds_router_export_runtime_stats_len(SedsRouter * r);
+
+/**
+ * @brief Export the current router runtime stats as JSON.
+ *
+ * This includes per-side traffic, retry/failure counters, adaptive link estimates,
+ * route policy state, queue usage, and discovery runtime state.
+ * Use `seds_router_export_runtime_stats_len()` to size the destination buffer.
+ * Requires a build with the `discovery` feature.
+ */
+SedsResult seds_router_export_runtime_stats(SedsRouter * r, char * buf, size_t buf_len);
+
+/**
  * @brief Run one router maintenance cycle.
  *
  * This polls time sync, polls discovery when enabled in the build, and then
@@ -783,6 +801,24 @@ int32_t seds_relay_export_topology_len(SedsRelay * r);
  * Requires a build with the `discovery` feature.
  */
 SedsResult seds_relay_export_topology(SedsRelay * r, char * buf, size_t buf_len);
+
+/**
+ * @brief Return the required buffer length for the relay runtime stats JSON export.
+ *
+ * The returned size includes the trailing NUL byte.
+ * Requires a build with the `discovery` feature.
+ */
+int32_t seds_relay_export_runtime_stats_len(SedsRelay * r);
+
+/**
+ * @brief Export the current relay runtime stats as JSON.
+ *
+ * This includes per-side traffic, retry/failure counters, adaptive link estimates,
+ * route policy state, queue usage, and discovery runtime state.
+ * Use `seds_relay_export_runtime_stats_len()` to size the destination buffer.
+ * Requires a build with the `discovery` feature.
+ */
+SedsResult seds_relay_export_runtime_stats(SedsRelay * r, char * buf, size_t buf_len);
 
 /**
  * @brief Run one relay maintenance cycle.

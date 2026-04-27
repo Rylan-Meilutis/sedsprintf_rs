@@ -2,12 +2,21 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
 static bool view_eq(const char * ptr, size_t len, const char * expected)
 {
     return ptr != NULL && len == strlen(expected) && memcmp(ptr, expected, len) == 0;
+}
+
+static SedsResult noop_tx(const uint8_t *bytes, size_t len, void *user)
+{
+    (void)bytes;
+    (void)len;
+    (void)user;
+    return SEDS_OK;
 }
 
 int main(void)
@@ -150,6 +159,21 @@ int main(void)
     assert(seds_endpoint_remove(ep_id) == SEDS_OK);
     assert(!seds_dtype_exists(ty_id));
     assert(!seds_endpoint_exists(ep_id));
+
+    SedsRelay *relay = seds_relay_new(NULL, NULL);
+    assert(relay != NULL);
+    assert(seds_relay_add_side_serialized(relay, "SIDE_A", strlen("SIDE_A"), noop_tx, NULL, false) >= 0);
+    int32_t runtime_len = seds_relay_export_runtime_stats_len(relay);
+    assert(runtime_len > 0);
+    char *runtime_json = (char *)malloc((size_t)runtime_len);
+    assert(runtime_json != NULL);
+    assert(seds_relay_export_runtime_stats(relay, runtime_json, (size_t)runtime_len) == SEDS_OK);
+    assert(strstr(runtime_json, "\"sides\":[") != NULL);
+    assert(strstr(runtime_json, "\"route_modes\":[") != NULL);
+    assert(strstr(runtime_json, "\"queues\":{") != NULL);
+    assert(strstr(runtime_json, "\"reliable\":{") != NULL);
+    free(runtime_json);
+    seds_relay_free(relay);
 
     printf("runtime schema C ABI ok\n");
     return 0;

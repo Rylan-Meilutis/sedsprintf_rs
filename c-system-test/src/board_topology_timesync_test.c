@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "telemetry_sim.h"
@@ -29,6 +31,28 @@ static SedsResult radio_side_tx(const uint8_t *bytes, size_t len, void *user)
     return SEDS_OK;
 }
 
+static char *export_topology_json(SedsRouter *router)
+{
+    int32_t json_len = seds_router_export_topology_len(router);
+    assert(json_len > 0);
+
+    char *json = (char *)malloc((size_t)json_len);
+    assert(json != NULL);
+    assert(seds_router_export_topology(router, json, (size_t)json_len) == SEDS_OK);
+    return json;
+}
+
+static char *export_runtime_stats_json(SedsRouter *router)
+{
+    int32_t json_len = seds_router_export_runtime_stats_len(router);
+    assert(json_len > 0);
+
+    char *json = (char *)malloc((size_t)json_len);
+    assert(json != NULL);
+    assert(seds_router_export_runtime_stats(router, json, (size_t)json_len) == SEDS_OK);
+    return json;
+}
+
 int main(void)
 {
     SimBus can_bus;
@@ -51,6 +75,22 @@ int main(void)
     assert(seds_router_get_network_time_ms(c2.r, &c2_network_ms) == SEDS_OK);
     assert(c1_network_ms > 0);
     assert(c2_network_ms > 0);
+
+    char *topology_json = export_topology_json(c1.r);
+    assert(strstr(topology_json, "\"routers\":[") != NULL);
+    assert(strstr(topology_json, "\"routes\":[") != NULL);
+    assert(strstr(topology_json, "\"connections\":[") != NULL);
+    assert(strstr(topology_json, "\"reachable_timesync_sources\":") != NULL);
+    free(topology_json);
+
+    char *runtime_json = export_runtime_stats_json(c1.r);
+    assert(strstr(runtime_json, "\"sides\":[") != NULL);
+    assert(strstr(runtime_json, "\"adaptive\":{") != NULL);
+    assert(strstr(runtime_json, "\"data_types\":[") != NULL);
+    assert(strstr(runtime_json, "\"queues\":{") != NULL);
+    assert(strstr(runtime_json, "\"discovery\":{") != NULL);
+    assert(strstr(runtime_json, "\"total_handler_failures\":") != NULL);
+    free(runtime_json);
 
     printf("board-topology timesync ok: c1=%llu c2=%llu\n",
            (unsigned long long)c1_network_ms,

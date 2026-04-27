@@ -51,6 +51,80 @@ static uint64_t gen_random_us(void)
     return (uint64_t) ms * 1000ULL;
 }
 
+static char *export_router_json(
+    SedsRouter *router,
+    int32_t (*len_fn)(SedsRouter *),
+    SedsResult (*export_fn)(SedsRouter *, char *, size_t))
+{
+    const int32_t json_len = len_fn(router);
+    if (json_len <= 0) return NULL;
+
+    char *json = (char *) malloc((size_t) json_len);
+    if (!json) return NULL;
+
+    if (export_fn(router, json, (size_t) json_len) != SEDS_OK)
+    {
+        free(json);
+        return NULL;
+    }
+    return json;
+}
+
+static char *export_relay_json(
+    SedsRelay *relay,
+    int32_t (*len_fn)(SedsRelay *),
+    SedsResult (*export_fn)(SedsRelay *, char *, size_t))
+{
+    const int32_t json_len = len_fn(relay);
+    if (json_len <= 0) return NULL;
+
+    char *json = (char *) malloc((size_t) json_len);
+    if (!json) return NULL;
+
+    if (export_fn(relay, json, (size_t) json_len) != SEDS_OK)
+    {
+        free(json);
+        return NULL;
+    }
+    return json;
+}
+
+static void print_router_diagnostics(const char *label, SedsRouter *router)
+{
+    char *topology = export_router_json(
+        router,
+        seds_router_export_topology_len,
+        seds_router_export_topology);
+    char *runtime = export_router_json(
+        router,
+        seds_router_export_runtime_stats_len,
+        seds_router_export_runtime_stats);
+
+    printf("\n[%s] topology graph:\n%s\n", label, topology ? topology : "<unavailable>");
+    printf("[%s] runtime stats:\n%s\n", label, runtime ? runtime : "<unavailable>");
+
+    free(topology);
+    free(runtime);
+}
+
+static void print_relay_diagnostics(const char *label, SedsRelay *relay)
+{
+    char *topology = export_relay_json(
+        relay,
+        seds_relay_export_topology_len,
+        seds_relay_export_topology);
+    char *runtime = export_relay_json(
+        relay,
+        seds_relay_export_runtime_stats_len,
+        seds_relay_export_runtime_stats);
+
+    printf("\n[%s] topology graph:\n%s\n", label, topology ? topology : "<unavailable>");
+    printf("[%s] runtime stats:\n%s\n", label, runtime ? runtime : "<unavailable>");
+
+    free(topology);
+    free(runtime);
+}
+
 // --------- global stop flag ----------
 static volatile int g_stop = 0;
 
@@ -291,6 +365,12 @@ int main(void)
     printf("network_time_ms status: radio=%d (%llu), flight=%d (%llu)\n",
            radio_network_ok, (unsigned long long) radio_network_ms,
            flight_network_ok, (unsigned long long) flight_network_ms);
+
+    print_router_diagnostics("Radio Board", radioBoard.r);
+    print_router_diagnostics("Flight Controller Board", flightControllerBoard.r);
+    print_router_diagnostics("Power Board", powerBoard.r);
+    print_router_diagnostics("Valve Board", valve_board.r);
+    print_relay_diagnostics("Bus Relay", relay);
 
     // 7) Assertions (may need adjusting depending on how many packets now cross the relay)
     assert(radioBoard.radio_hits == num_endpoint_hits);

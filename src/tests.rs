@@ -4518,9 +4518,12 @@ mod router_tests {
 
     #[cfg(feature = "discovery")]
     mod discovery_tests {
+        use std::sync::Once;
+
         use crate::config::{
-            RELIABLE_MAX_END_TO_END_ACK_CACHE, RELIABLE_MAX_END_TO_END_PENDING,
-            RELIABLE_MAX_RETURN_ROUTES,
+            register_data_type_with_description, register_endpoint_with_description,
+            MAX_HANDLER_RETRIES, RELIABLE_MAX_END_TO_END_ACK_CACHE,
+            RELIABLE_MAX_END_TO_END_PENDING, RELIABLE_MAX_RETURN_ROUTES,
         };
         use crate::discovery::{
             build_discovery_announce, build_discovery_timesync_sources, build_discovery_topology,
@@ -4530,12 +4533,41 @@ mod router_tests {
         use crate::router::{Clock, EndpointHandler, RouterConfig};
         use crate::tests::timeout_tests::StepClock;
         use crate::{packet::Packet, router::Router};
-        use crate::{DataEndpoint, DataType, RouteSelectionMode, TelemetryError, TelemetryResult};
+        use crate::{
+            DataEndpoint, DataType, MessageClass, MessageDataType, MessageElement, ReliableMode,
+            RouteSelectionMode, TelemetryError, TelemetryResult,
+        };
         use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
 
         fn zero_clock() -> Box<dyn Clock + Send + Sync> {
             StepClock::new_box(0, 0)
+        }
+
+        fn ensure_topology_test_schema() {
+            static INIT: Once = Once::new();
+
+            INIT.call_once(|| {
+                let radio = DataEndpoint::try_named("RADIO").unwrap_or_else(|| {
+                    register_endpoint_with_description("RADIO", "test radio endpoint", false)
+                        .expect("register RADIO")
+                });
+                let sd_card = DataEndpoint::try_named("SD_CARD").unwrap_or_else(|| {
+                    register_endpoint_with_description("SD_CARD", "test sd endpoint", false)
+                        .expect("register SD_CARD")
+                });
+                if DataType::try_named("GPS_DATA").is_none() {
+                    register_data_type_with_description(
+                        "GPS_DATA",
+                        "test gps data type",
+                        MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+                        &[radio, sd_card],
+                        ReliableMode::None,
+                        1,
+                    )
+                    .expect("register GPS_DATA");
+                }
+            });
         }
 
         #[derive(Clone)]
@@ -4569,6 +4601,27 @@ mod router_tests {
                 }
             }
             None
+        }
+
+        fn side_stats(
+            stats: &crate::diagnostics::RuntimeStatsSnapshot,
+            side_id: usize,
+        ) -> &crate::diagnostics::RuntimeSideStats {
+            stats
+                .sides
+                .iter()
+                .find(|side| side.side_id == side_id)
+                .unwrap()
+        }
+
+        fn type_stats(
+            side: &crate::diagnostics::RuntimeSideStats,
+            ty: DataType,
+        ) -> &crate::diagnostics::RuntimeTypeStats {
+            side.data_types
+                .iter()
+                .find(|item| item.data_type == ty)
+                .unwrap()
         }
 
         #[test]
@@ -5421,6 +5474,8 @@ mod router_tests {
 
         #[test]
         fn router_exports_topology_and_adaptive_discovery_schedule() {
+            ensure_topology_test_schema();
+
             let router = Router::new_with_clock(
                 RouterConfig::new(vec![EndpointHandler::new_packet_handler(
                     DataEndpoint::named("RADIO"),
@@ -5456,6 +5511,8 @@ mod router_tests {
 
         #[test]
         fn router_exports_board_graph_and_tracks_transitive_endpoint_holders() {
+            ensure_topology_test_schema();
+
             let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
             let side_a =
                 router.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
@@ -5827,6 +5884,8 @@ mod router_tests {
 
         #[test]
         fn router_discovery_defaults_to_adaptive_load_balancing() {
+            ensure_topology_test_schema();
+
             let now_ms = Arc::new(AtomicU64::new(0));
             let armed = Arc::new(AtomicBool::new(false));
             let seen_a = Arc::new(AtomicUsize::new(0));
@@ -5905,6 +5964,454 @@ mod router_tests {
                 "expected faster side to receive more traffic: a={a}, b={b}"
             );
             assert!(b > 0, "expected adaptive balancing instead of failover");
+
+            let stats = router.export_runtime_stats();
+            let side_a_stats = stats
+                .sides
+                .iter()
+                .find(|side| side.side_name == "A")
+                .unwrap();
+            let side_b_stats = stats
+                .sides
+                .iter()
+                .find(|side| side.side_name == "B")
+                .unwrap();
+            assert!(
+                side_a_stats.adaptive.estimated_capacity_bps
+                    > side_b_stats.adaptive.estimated_capacity_bps,
+                "expected adaptive capacity estimate to favor faster side"
+            );
+        }
+
+        #[test]
+        fn router_exports_runtime_stats_with_route_and_type_details() {
+            ensure_topology_test_schema();
+
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let seen_a = Arc::new(AtomicUsize::new(0));
+            let seen_b = Arc::new(AtomicUsize::new(0));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+            let now_a = now_ms.clone();
+            let now_b = now_ms.clone();
+
+            let router = Router::new_with_clock(
+                RouterConfig::default(),
+                Box::new(SharedClock {
+                    now_ms: now_ms.clone(),
+                }),
+            );
+            let retry_budget = Arc::new(AtomicUsize::new(0));
+            let retry_budget_c = retry_budget.clone();
+            let side_a = router.add_side_packet("A", move |_pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.fetch_add(1, Ordering::SeqCst);
+                now_a.fetch_add(1, Ordering::SeqCst);
+                if retry_budget_c.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(TelemetryError::Io("side tx busy"));
+                }
+                Ok(())
+            });
+            let side_b = router.add_side_packet("B", move |_pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.fetch_add(1, Ordering::SeqCst);
+                now_b.fetch_add(3, Ordering::SeqCst);
+                Ok(())
+            });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::named("RADIO")]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::named("RADIO")]).unwrap();
+            router.rx_from_side(&discovery_a, side_a).unwrap();
+            router.rx_from_side(&discovery_b, side_b).unwrap();
+
+            router
+                .set_source_route_mode(None, RouteSelectionMode::Weighted)
+                .unwrap();
+            router.set_route(None, side_b, false).unwrap();
+            router.set_route_weight(None, side_a, 2).unwrap();
+            router.set_route_weight(None, side_b, 1).unwrap();
+            router.set_route_priority(None, side_a, 7).unwrap();
+            router
+                .set_typed_route(None, DataType::named("GPS_DATA"), side_a, true)
+                .unwrap();
+            router
+                .set_typed_route(None, DataType::named("GPS_DATA"), side_b, false)
+                .unwrap();
+
+            for seq in 0..3 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::named("GPS_DATA"),
+                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    &[DataEndpoint::named("RADIO")],
+                    seq as u64,
+                )
+                .unwrap();
+                router.tx_queue(pkt).unwrap();
+            }
+
+            let queued = router.export_runtime_stats();
+            assert_eq!(queued.queues.tx_len, 3);
+            assert!(queued.queues.tx_bytes > 0);
+            assert_eq!(queued.queues.rx_len, 0);
+
+            router.process_tx_queue().unwrap();
+
+            let stats = router.export_runtime_stats();
+            assert_eq!(
+                stats
+                    .route_modes
+                    .iter()
+                    .find(|mode| mode.src_side_id.is_none())
+                    .unwrap()
+                    .selection_mode,
+                Some(RouteSelectionMode::Weighted)
+            );
+            assert!(
+                stats
+                    .route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id.is_none()
+                        && route.dst_side_id == side_b
+                        && !route.enabled)
+            );
+            assert!(
+                stats
+                    .route_weights
+                    .iter()
+                    .any(|weight| weight.src_side_id.is_none()
+                        && weight.dst_side_id == side_a
+                        && weight.weight == 2)
+            );
+            assert!(
+                stats
+                    .route_priorities
+                    .iter()
+                    .any(|priority| priority.src_side_id.is_none()
+                        && priority.dst_side_id == side_a
+                        && priority.priority == 7)
+            );
+            assert!(
+                stats
+                    .typed_route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id.is_none()
+                        && route.data_type == DataType::named("GPS_DATA")
+                        && route.dst_side_id == side_a
+                        && route.enabled)
+            );
+            assert!(
+                stats
+                    .typed_route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id.is_none()
+                        && route.data_type == DataType::named("GPS_DATA")
+                        && route.dst_side_id == side_b
+                        && !route.enabled)
+            );
+            assert_eq!(stats.discovery.route_count, 2);
+            assert_eq!(stats.discovery.announcer_count, 2);
+            assert_eq!(stats.queues.tx_len, 0);
+            assert_eq!(stats.queues.rx_len, 0);
+            assert_eq!(stats.reliable.reliable_return_route_count, 0);
+            assert_eq!(stats.reliable.end_to_end_pending_count, 0);
+            assert_eq!(stats.total_handler_failures, 0);
+            assert_eq!(stats.total_handler_retries, 0);
+
+            let side_a_stats = side_stats(&stats, side_a);
+            let side_b_stats = side_stats(&stats, side_b);
+            let side_a_type = type_stats(side_a_stats, DataType::named("GPS_DATA"));
+            assert!(side_a_stats.rx_packets >= 1);
+            assert!(!side_a_stats.reliable_enabled);
+            assert!(!side_a_stats.link_local_enabled);
+            assert!(side_a_stats.ingress_enabled);
+            assert!(side_a_stats.egress_enabled);
+            assert!(side_a_stats.tx_packets >= 3);
+            assert_eq!(side_a_stats.tx_retries, 2);
+            assert_eq!(side_a_stats.total_handler_retries, 2);
+            assert_eq!(side_a_stats.tx_handler_failures, 0);
+            assert_eq!(side_a_stats.local_handler_failures, 0);
+            assert_eq!(side_a_stats.local_delivery_packets, 0);
+            assert_eq!(side_a_type.tx_packets, 3);
+            assert_eq!(side_a_type.handler_failures, 0);
+            assert_eq!(side_a_type.relayed_tx_packets, 0);
+            assert!(side_a_stats.adaptive.auto_balancing_enabled);
+            assert!(side_a_stats.adaptive.estimated_capacity_bps > 0);
+            assert!(
+                side_a_stats.adaptive.peak_capacity_bps
+                    >= side_a_stats.adaptive.estimated_capacity_bps
+            );
+            assert!(side_a_stats.adaptive.current_usage_bps > 0);
+            assert!(
+                side_a_stats.adaptive.peak_usage_bps >= side_a_stats.adaptive.current_usage_bps
+            );
+            assert_eq!(
+                side_a_stats.adaptive.effective_weight,
+                side_a_stats.adaptive.available_headroom_bps.max(1)
+            );
+            assert!(side_a_stats.adaptive.sample_count >= 3);
+            assert!(side_a_stats.adaptive.last_observed_ms > 0);
+            assert_eq!(
+                side_b_stats
+                    .data_types
+                    .iter()
+                    .find(|item| item.data_type == DataType::named("GPS_DATA"))
+                    .map(|item| item.tx_packets)
+                    .unwrap_or(0),
+                0
+            );
+        }
+
+        #[test]
+        fn relay_exports_runtime_stats_with_route_and_bandwidth_details() {
+            ensure_topology_test_schema();
+
+            let now_ms = Arc::new(AtomicU64::new(0));
+            let now_a = now_ms.clone();
+            let now_b = now_ms.clone();
+
+            let relay = Relay::new(Box::new(SharedClock {
+                now_ms: now_ms.clone(),
+            }));
+            let side_a = relay.add_side_packet("A", move |_pkt: &Packet| -> TelemetryResult<()> {
+                now_a.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            let side_b = relay.add_side_packet("B", move |_pkt: &Packet| -> TelemetryResult<()> {
+                now_b.fetch_add(4, Ordering::SeqCst);
+                Ok(())
+            });
+            let side_c =
+                relay.add_side_packet("C", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::named("RADIO")]).unwrap();
+            let discovery_b =
+                build_discovery_announce("REMOTE_B", 1, &[DataEndpoint::named("RADIO")]).unwrap();
+            relay.rx_from_side(side_a, discovery_a).unwrap();
+            relay.rx_from_side(side_b, discovery_b).unwrap();
+            relay.process_rx_queue().unwrap();
+
+            relay
+                .set_source_route_mode(Some(side_c), RouteSelectionMode::Weighted)
+                .unwrap();
+            relay.set_route(Some(side_c), side_b, false).unwrap();
+            relay.set_route_weight(Some(side_c), side_a, 2).unwrap();
+            relay.set_route_weight(Some(side_c), side_b, 1).unwrap();
+            relay.set_route_priority(Some(side_c), side_a, 4).unwrap();
+            relay
+                .set_typed_route(Some(side_c), DataType::named("GPS_DATA"), side_a, true)
+                .unwrap();
+            relay
+                .set_typed_route(Some(side_c), DataType::named("GPS_DATA"), side_b, false)
+                .unwrap();
+
+            for seq in 0..6 {
+                let pkt = Packet::from_f32_slice(
+                    DataType::named("GPS_DATA"),
+                    &[seq as f32, seq as f32 + 1.0, seq as f32 + 2.0],
+                    &[DataEndpoint::named("RADIO")],
+                    seq as u64,
+                )
+                .unwrap();
+                relay.rx_from_side(side_c, pkt).unwrap();
+            }
+            let queued = relay.export_runtime_stats();
+            assert_eq!(queued.queues.rx_len, 6);
+            assert!(queued.queues.rx_bytes > 0);
+            relay.process_all_queues().unwrap();
+
+            let stats = relay.export_runtime_stats();
+            assert_eq!(
+                stats
+                    .route_modes
+                    .iter()
+                    .find(|mode| mode.src_side_id == Some(side_c))
+                    .unwrap()
+                    .selection_mode,
+                Some(RouteSelectionMode::Weighted)
+            );
+            assert!(
+                stats
+                    .route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id == Some(side_c)
+                        && route.dst_side_id == side_b
+                        && !route.enabled)
+            );
+            assert!(
+                stats
+                    .route_weights
+                    .iter()
+                    .any(|weight| weight.src_side_id == Some(side_c)
+                        && weight.dst_side_id == side_a
+                        && weight.weight == 2)
+            );
+            assert!(
+                stats
+                    .route_priorities
+                    .iter()
+                    .any(|priority| priority.src_side_id == Some(side_c)
+                        && priority.dst_side_id == side_a
+                        && priority.priority == 4)
+            );
+            assert!(
+                stats
+                    .typed_route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id == Some(side_c)
+                        && route.data_type == DataType::named("GPS_DATA")
+                        && route.dst_side_id == side_a
+                        && route.enabled)
+            );
+            assert!(
+                stats
+                    .typed_route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id == Some(side_c)
+                        && route.data_type == DataType::named("GPS_DATA")
+                        && route.dst_side_id == side_b
+                        && !route.enabled)
+            );
+            assert_eq!(stats.queues.rx_len, 0);
+            assert_eq!(stats.queues.tx_len, 0);
+            assert_eq!(stats.total_handler_failures, 0);
+            assert_eq!(stats.total_handler_retries, 0);
+
+            let ingress_stats = side_stats(&stats, side_c);
+            assert_eq!(ingress_stats.rx_packets, 6);
+            assert_eq!(ingress_stats.relayed_rx_packets, 6);
+            assert!(
+                stats.reliable.reliable_return_route_count <= ingress_stats.rx_packets as usize
+            );
+            let ingress_type = type_stats(ingress_stats, DataType::named("GPS_DATA"));
+            assert_eq!(ingress_type.rx_packets, 6);
+            assert_eq!(ingress_type.relayed_rx_packets, 6);
+            let egress_a = side_stats(&stats, side_a);
+            let egress_b = side_stats(&stats, side_b);
+            assert!(egress_a.tx_packets > egress_b.tx_packets);
+            assert!(egress_a.adaptive.estimated_capacity_bps > 0);
+            assert!(egress_a.adaptive.current_usage_bps > 0);
+            assert!(egress_a.adaptive.peak_usage_bps >= egress_a.adaptive.current_usage_bps);
+            assert_eq!(
+                egress_a.adaptive.effective_weight,
+                egress_a.adaptive.available_headroom_bps.max(1)
+            );
+            assert!(egress_a.adaptive.last_observed_ms > 0);
+            assert_eq!(
+                egress_b
+                    .data_types
+                    .iter()
+                    .find(|item| item.data_type == DataType::named("GPS_DATA"))
+                    .map(|item| item.tx_packets)
+                    .unwrap_or(0),
+                0
+            );
+            assert!(stats.discovery.route_count >= 2);
+        }
+
+        #[test]
+        fn router_runtime_stats_track_ingress_local_handler_failures_and_relayed_rx() {
+            ensure_topology_test_schema();
+
+            let failing = EndpointHandler::new_packet_handler(
+                DataEndpoint::named("SD_CARD"),
+                |_pkt: &Packet| Err(TelemetryError::HandlerError("local handler failed")),
+            );
+            let router = Router::new_with_clock(RouterConfig::new(vec![failing]), zero_clock());
+            let side = router.add_side_packet("INGRESS", |_pkt: &Packet| Ok(()));
+
+            let pkt = Packet::from_f32_slice(
+                DataType::named("GPS_DATA"),
+                &[1.0, 2.0, 3.0],
+                &[DataEndpoint::named("SD_CARD")],
+                1,
+            )
+            .unwrap();
+            router.rx_from_side(&pkt, side).unwrap();
+
+            let stats = router.export_runtime_stats();
+            let ingress = side_stats(&stats, side);
+            let gps = type_stats(ingress, DataType::named("GPS_DATA"));
+
+            assert_eq!(stats.total_handler_failures, 1);
+            assert_eq!(stats.total_handler_retries, MAX_HANDLER_RETRIES as u64);
+            assert_eq!(ingress.rx_packets, 1);
+            assert!(ingress.rx_bytes > 0);
+            assert_eq!(ingress.relayed_rx_packets, 1);
+            assert_eq!(ingress.local_delivery_packets, 1);
+            assert_eq!(ingress.local_handler_failures, 1);
+            assert_eq!(ingress.total_handler_retries, MAX_HANDLER_RETRIES as u64);
+            assert_eq!(gps.rx_packets, 2);
+            assert_eq!(gps.relayed_rx_packets, 1);
+            assert_eq!(gps.handler_failures, 1);
+        }
+
+        #[test]
+        fn relay_runtime_stats_track_tx_failures_and_retries() {
+            ensure_topology_test_schema();
+
+            let relay = Relay::new(zero_clock());
+            let side_a = relay.add_side_packet("A", |_pkt: &Packet| {
+                Err(TelemetryError::Io("side tx failed hard"))
+            });
+            let side_b = relay.add_side_packet("B", |_pkt: &Packet| Ok(()));
+            let side_c = relay.add_side_packet("C", |_pkt: &Packet| Ok(()));
+
+            let discovery_a =
+                build_discovery_announce("REMOTE_A", 0, &[DataEndpoint::named("RADIO")]).unwrap();
+            relay.rx_from_side(side_a, discovery_a).unwrap();
+            relay.process_rx_queue().unwrap();
+
+            relay
+                .set_source_route_mode(Some(side_c), RouteSelectionMode::Failover)
+                .unwrap();
+            relay.set_route(Some(side_c), side_b, false).unwrap();
+            relay.set_route_priority(Some(side_c), side_a, 0).unwrap();
+
+            let pkt = Packet::from_f32_slice(
+                DataType::named("GPS_DATA"),
+                &[9.0, 8.0, 7.0],
+                &[DataEndpoint::named("RADIO")],
+                42,
+            )
+            .unwrap();
+            relay.rx_from_side(side_c, pkt).unwrap();
+            assert!(matches!(
+                relay.process_all_queues(),
+                Err(TelemetryError::Io("side tx failed hard"))
+            ));
+
+            let stats = relay.export_runtime_stats();
+            let failing_side = side_stats(&stats, side_a);
+            let ingress = side_stats(&stats, side_c);
+            let gps = type_stats(failing_side, DataType::named("GPS_DATA"));
+
+            assert_eq!(stats.total_handler_failures, 1);
+            assert_eq!(stats.total_handler_retries, 1);
+            assert!(
+                stats
+                    .route_overrides
+                    .iter()
+                    .any(|route| route.src_side_id == Some(side_c)
+                        && route.dst_side_id == side_b
+                        && !route.enabled)
+            );
+            assert!(
+                stats
+                    .route_priorities
+                    .iter()
+                    .any(|priority| priority.src_side_id == Some(side_c)
+                        && priority.dst_side_id == side_a
+                        && priority.priority == 0)
+            );
+            assert_eq!(ingress.rx_packets, 1);
+            assert_eq!(ingress.relayed_rx_packets, 1);
+            assert_eq!(failing_side.tx_packets, 0);
+            assert_eq!(failing_side.tx_handler_failures, 1);
+            assert_eq!(failing_side.tx_retries, 1);
+            assert_eq!(failing_side.total_handler_retries, 1);
+            assert_eq!(gps.handler_failures, 1);
+            assert_eq!(gps.tx_retries, 1);
         }
 
         #[test]
@@ -6566,6 +7073,8 @@ mod router_tests {
 
         #[test]
         fn relay_exports_aggregated_topology() {
+            ensure_topology_test_schema();
+
             let relay = Relay::new(zero_clock());
             let side_a =
                 relay.add_side_packet("A", |_pkt: &Packet| -> TelemetryResult<()> { Ok(()) });
@@ -6585,8 +7094,18 @@ mod router_tests {
                 snap.advertised_endpoints,
                 vec![DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")]
             );
+            assert!(snap.routers.iter().any(|board| board.sender_id == "RELAY"
+                && board.connections.contains(&"NODE_A".to_string())));
             assert_eq!(snap.routes.len(), 1);
             assert_eq!(snap.routes[0].side_name, "A");
+            assert_eq!(snap.routes[0].announcers.len(), 1);
+            assert_eq!(snap.routes[0].announcers[0].sender_id, "NODE_A");
+            assert!(
+                snap.routes[0].announcers[0]
+                    .routers
+                    .iter()
+                    .any(|board| board.sender_id == "NODE_A")
+            );
         }
 
         #[test]

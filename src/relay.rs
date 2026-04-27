@@ -3,6 +3,11 @@ use crate::config::{
     RELIABLE_MAX_END_TO_END_ACK_CACHE, RELIABLE_MAX_END_TO_END_PENDING, RELIABLE_MAX_PENDING,
     RELIABLE_MAX_RETRIES, RELIABLE_MAX_RETURN_ROUTES, RELIABLE_RETRANSMIT_MS, STARTING_QUEUE_SIZE,
 };
+use crate::diagnostics::{
+    AdaptiveLinkStats, DiscoveryRuntimeStats, QueueRuntimeStats, ReliableRuntimeStats,
+    RouteModeStats, RouteOverrideStats, RoutePriorityStats, RouteWeightStats, RuntimeSideStats,
+    RuntimeStatsSnapshot, RuntimeTypeStats, TypedRouteOverrideStats,
+};
 #[cfg(feature = "discovery")]
 use crate::discovery::{
     self, DiscoveryCadenceState, TopologyAnnouncerRoute, TopologyBoardNode, TopologySideRoute,
@@ -210,12 +215,17 @@ struct DiscoverySideState {
 #[derive(Debug, Clone, Default)]
 struct AdaptiveRouteStats {
     estimated_bandwidth_bps: u64,
+    peak_bandwidth_bps: u64,
     last_observed_ms: u64,
+    sample_count: u64,
+    window_started_ms: u64,
+    window_bytes: u64,
+    peak_usage_bps: u64,
 }
 
 impl AdaptiveRouteStats {
     #[inline]
-    fn observe(&mut self, sample_bps: u64, now_ms: u64) {
+    fn observe(&mut self, bytes: usize, sample_bps: u64, now_ms: u64) {
         self.estimated_bandwidth_bps = if self.estimated_bandwidth_bps == 0 {
             sample_bps
         } else if sample_bps >= self.estimated_bandwidth_bps {
@@ -229,12 +239,130 @@ impl AdaptiveRouteStats {
                 .saturating_add(sample_bps)
                 / 8
         };
+        self.peak_bandwidth_bps = self.peak_bandwidth_bps.max(sample_bps);
         self.last_observed_ms = now_ms;
+        self.sample_count = self.sample_count.saturating_add(1);
+        if self.window_started_ms == 0 || now_ms.saturating_sub(self.window_started_ms) > 1_000 {
+            self.window_started_ms = now_ms;
+            self.window_bytes = 0;
+        }
+        self.window_bytes = self.window_bytes.saturating_add(bytes as u64);
+        self.peak_usage_bps = self.peak_usage_bps.max(self.current_usage_bps(now_ms));
     }
 
     #[inline]
-    fn weight(&self) -> u64 {
-        self.estimated_bandwidth_bps.max(1)
+    fn current_usage_bps(&self, now_ms: u64) -> u64 {
+        if self.window_started_ms == 0 {
+            return 0;
+        }
+        let elapsed_ms = now_ms.saturating_sub(self.window_started_ms).max(1);
+        ((u128::from(self.window_bytes)).saturating_mul(1000) / u128::from(elapsed_ms))
+            .min(u128::from(u64::MAX)) as u64
+    }
+
+    #[inline]
+    fn available_headroom_bps(&self, now_ms: u64) -> u64 {
+        let capacity = self
+            .estimated_bandwidth_bps
+            .max(self.peak_bandwidth_bps)
+            .max(1);
+        capacity.saturating_sub(self.current_usage_bps(now_ms))
+    }
+
+    #[inline]
+    fn weight(&self, now_ms: u64) -> u64 {
+        self.available_headroom_bps(now_ms).max(1)
+    }
+
+    #[inline]
+    fn snapshot(&self, now_ms: u64, auto_balancing_enabled: bool) -> AdaptiveLinkStats {
+        let current_usage_bps = self.current_usage_bps(now_ms);
+        let estimated_capacity_bps = self.estimated_bandwidth_bps.max(1);
+        let peak_capacity_bps = self.peak_bandwidth_bps.max(estimated_capacity_bps);
+        let available_headroom_bps = peak_capacity_bps.saturating_sub(current_usage_bps);
+        AdaptiveLinkStats {
+            auto_balancing_enabled,
+            estimated_capacity_bps,
+            peak_capacity_bps,
+            current_usage_bps,
+            peak_usage_bps: self.peak_usage_bps.max(current_usage_bps),
+            available_headroom_bps,
+            effective_weight: available_headroom_bps.max(1),
+            last_observed_ms: self.last_observed_ms,
+            sample_count: self.sample_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TypeRuntimeStatsInner {
+    tx_packets: u64,
+    tx_bytes: u64,
+    rx_packets: u64,
+    rx_bytes: u64,
+    relayed_tx_packets: u64,
+    relayed_tx_bytes: u64,
+    relayed_rx_packets: u64,
+    relayed_rx_bytes: u64,
+    tx_retries: u64,
+    handler_failures: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SideRuntimeStatsInner {
+    tx_packets: u64,
+    tx_bytes: u64,
+    rx_packets: u64,
+    rx_bytes: u64,
+    relayed_tx_packets: u64,
+    relayed_tx_bytes: u64,
+    relayed_rx_packets: u64,
+    relayed_rx_bytes: u64,
+    tx_retries: u64,
+    tx_handler_failures: u64,
+    total_handler_retries: u64,
+    data_types: BTreeMap<u32, TypeRuntimeStatsInner>,
+}
+
+impl SideRuntimeStatsInner {
+    fn type_stats_mut(&mut self, ty: crate::DataType) -> &mut TypeRuntimeStatsInner {
+        self.data_types.entry(ty.as_u32()).or_default()
+    }
+
+    fn note_tx(&mut self, ty: crate::DataType, bytes: usize, retries: usize) {
+        self.tx_packets = self.tx_packets.saturating_add(1);
+        self.tx_bytes = self.tx_bytes.saturating_add(bytes as u64);
+        self.relayed_tx_packets = self.relayed_tx_packets.saturating_add(1);
+        self.relayed_tx_bytes = self.relayed_tx_bytes.saturating_add(bytes as u64);
+        self.tx_retries = self.tx_retries.saturating_add(retries as u64);
+        self.total_handler_retries = self.total_handler_retries.saturating_add(retries as u64);
+        let stats = self.type_stats_mut(ty);
+        stats.tx_packets = stats.tx_packets.saturating_add(1);
+        stats.tx_bytes = stats.tx_bytes.saturating_add(bytes as u64);
+        stats.relayed_tx_packets = stats.relayed_tx_packets.saturating_add(1);
+        stats.relayed_tx_bytes = stats.relayed_tx_bytes.saturating_add(bytes as u64);
+        stats.tx_retries = stats.tx_retries.saturating_add(retries as u64);
+    }
+
+    fn note_rx(&mut self, ty: crate::DataType, bytes: usize) {
+        self.rx_packets = self.rx_packets.saturating_add(1);
+        self.rx_bytes = self.rx_bytes.saturating_add(bytes as u64);
+        self.relayed_rx_packets = self.relayed_rx_packets.saturating_add(1);
+        self.relayed_rx_bytes = self.relayed_rx_bytes.saturating_add(bytes as u64);
+        let stats = self.type_stats_mut(ty);
+        stats.rx_packets = stats.rx_packets.saturating_add(1);
+        stats.rx_bytes = stats.rx_bytes.saturating_add(bytes as u64);
+        stats.relayed_rx_packets = stats.relayed_rx_packets.saturating_add(1);
+        stats.relayed_rx_bytes = stats.relayed_rx_bytes.saturating_add(bytes as u64);
+    }
+
+    fn note_tx_failure(&mut self, ty: crate::DataType, retries: usize) {
+        self.tx_handler_failures = self.tx_handler_failures.saturating_add(1);
+        self.tx_retries = self.tx_retries.saturating_add(retries as u64);
+        self.total_handler_retries = self.total_handler_retries.saturating_add(retries as u64);
+        let stats = self.type_stats_mut(ty);
+        stats.handler_failures = stats.handler_failures.saturating_add(1);
+        stats.tx_retries = stats.tx_retries.saturating_add(retries as u64);
     }
 }
 
@@ -254,6 +382,7 @@ struct RelayInner {
     source_route_modes: BTreeMap<Option<RelaySideId>, RouteSelectionMode>,
     route_selection_cursors: BTreeMap<Option<RelaySideId>, u64>,
     adaptive_route_stats: BTreeMap<RelaySideId, AdaptiveRouteStats>,
+    side_runtime_stats: BTreeMap<RelaySideId, SideRuntimeStatsInner>,
     rx_queue: BoundedDeque<RelayRxItem>,
     tx_queue: BoundedDeque<RelayTxItem>,
     replay_queue: BoundedDeque<RelayReplayItem>,
@@ -264,6 +393,8 @@ struct RelayInner {
     reliable_return_route_order: VecDeque<u64>,
     end_to_end_acked_destinations: BTreeMap<u64, BTreeSet<u64>>,
     end_to_end_acked_destination_order: VecDeque<u64>,
+    total_handler_failures: u64,
+    total_handler_retries: u64,
     #[cfg(feature = "discovery")]
     discovery_routes: BTreeMap<RelaySideId, DiscoverySideState>,
     #[cfg(feature = "discovery")]
@@ -696,6 +827,7 @@ impl Relay {
                 source_route_modes: BTreeMap::new(),
                 route_selection_cursors: BTreeMap::new(),
                 adaptive_route_stats: BTreeMap::new(),
+                side_runtime_stats: BTreeMap::new(),
                 rx_queue: BoundedDeque::new(MAX_QUEUE_BUDGET, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 tx_queue: BoundedDeque::new(MAX_QUEUE_BUDGET, STARTING_QUEUE_SIZE, QUEUE_GROW_STEP),
                 replay_queue: BoundedDeque::new(
@@ -714,6 +846,8 @@ impl Relay {
                 reliable_return_route_order: VecDeque::new(),
                 end_to_end_acked_destinations: BTreeMap::new(),
                 end_to_end_acked_destination_order: VecDeque::new(),
+                total_handler_failures: 0,
+                total_handler_retries: 0,
                 #[cfg(feature = "discovery")]
                 discovery_routes: BTreeMap::new(),
                 #[cfg(feature = "discovery")]
@@ -740,6 +874,32 @@ impl Relay {
             .get(side)
             .and_then(|side| side.as_ref())
             .ok_or(TelemetryError::HandlerError("relay: invalid side id"))
+    }
+
+    fn note_side_tx_success(
+        &self,
+        side: RelaySideId,
+        ty: crate::DataType,
+        bytes: usize,
+        attempts: usize,
+    ) {
+        let mut st = self.state.lock();
+        let entry = st.side_runtime_stats.entry(side).or_default();
+        entry.note_tx(ty, bytes, attempts.saturating_sub(1));
+    }
+
+    fn note_side_tx_failure(&self, side: RelaySideId, ty: crate::DataType, attempts: usize) {
+        let mut st = self.state.lock();
+        st.total_handler_failures = st.total_handler_failures.saturating_add(1);
+        st.total_handler_retries = st.total_handler_retries.saturating_add(attempts as u64);
+        let entry = st.side_runtime_stats.entry(side).or_default();
+        entry.note_tx_failure(ty, attempts);
+    }
+
+    fn note_side_rx(&self, side: RelaySideId, ty: crate::DataType, bytes: usize) {
+        let mut st = self.state.lock();
+        let entry = st.side_runtime_stats.entry(side).or_default();
+        entry.note_rx(ty, bytes);
     }
 
     #[inline]
@@ -895,11 +1055,12 @@ impl Relay {
             return vec![unmeasured.swap_remove(pick)];
         }
 
+        let now_ms = self.clock.now_ms();
         let total_weight = sides.iter().fold(0_u64, |acc, side| {
             acc + st
                 .adaptive_route_stats
                 .get(side)
-                .map(AdaptiveRouteStats::weight)
+                .map(|stats| stats.weight(now_ms))
                 .unwrap_or(1)
         });
         if total_weight == 0 {
@@ -915,7 +1076,7 @@ impl Relay {
             let weight = st
                 .adaptive_route_stats
                 .get(&side)
-                .map(AdaptiveRouteStats::weight)
+                .map(|stats| stats.weight(now_ms))
                 .unwrap_or(1);
             if remaining < weight {
                 return vec![side];
@@ -939,7 +1100,7 @@ impl Relay {
         st.adaptive_route_stats
             .entry(side)
             .or_default()
-            .observe(sample_bps, ended_ms);
+            .observe(bytes, sample_bps, ended_ms);
     }
 
     fn relay_item_wire_len(data: &RelayItem) -> TelemetryResult<usize> {
@@ -1244,6 +1405,9 @@ impl Relay {
             return Err(TelemetryError::Io("side tx busy"));
         };
         let started_ms = self.clock.now_ms();
+        let ty = serialize::peek_envelope(bytes.as_ref())
+            .map(|env| env.ty)
+            .unwrap_or(crate::DataType::ReliableAck);
         let result = match handler {
             RelayTxHandlerFn::Serialized(f) => f(bytes.as_ref()),
             RelayTxHandlerFn::Packet(f) => {
@@ -1253,6 +1417,9 @@ impl Relay {
         };
         if result.is_ok() {
             self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+            self.note_side_tx_success(side, ty, bytes.len(), 1);
+        } else {
+            self.note_side_tx_failure(side, ty, 1);
         }
         result
     }
@@ -1329,6 +1496,7 @@ impl Relay {
                     let started_ms = self.clock.now_ms();
                     f(bytes.as_ref())?;
                     self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+                    self.note_side_tx_success(side, ty, bytes.len(), 1);
                     return Ok(());
                 }
                 Arc::from(v)
@@ -1341,6 +1509,7 @@ impl Relay {
         let started_ms = self.clock.now_ms();
         f(bytes.as_ref())?;
         self.record_side_tx_sample(side, bytes.len(), started_ms, self.clock.now_ms());
+        self.note_side_tx_success(side, ty, bytes.len(), 1);
 
         {
             let mut st = self.state.lock();
@@ -2328,6 +2497,8 @@ impl Relay {
             tx_handler: RelayTxHandlerFn::Serialized(Arc::new(tx)),
             opts,
         }));
+        st.side_runtime_stats
+            .insert(id, SideRuntimeStatsInner::default());
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
         id
@@ -2361,6 +2532,8 @@ impl Relay {
             tx_handler: RelayTxHandlerFn::Packet(Arc::new(tx)),
             opts,
         }));
+        st.side_runtime_stats
+            .insert(id, SideRuntimeStatsInner::default());
         #[cfg(feature = "discovery")]
         Self::note_discovery_topology_change_locked(&mut st, self.clock.now_ms());
         id
@@ -2389,6 +2562,7 @@ impl Relay {
         st.source_route_modes.remove(&Some(side));
         st.route_selection_cursors.remove(&Some(side));
         st.adaptive_route_stats.remove(&side);
+        st.side_runtime_stats.remove(&side);
         st.reliable_return_routes
             .retain(|_, route| route.side != side);
         st.rx_queue.retain(|queued| queued.src != side);
@@ -2685,6 +2859,195 @@ impl Relay {
         }
     }
 
+    pub fn export_runtime_stats(&self) -> RuntimeStatsSnapshot {
+        let now_ms = self.clock.now_ms();
+        let st = self.state.lock();
+
+        let mut sides = Vec::new();
+        for (side_id, side) in st.sides.iter().enumerate() {
+            let Some(side) = side.as_ref() else { continue };
+            let stats = st
+                .side_runtime_stats
+                .get(&side_id)
+                .cloned()
+                .unwrap_or_default();
+            let adaptive = st
+                .adaptive_route_stats
+                .get(&side_id)
+                .cloned()
+                .unwrap_or_default()
+                .snapshot(now_ms, true);
+            let mut data_types: Vec<RuntimeTypeStats> = stats
+                .data_types
+                .into_iter()
+                .map(|(ty, item)| RuntimeTypeStats {
+                    data_type: crate::DataType(ty),
+                    tx_packets: item.tx_packets,
+                    tx_bytes: item.tx_bytes,
+                    rx_packets: item.rx_packets,
+                    rx_bytes: item.rx_bytes,
+                    relayed_tx_packets: item.relayed_tx_packets,
+                    relayed_tx_bytes: item.relayed_tx_bytes,
+                    relayed_rx_packets: item.relayed_rx_packets,
+                    relayed_rx_bytes: item.relayed_rx_bytes,
+                    tx_retries: item.tx_retries,
+                    handler_failures: item.handler_failures,
+                })
+                .collect();
+            data_types.sort_unstable_by_key(|item| item.data_type.as_u32());
+            sides.push(RuntimeSideStats {
+                side_id,
+                side_name: side.name,
+                reliable_enabled: side.opts.reliable_enabled,
+                link_local_enabled: side.opts.link_local_enabled,
+                ingress_enabled: side.opts.ingress_enabled,
+                egress_enabled: side.opts.egress_enabled,
+                tx_packets: stats.tx_packets,
+                tx_bytes: stats.tx_bytes,
+                rx_packets: stats.rx_packets,
+                rx_bytes: stats.rx_bytes,
+                relayed_tx_packets: stats.relayed_tx_packets,
+                relayed_tx_bytes: stats.relayed_tx_bytes,
+                relayed_rx_packets: stats.relayed_rx_packets,
+                relayed_rx_bytes: stats.relayed_rx_bytes,
+                local_delivery_packets: 0,
+                tx_retries: stats.tx_retries,
+                tx_handler_failures: stats.tx_handler_failures,
+                local_handler_failures: 0,
+                total_handler_retries: stats.total_handler_retries,
+                adaptive,
+                data_types,
+            });
+        }
+
+        let mut route_modes: Vec<RouteModeStats> = st
+            .route_selection_cursors
+            .iter()
+            .map(|(src, cursor)| RouteModeStats {
+                src_side_id: *src,
+                selection_mode: st.source_route_modes.get(src).copied(),
+                cursor: *cursor,
+            })
+            .collect();
+        for src in st.source_route_modes.keys() {
+            if !route_modes.iter().any(|mode| mode.src_side_id == *src) {
+                route_modes.push(RouteModeStats {
+                    src_side_id: *src,
+                    selection_mode: st.source_route_modes.get(src).copied(),
+                    cursor: 0,
+                });
+            }
+        }
+        route_modes.sort_unstable_by_key(|mode| mode.src_side_id.unwrap_or(usize::MAX));
+
+        let mut route_overrides: Vec<RouteOverrideStats> = st
+            .route_overrides
+            .iter()
+            .map(|((src, dst), enabled)| RouteOverrideStats {
+                src_side_id: *src,
+                dst_side_id: *dst,
+                enabled: *enabled,
+            })
+            .collect();
+        route_overrides.sort_unstable_by_key(|item| {
+            (item.src_side_id.unwrap_or(usize::MAX), item.dst_side_id)
+        });
+
+        let mut typed_route_overrides: Vec<TypedRouteOverrideStats> = st
+            .typed_route_overrides
+            .iter()
+            .map(|((src, ty, dst), enabled)| TypedRouteOverrideStats {
+                src_side_id: *src,
+                data_type: crate::DataType(*ty),
+                dst_side_id: *dst,
+                enabled: *enabled,
+            })
+            .collect();
+        typed_route_overrides.sort_unstable_by_key(|item| {
+            (
+                item.src_side_id.unwrap_or(usize::MAX),
+                item.data_type.as_u32(),
+                item.dst_side_id,
+            )
+        });
+
+        let mut route_weights: Vec<RouteWeightStats> = st
+            .route_weights
+            .iter()
+            .map(|((src, dst), weight)| RouteWeightStats {
+                src_side_id: *src,
+                dst_side_id: *dst,
+                weight: *weight,
+            })
+            .collect();
+        route_weights.sort_unstable_by_key(|item| {
+            (item.src_side_id.unwrap_or(usize::MAX), item.dst_side_id)
+        });
+
+        let mut route_priorities: Vec<RoutePriorityStats> = st
+            .route_priorities
+            .iter()
+            .map(|((src, dst), priority)| RoutePriorityStats {
+                src_side_id: *src,
+                dst_side_id: *dst,
+                priority: *priority,
+            })
+            .collect();
+        route_priorities.sort_unstable_by_key(|item| {
+            (item.src_side_id.unwrap_or(usize::MAX), item.dst_side_id)
+        });
+
+        #[cfg(feature = "discovery")]
+        let discovery = DiscoveryRuntimeStats {
+            route_count: st.discovery_routes.len(),
+            announcer_count: st
+                .discovery_routes
+                .values()
+                .map(|route| route.announcers.len())
+                .sum(),
+            current_announce_interval_ms: Some(st.discovery_cadence.current_interval_ms),
+            next_announce_ms: Some(st.discovery_cadence.next_announce_ms),
+        };
+        #[cfg(not(feature = "discovery"))]
+        let discovery = DiscoveryRuntimeStats {
+            route_count: 0,
+            announcer_count: 0,
+            current_announce_interval_ms: None,
+            next_announce_ms: None,
+        };
+
+        RuntimeStatsSnapshot {
+            sides,
+            route_modes,
+            route_overrides,
+            typed_route_overrides,
+            route_weights,
+            route_priorities,
+            queues: QueueRuntimeStats {
+                rx_len: st.rx_queue.len(),
+                rx_bytes: st.rx_queue.bytes_used(),
+                tx_len: st.tx_queue.len(),
+                tx_bytes: st.tx_queue.bytes_used(),
+                replay_len: st.replay_queue.len(),
+                replay_bytes: st.replay_queue.bytes_used(),
+                recent_rx_len: st.recent_rx.len(),
+                recent_rx_bytes: st.recent_rx.bytes_used(),
+                reliable_rx_buffered_len: st.reliable_rx_buffer_len(),
+                reliable_rx_buffered_bytes: st.reliable_rx_buffered_bytes(),
+                shared_queue_bytes_used: st.shared_queue_bytes_used(),
+            },
+            reliable: ReliableRuntimeStats {
+                reliable_return_route_count: st.reliable_return_routes.len(),
+                end_to_end_pending_count: 0,
+                end_to_end_pending_destination_count: 0,
+                end_to_end_acked_cache_count: st.end_to_end_acked_destinations.len(),
+            },
+            discovery,
+            total_handler_failures: st.total_handler_failures,
+            total_handler_retries: st.total_handler_retries,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_end_to_end_acked_destination_count(&self, packet_id: u64) -> Option<usize> {
         let st = self.state.lock();
@@ -2763,6 +3126,17 @@ impl Relay {
     /// Fanout is cheap: the `RelayItem` is cloned (Arc bump) and reused across all destinations.
     fn process_rx_queue_item(&self, item: RelayRxItem) -> TelemetryResult<()> {
         self.ensure_side_ingress_enabled(item.src)?;
+        match &item.data {
+            RelayItem::Packet(pkt) => {
+                let bytes = serialize::serialize_packet(pkt).len();
+                self.note_side_rx(item.src, pkt.data_type(), bytes);
+            }
+            RelayItem::Serialized(bytes) => {
+                if let Ok(env) = serialize::peek_envelope(bytes.as_ref()) {
+                    self.note_side_rx(item.src, env.ty, bytes.len());
+                }
+            }
+        }
         match &item.data {
             RelayItem::Packet(pkt) => {
                 if is_reliable_type(pkt.data_type()) && !is_internal_control_type(pkt.data_type()) {
@@ -3037,6 +3411,10 @@ impl Relay {
             return Err(TelemetryError::Io("side tx busy"));
         };
         let started_ms = self.clock.now_ms();
+        let ty = match data {
+            RelayItem::Packet(pkt) => pkt.data_type(),
+            RelayItem::Serialized(bytes) => serialize::peek_envelope(bytes.as_ref())?.ty,
+        };
         let result = match (handler, data) {
             // Fast paths
             (RelayTxHandlerFn::Serialized(f), RelayItem::Serialized(bytes)) => f(bytes.as_ref()),
@@ -3056,6 +3434,9 @@ impl Relay {
             && let Ok(bytes) = Self::relay_item_wire_len(data)
         {
             self.record_side_tx_sample(side, bytes, started_ms, self.clock.now_ms());
+            self.note_side_tx_success(side, ty, bytes, 1);
+        } else if result.is_err() {
+            self.note_side_tx_failure(side, ty, 1);
         }
         result
     }

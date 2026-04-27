@@ -165,6 +165,7 @@ mod embedded_alloc {
 
 mod c_api;
 pub mod config;
+pub mod diagnostics;
 #[cfg(feature = "discovery")]
 pub mod discovery;
 mod lock;

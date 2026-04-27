@@ -501,6 +501,294 @@ fn topology_snapshot_to_json(snap: &crate::discovery::TopologySnapshot) -> Strin
     out
 }
 
+#[cfg(feature = "discovery")]
+fn route_selection_mode_name(mode: RouteSelectionMode) -> &'static str {
+    match mode {
+        RouteSelectionMode::Fanout => "Fanout",
+        RouteSelectionMode::Weighted => "Weighted",
+        RouteSelectionMode::Failover => "Failover",
+    }
+}
+
+#[cfg(feature = "discovery")]
+fn runtime_stats_snapshot_to_json(snap: &crate::diagnostics::RuntimeStatsSnapshot) -> String {
+    fn push_bool(out: &mut String, val: bool) {
+        out.push_str(if val { "true" } else { "false" });
+    }
+
+    fn push_optional_usize(out: &mut String, val: Option<usize>) {
+        match val {
+            Some(v) => {
+                let _ = core::fmt::Write::write_fmt(out, format_args!("{v}"));
+            }
+            None => out.push_str("null"),
+        }
+    }
+
+    fn push_optional_u64(out: &mut String, val: Option<u64>) {
+        match val {
+            Some(v) => {
+                let _ = core::fmt::Write::write_fmt(out, format_args!("{v}"));
+            }
+            None => out.push_str("null"),
+        }
+    }
+
+    fn push_optional_route_mode(out: &mut String, val: Option<RouteSelectionMode>) {
+        match val {
+            Some(mode) => json_push_escaped(out, route_selection_mode_name(mode)),
+            None => out.push_str("null"),
+        }
+    }
+
+    let mut out = String::new();
+    out.push('{');
+
+    out.push_str("\"sides\":[");
+    for (side_idx, side) in snap.sides.iter().enumerate() {
+        if side_idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("\"side_id\":{},\"side_name\":", side.side_id,),
+        );
+        json_push_escaped(&mut out, side.side_name);
+        out.push_str(",\"reliable_enabled\":");
+        push_bool(&mut out, side.reliable_enabled);
+        out.push_str(",\"link_local_enabled\":");
+        push_bool(&mut out, side.link_local_enabled);
+        out.push_str(",\"ingress_enabled\":");
+        push_bool(&mut out, side.ingress_enabled);
+        out.push_str(",\"egress_enabled\":");
+        push_bool(&mut out, side.egress_enabled);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                ",\"tx_packets\":{},\"tx_bytes\":{},\"rx_packets\":{},\"rx_bytes\":{},\
+                 \"relayed_tx_packets\":{},\"relayed_tx_bytes\":{},\
+                 \"relayed_rx_packets\":{},\"relayed_rx_bytes\":{},\
+                 \"local_delivery_packets\":{},\"tx_retries\":{},\
+                 \"tx_handler_failures\":{},\"local_handler_failures\":{},\
+                 \"total_handler_retries\":{}",
+                side.tx_packets,
+                side.tx_bytes,
+                side.rx_packets,
+                side.rx_bytes,
+                side.relayed_tx_packets,
+                side.relayed_tx_bytes,
+                side.relayed_rx_packets,
+                side.relayed_rx_bytes,
+                side.local_delivery_packets,
+                side.tx_retries,
+                side.tx_handler_failures,
+                side.local_handler_failures,
+                side.total_handler_retries
+            ),
+        );
+        out.push_str(",\"adaptive\":{");
+        out.push_str("\"auto_balancing_enabled\":");
+        push_bool(&mut out, side.adaptive.auto_balancing_enabled);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                ",\"estimated_capacity_bps\":{},\"peak_capacity_bps\":{},\
+                 \"current_usage_bps\":{},\"peak_usage_bps\":{},\
+                 \"available_headroom_bps\":{},\"effective_weight\":{},\
+                 \"last_observed_ms\":{},\"sample_count\":{}",
+                side.adaptive.estimated_capacity_bps,
+                side.adaptive.peak_capacity_bps,
+                side.adaptive.current_usage_bps,
+                side.adaptive.peak_usage_bps,
+                side.adaptive.available_headroom_bps,
+                side.adaptive.effective_weight,
+                side.adaptive.last_observed_ms,
+                side.adaptive.sample_count
+            ),
+        );
+        out.push('}');
+        out.push_str(",\"data_types\":[");
+        for (type_idx, data_type) in side.data_types.iter().enumerate() {
+            if type_idx != 0 {
+                out.push(',');
+            }
+            let _ = core::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "{{\"data_type\":{},\"tx_packets\":{},\"tx_bytes\":{},\
+                      \"rx_packets\":{},\"rx_bytes\":{},\
+                      \"relayed_tx_packets\":{},\"relayed_tx_bytes\":{},\
+                      \"relayed_rx_packets\":{},\"relayed_rx_bytes\":{},\
+                      \"tx_retries\":{},\"handler_failures\":{}}}",
+                    data_type.data_type.as_u32(),
+                    data_type.tx_packets,
+                    data_type.tx_bytes,
+                    data_type.rx_packets,
+                    data_type.rx_bytes,
+                    data_type.relayed_tx_packets,
+                    data_type.relayed_tx_bytes,
+                    data_type.relayed_rx_packets,
+                    data_type.relayed_rx_bytes,
+                    data_type.tx_retries,
+                    data_type.handler_failures
+                ),
+            );
+        }
+        out.push_str("]}");
+    }
+    out.push(']');
+
+    out.push_str(",\"route_modes\":[");
+    for (idx, mode) in snap.route_modes.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        out.push_str("\"src_side_id\":");
+        push_optional_usize(&mut out, mode.src_side_id);
+        out.push_str(",\"selection_mode\":");
+        push_optional_route_mode(&mut out, mode.selection_mode);
+        let _ = core::fmt::Write::write_fmt(&mut out, format_args!(",\"cursor\":{}", mode.cursor));
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push_str(",\"route_overrides\":[");
+    for (idx, route) in snap.route_overrides.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        out.push_str("\"src_side_id\":");
+        push_optional_usize(&mut out, route.src_side_id);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(",\"dst_side_id\":{},\"enabled\":", route.dst_side_id),
+        );
+        push_bool(&mut out, route.enabled);
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push_str(",\"typed_route_overrides\":[");
+    for (idx, route) in snap.typed_route_overrides.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        out.push_str("\"src_side_id\":");
+        push_optional_usize(&mut out, route.src_side_id);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                ",\"data_type\":{},\"dst_side_id\":{},\"enabled\":",
+                route.data_type.as_u32(),
+                route.dst_side_id
+            ),
+        );
+        push_bool(&mut out, route.enabled);
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push_str(",\"route_weights\":[");
+    for (idx, weight) in snap.route_weights.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        out.push_str("\"src_side_id\":");
+        push_optional_usize(&mut out, weight.src_side_id);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                ",\"dst_side_id\":{},\"weight\":{}",
+                weight.dst_side_id, weight.weight
+            ),
+        );
+        out.push('}');
+    }
+    out.push(']');
+
+    out.push_str(",\"route_priorities\":[");
+    for (idx, priority) in snap.route_priorities.iter().enumerate() {
+        if idx != 0 {
+            out.push(',');
+        }
+        out.push('{');
+        out.push_str("\"src_side_id\":");
+        push_optional_usize(&mut out, priority.src_side_id);
+        let _ = core::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                ",\"dst_side_id\":{},\"priority\":{}",
+                priority.dst_side_id, priority.priority
+            ),
+        );
+        out.push('}');
+    }
+    out.push(']');
+
+    let _ = core::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            ",\"queues\":{{\"rx_len\":{},\"rx_bytes\":{},\"tx_len\":{},\"tx_bytes\":{},\
+              \"replay_len\":{},\"replay_bytes\":{},\"recent_rx_len\":{},\"recent_rx_bytes\":{},\
+              \"reliable_rx_buffered_len\":{},\"reliable_rx_buffered_bytes\":{},\
+              \"shared_queue_bytes_used\":{}}}",
+            snap.queues.rx_len,
+            snap.queues.rx_bytes,
+            snap.queues.tx_len,
+            snap.queues.tx_bytes,
+            snap.queues.replay_len,
+            snap.queues.replay_bytes,
+            snap.queues.recent_rx_len,
+            snap.queues.recent_rx_bytes,
+            snap.queues.reliable_rx_buffered_len,
+            snap.queues.reliable_rx_buffered_bytes,
+            snap.queues.shared_queue_bytes_used
+        ),
+    );
+
+    let _ = core::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            ",\"reliable\":{{\"reliable_return_route_count\":{},\
+              \"end_to_end_pending_count\":{},\
+              \"end_to_end_pending_destination_count\":{},\
+              \"end_to_end_acked_cache_count\":{}}}",
+            snap.reliable.reliable_return_route_count,
+            snap.reliable.end_to_end_pending_count,
+            snap.reliable.end_to_end_pending_destination_count,
+            snap.reliable.end_to_end_acked_cache_count
+        ),
+    );
+
+    out.push_str(",\"discovery\":{");
+    let _ = core::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            "\"route_count\":{},\"announcer_count\":{},\"current_announce_interval_ms\":",
+            snap.discovery.route_count, snap.discovery.announcer_count
+        ),
+    );
+    push_optional_u64(&mut out, snap.discovery.current_announce_interval_ms);
+    out.push_str(",\"next_announce_ms\":");
+    push_optional_u64(&mut out, snap.discovery.next_announce_ms);
+    out.push('}');
+
+    let _ = core::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            ",\"total_handler_failures\":{},\"total_handler_retries\":{}",
+            snap.total_handler_failures, snap.total_handler_retries
+        ),
+    );
+    out.push('}');
+    out
+}
+
 /// Validate that a width is one of the allowed sizes.
 #[inline]
 fn width_is_valid(width: usize) -> bool {
@@ -2001,6 +2289,32 @@ pub extern "C" fn seds_router_export_topology(
 
 #[cfg(feature = "discovery")]
 #[unsafe(no_mangle)]
+pub extern "C" fn seds_router_export_runtime_stats_len(r: *mut SedsRouter) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let json = runtime_stats_snapshot_to_json(&router.export_runtime_stats());
+    (json.len() + 1) as i32
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_export_runtime_stats(
+    r: *mut SedsRouter,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let router = unsafe { &(*r).inner };
+    let json = runtime_stats_snapshot_to_json(&router.export_runtime_stats());
+    unsafe { write_str_to_buf(&json, buf, buf_len) }
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
 pub extern "C" fn seds_relay_export_topology_len(r: *mut SedsRelay) -> i32 {
     if r.is_null() {
         return status_from_err(TelemetryError::BadArg);
@@ -2022,6 +2336,32 @@ pub extern "C" fn seds_relay_export_topology(
     }
     let relay = unsafe { &(*r).inner };
     let json = topology_snapshot_to_json(&relay.export_topology());
+    unsafe { write_str_to_buf(&json, buf, buf_len) }
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_export_runtime_stats_len(r: *mut SedsRelay) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let json = runtime_stats_snapshot_to_json(&relay.export_runtime_stats());
+    (json.len() + 1) as i32
+}
+
+#[cfg(feature = "discovery")]
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_export_runtime_stats(
+    r: *mut SedsRelay,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> i32 {
+    if r.is_null() {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let relay = unsafe { &(*r).inner };
+    let json = runtime_stats_snapshot_to_json(&relay.export_runtime_stats());
     unsafe { write_str_to_buf(&json, buf, buf_len) }
 }
 
@@ -3678,6 +4018,7 @@ mod tests {
     use crate::discovery::{build_discovery_announce, DISCOVERY_FAST_INTERVAL_MS};
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use serde_json::Value;
     use std::sync::Mutex;
 
     struct TestClock {
@@ -3724,6 +4065,115 @@ mod tests {
             return status_from_result_code(SedsResult::SedsErr);
         }
         status_from_result_code(SedsResult::SedsOk)
+    }
+
+    fn export_router_json(
+        router: *mut SedsRouter,
+        len_fn: extern "C" fn(*mut SedsRouter) -> i32,
+        export_fn: extern "C" fn(*mut SedsRouter, *mut c_char, usize) -> i32,
+    ) -> String {
+        let len = len_fn(router);
+        assert!(len > 0);
+        let mut buf = vec![0u8; len as usize];
+        assert_eq!(export_fn(router, buf.as_mut_ptr().cast(), buf.len()), 0);
+        let nul = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        String::from_utf8(buf[..nul].to_vec()).unwrap()
+    }
+
+    fn export_relay_json(
+        relay: *mut SedsRelay,
+        len_fn: extern "C" fn(*mut SedsRelay) -> i32,
+        export_fn: extern "C" fn(*mut SedsRelay, *mut c_char, usize) -> i32,
+    ) -> String {
+        let len = len_fn(relay);
+        assert!(len > 0);
+        let mut buf = vec![0u8; len as usize];
+        assert_eq!(export_fn(relay, buf.as_mut_ptr().cast(), buf.len()), 0);
+        let nul = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        String::from_utf8(buf[..nul].to_vec()).unwrap()
+    }
+
+    fn assert_runtime_json_shape(doc: &Value, expected_side_name: &str) {
+        assert!(doc.get("sides").unwrap().is_array());
+        assert!(doc.get("route_modes").unwrap().is_array());
+        assert!(doc.get("route_overrides").unwrap().is_array());
+        assert!(doc.get("typed_route_overrides").unwrap().is_array());
+        assert!(doc.get("route_weights").unwrap().is_array());
+        assert!(doc.get("route_priorities").unwrap().is_array());
+        assert!(doc.get("queues").unwrap().is_object());
+        assert!(doc.get("reliable").unwrap().is_object());
+        assert!(doc.get("discovery").unwrap().is_object());
+        assert!(doc.get("total_handler_failures").unwrap().is_u64());
+        assert!(doc.get("total_handler_retries").unwrap().is_u64());
+
+        let sides = doc.get("sides").unwrap().as_array().unwrap();
+        let side = sides
+            .iter()
+            .find(|side| side.get("side_name").and_then(Value::as_str) == Some(expected_side_name))
+            .unwrap();
+        assert!(side.get("side_id").unwrap().is_u64());
+        assert!(side.get("reliable_enabled").unwrap().is_boolean());
+        assert!(side.get("link_local_enabled").unwrap().is_boolean());
+        assert!(side.get("ingress_enabled").unwrap().is_boolean());
+        assert!(side.get("egress_enabled").unwrap().is_boolean());
+        assert!(side.get("tx_packets").unwrap().is_u64());
+        assert!(side.get("tx_bytes").unwrap().is_u64());
+        assert!(side.get("rx_packets").unwrap().is_u64());
+        assert!(side.get("rx_bytes").unwrap().is_u64());
+        assert!(side.get("relayed_tx_packets").unwrap().is_u64());
+        assert!(side.get("relayed_rx_packets").unwrap().is_u64());
+        assert!(side.get("tx_retries").unwrap().is_u64());
+        assert!(side.get("data_types").unwrap().is_array());
+
+        let adaptive = side.get("adaptive").unwrap();
+        assert!(adaptive.get("auto_balancing_enabled").unwrap().is_boolean());
+        assert!(adaptive.get("estimated_capacity_bps").unwrap().is_u64());
+        assert!(adaptive.get("peak_capacity_bps").unwrap().is_u64());
+        assert!(adaptive.get("current_usage_bps").unwrap().is_u64());
+        assert!(adaptive.get("peak_usage_bps").unwrap().is_u64());
+        assert!(adaptive.get("available_headroom_bps").unwrap().is_u64());
+        assert!(adaptive.get("effective_weight").unwrap().is_u64());
+        assert!(adaptive.get("last_observed_ms").unwrap().is_u64());
+        assert!(adaptive.get("sample_count").unwrap().is_u64());
+
+        let queues = doc.get("queues").unwrap();
+        assert!(queues.get("rx_len").unwrap().is_u64());
+        assert!(queues.get("tx_len").unwrap().is_u64());
+        assert!(queues.get("shared_queue_bytes_used").unwrap().is_u64());
+
+        let reliable = doc.get("reliable").unwrap();
+        assert!(reliable.get("reliable_return_route_count").unwrap().is_u64());
+        assert!(reliable.get("end_to_end_pending_count").unwrap().is_u64());
+
+        let discovery = doc.get("discovery").unwrap();
+        assert!(discovery.get("route_count").unwrap().is_u64());
+        assert!(discovery.get("announcer_count").unwrap().is_u64());
+        assert!(discovery.get("current_announce_interval_ms").is_some());
+        assert!(discovery.get("next_announce_ms").is_some());
+    }
+
+    fn assert_topology_json_shape(doc: &Value, local_sender: &str) {
+        assert!(doc.get("advertised_endpoints").unwrap().is_array());
+        assert!(doc.get("advertised_timesync_sources").unwrap().is_array());
+        assert!(doc.get("routers").unwrap().is_array());
+        assert!(doc.get("routes").unwrap().is_array());
+
+        let local = doc
+            .get("routers")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|router| router.get("sender_id").and_then(Value::as_str) == Some(local_sender))
+            .unwrap();
+        assert!(local.get("connections").unwrap().is_array());
+        assert!(local.get("reachable_endpoints").unwrap().is_array());
+        assert!(local.get("reachable_timesync_sources").unwrap().is_array());
+
+        let route = doc.get("routes").unwrap().as_array().unwrap().first().unwrap();
+        assert!(route.get("side_id").unwrap().is_u64());
+        assert!(route.get("side_name").unwrap().is_string());
+        assert!(route.get("announcers").unwrap().is_array());
     }
 
     #[cfg(feature = "discovery")]
@@ -4298,6 +4748,90 @@ mod tests {
         let hits_after_learning = hits.load(Ordering::SeqCst);
         assert_eq!(seds_relay_periodic(relay, 0), 0);
         assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 6);
+
+        seds_relay_free(relay);
+    }
+
+    #[test]
+    fn router_c_abi_runtime_stats_json_has_expected_schema() {
+        let router = seds_router_new(1, None, ptr::null_mut(), ptr::null(), 0);
+        assert!(!router.is_null());
+
+        let side_name = b"UPLINK";
+        let side_id = seds_router_add_side_serialized(
+            router,
+            side_name.as_ptr() as *const c_char,
+            side_name.len(),
+            Some(serialized_ok_cb),
+            ptr::null_mut(),
+            false,
+        );
+        assert!(side_id >= 0);
+
+        let discovery = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
+        unsafe {
+            assert_eq!(ok_or_status((*router).inner.rx_from_side(&discovery, side_id as usize)), 0);
+        }
+
+        let topology: Value = serde_json::from_str(&export_router_json(
+            router,
+            seds_router_export_topology_len,
+            seds_router_export_topology,
+        ))
+        .unwrap();
+        assert_topology_json_shape(&topology, "TEST_PLATFORM");
+
+        let runtime: Value = serde_json::from_str(&export_router_json(
+            router,
+            seds_router_export_runtime_stats_len,
+            seds_router_export_runtime_stats,
+        ))
+        .unwrap();
+        assert_runtime_json_shape(&runtime, "UPLINK");
+
+        seds_router_free(router);
+    }
+
+    #[test]
+    fn relay_c_abi_runtime_stats_json_has_expected_schema() {
+        let relay = seds_relay_new(None, ptr::null_mut());
+        assert!(!relay.is_null());
+
+        let side_name = b"UPLINK";
+        let side_id = seds_relay_add_side_serialized(
+            relay,
+            side_name.as_ptr() as *const c_char,
+            side_name.len(),
+            Some(serialized_ok_cb),
+            ptr::null_mut(),
+            false,
+        );
+        assert!(side_id >= 0);
+
+        let discovery = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
+        unsafe {
+            (*relay)
+                .inner
+                .rx_from_side(side_id as RelaySideId, discovery)
+                .unwrap();
+        }
+        assert_eq!(seds_relay_process_rx_queue(relay), 0);
+
+        let topology: Value = serde_json::from_str(&export_relay_json(
+            relay,
+            seds_relay_export_topology_len,
+            seds_relay_export_topology,
+        ))
+        .unwrap();
+        assert_topology_json_shape(&topology, "RELAY");
+
+        let runtime: Value = serde_json::from_str(&export_relay_json(
+            relay,
+            seds_relay_export_runtime_stats_len,
+            seds_relay_export_runtime_stats,
+        ))
+        .unwrap();
+        assert_runtime_json_shape(&runtime, "UPLINK");
 
         seds_relay_free(relay);
     }
