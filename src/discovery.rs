@@ -4,14 +4,14 @@ use alloc::vec::Vec;
 
 use crate::router::encode_slice_le;
 use crate::{
+    DataEndpoint, DataType, MessageElement, TelemetryError, TelemetryResult,
     config::{
-        export_schema, message_class_code, message_class_from_code,
+        OwnedDataTypeDefinition, OwnedEndpointDefinition, OwnedRuntimeSchemaSnapshot,
+        RuntimeSchemaSnapshot, export_schema, message_class_code, message_class_from_code,
         message_data_type_code, message_data_type_from_code, reliable_code, reliable_from_code,
-        OwnedDataTypeDefinition, OwnedEndpointDefinition, OwnedRuntimeSchemaSnapshot, RuntimeSchemaSnapshot,
-    }, packet::Packet, try_enum_from_u32, DataEndpoint, DataType,
-    MessageElement,
-    TelemetryError,
-    TelemetryResult,
+    },
+    packet::Packet,
+    try_enum_from_u32,
 };
 
 pub const DISCOVERY_ROUTE_TTL_MS: u64 = 30_000;
@@ -175,7 +175,7 @@ pub fn summarize_topology_boards(boards: &[TopologyBoardNode]) -> (Vec<DataEndpo
 
 /// Builds a discovery announce packet advertising reachable non-discovery endpoints.
 pub fn build_discovery_announce(
-    sender: &'static str,
+    sender: &str,
     timestamp_ms: u64,
     endpoints: &[DataEndpoint],
 ) -> TelemetryResult<Packet> {
@@ -220,7 +220,7 @@ pub fn decode_discovery_payload(payload: &[u8]) -> TelemetryResult<Vec<DataEndpo
 
 /// Builds a discovery packet advertising reachable time sync source identifiers.
 pub fn build_discovery_timesync_sources<S: AsRef<str>>(
-    sender: &'static str,
+    sender: &str,
     timestamp_ms: u64,
     sources: &[S],
 ) -> TelemetryResult<Packet> {
@@ -301,7 +301,7 @@ pub fn decode_discovery_timesync_sources_payload(payload: &[u8]) -> TelemetryRes
 
 /// Builds a discovery packet advertising the sender's current board/edge topology graph.
 pub fn build_discovery_topology(
-    sender: &'static str,
+    sender: &str,
     timestamp_ms: u64,
     boards: &[TopologyBoardNode],
 ) -> TelemetryResult<Packet> {
@@ -513,13 +513,13 @@ fn read_u32(payload: &[u8], cursor: &mut usize, label: &'static str) -> Telemetr
 }
 
 /// Builds a discovery packet containing the complete runtime schema snapshot.
-pub fn build_discovery_schema(sender: &'static str, timestamp_ms: u64) -> TelemetryResult<Packet> {
+pub fn build_discovery_schema(sender: &str, timestamp_ms: u64) -> TelemetryResult<Packet> {
     build_discovery_schema_from_snapshot(sender, timestamp_ms, export_schema())
 }
 
 /// Builds a discovery schema packet from an explicit snapshot.
 pub fn build_discovery_schema_from_snapshot(
-    sender: &'static str,
+    sender: &str,
     timestamp_ms: u64,
     mut schema: RuntimeSchemaSnapshot,
 ) -> TelemetryResult<Packet> {

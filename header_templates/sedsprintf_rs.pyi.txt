@@ -141,6 +141,9 @@ class Router:
         mode: Union[RouterMode, int] = ...,
         timesync_enabled: bool = ...,
     ) -> None: ...
+    @property
+    def sender_id(self) -> str: ...
+    def set_sender_id(self, sender_id: str) -> None: ...
 
     def log_bytes(
         self,
@@ -263,6 +266,9 @@ class Relay:
             Optional zero-arg callback returning an integer timestamp in ms.
             If None, timeouts are based on a default clock that returns 0.
         """
+    @property
+    def sender_id(self) -> str: ...
+    def set_sender_id(self, sender_id: str) -> None: ...
 
     def add_side_serialized(self, name: str, tx: Callable[[bytes], None], reliable_enabled: bool = ...) -> SideId: ...
     """

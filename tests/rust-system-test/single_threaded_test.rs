@@ -1,15 +1,15 @@
 // tests/rust-system-test/single_threaded_test.rs
 #[cfg(test)]
 mod single_threaded_test {
+    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
-    use sedsprintf_rs::TelemetryResult;
 
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, TryRecvError};
-    use std::sync::Arc;
 
     fn env_usize(name: &str, default: usize) -> usize {
         std::env::var(name)
@@ -61,7 +61,7 @@ mod single_threaded_test {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             ts,
         )
-            .unwrap()
+        .unwrap()
     }
 
     /// Drain both buses once and run the relay once.
@@ -292,7 +292,7 @@ mod single_threaded_test {
                         &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
                         seq_base + 40_000,
                     )
-                        .unwrap();
+                    .unwrap();
                     node.router.tx(pkt2).unwrap();
                 }
 

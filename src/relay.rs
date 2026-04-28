@@ -10,18 +10,18 @@ use crate::diagnostics::{
 };
 #[cfg(feature = "discovery")]
 use crate::discovery::{
-    self, DiscoveryCadenceState, TopologyAnnouncerRoute, TopologyBoardNode, TopologySideRoute,
-    TopologySnapshot, DISCOVERY_ROUTE_TTL_MS,
+    self, DISCOVERY_ROUTE_TTL_MS, DiscoveryCadenceState, TopologyAnnouncerRoute, TopologyBoardNode,
+    TopologySideRoute, TopologySnapshot,
 };
-use crate::packet::{hash_bytes_u64, Packet};
+use crate::packet::{Packet, hash_bytes_u64};
 use crate::queue::{BoundedDeque, ByteCost};
 use crate::serialize;
 use crate::{is_reliable_type, message_meta, message_priority, reliable_mode};
 use crate::{
     router::Clock,
     {
-        lock::{ReentryGate, ReentryGuard, RouterMutex}, RouteSelectionMode, TelemetryError,
-        TelemetryResult,
+        RouteSelectionMode, TelemetryError, TelemetryResult,
+        lock::{ReentryGate, ReentryGuard, RouterMutex},
     },
 };
 use alloc::borrow::ToOwned;
@@ -705,6 +705,7 @@ impl RelayInner {
 /// - Has RX & TX queues, like Router.
 /// - Uses a Clock for the *_with_timeout APIs, same style as Router.
 pub struct Relay {
+    sender: RouterMutex<Arc<str>>,
     state: RouterMutex<RelayInner>,
     side_tx_gate: ReentryGate,
     clock: Box<dyn Clock + Send + Sync>,
@@ -818,6 +819,7 @@ impl Relay {
     /// Create a new relay with the given clock.
     pub fn new(clock: Box<dyn Clock + Send + Sync>) -> Self {
         Self {
+            sender: RouterMutex::new(Arc::from("RELAY")),
             state: RouterMutex::new(RelayInner {
                 sides: Vec::new(),
                 route_overrides: BTreeMap::new(),
@@ -856,6 +858,20 @@ impl Relay {
             side_tx_gate: ReentryGate::new(),
             clock,
         }
+    }
+
+    #[inline]
+    fn sender_arc(&self) -> Arc<str> {
+        self.sender.lock().clone()
+    }
+
+    #[inline]
+    pub fn sender(&self) -> Arc<str> {
+        self.sender_arc()
+    }
+
+    pub fn set_sender<S: AsRef<str>>(&self, sender: S) {
+        *self.sender.lock() = Arc::from(sender.as_ref());
     }
 
     #[inline]
@@ -1136,8 +1152,8 @@ impl Relay {
     }
 
     #[cfg(feature = "discovery")]
-    fn is_end_to_end_destination_sender(sender: &str) -> bool {
-        sender != "RELAY" && !Self::is_end_to_end_ack_sender(sender)
+    fn is_end_to_end_destination_sender(&self, sender: &str) -> bool {
+        sender != self.sender_arc().as_ref() && !Self::is_end_to_end_ack_sender(sender)
     }
 
     /// Extract the logical packet ID targeted by an end-to-end reliable ACK item.
@@ -1291,10 +1307,11 @@ impl Relay {
         ty: crate::DataType,
         seq: u32,
     ) -> TelemetryResult<Packet> {
+        let sender = self.sender_arc();
         Packet::new(
             control_ty,
             message_meta(control_ty).endpoints,
-            "RELAY",
+            sender.as_ref(),
             self.clock.now_ms(),
             crate::router::encode_slice_le(&[ty.as_u32(), seq]),
         )
@@ -1827,7 +1844,7 @@ impl Relay {
                     continue;
                 }
                 for board in sender_state.topology_boards.iter() {
-                    if !Self::is_end_to_end_destination_sender(&board.sender_id) {
+                    if !self.is_end_to_end_destination_sender(&board.sender_id) {
                         continue;
                     }
                     had_destination_board = true;
@@ -1959,8 +1976,9 @@ impl Relay {
         }
         connections.sort_unstable();
         connections.dedup();
+        let sender = self.sender_arc();
         TopologyBoardNode {
-            sender_id: "RELAY".to_string(),
+            sender_id: sender.to_string(),
             reachable_endpoints: Vec::new(),
             reachable_timesync_sources: Vec::new(),
             connections,
@@ -1985,17 +2003,18 @@ impl Relay {
                 }
                 let mut sender_boards = sender_state.topology_boards.clone();
                 if sender_boards.is_empty() {
+                    let sender = self.sender_arc();
                     sender_boards.push(TopologyBoardNode {
                         sender_id: announcer.clone(),
                         reachable_endpoints: sender_state.reachable.clone(),
                         reachable_timesync_sources: sender_state.reachable_timesync_sources.clone(),
-                        connections: vec!["RELAY".to_string()],
+                        connections: vec![sender.to_string()],
                     });
                 } else if let Some(board) = sender_boards
                     .iter_mut()
                     .find(|board| board.sender_id == *announcer)
                 {
-                    board.connections.push("RELAY".to_string());
+                    board.connections.push(self.sender_arc().to_string());
                 }
                 if !link_local_enabled {
                     for board in sender_boards.iter_mut() {
@@ -2030,12 +2049,12 @@ impl Relay {
     }
 
     #[cfg(feature = "discovery")]
-    fn reconcile_end_to_end_acked_destinations_locked(st: &mut RelayInner) {
+    fn reconcile_end_to_end_acked_destinations_locked(&self, st: &mut RelayInner) {
         let mut active_senders = BTreeSet::new();
         for route in st.discovery_routes.values() {
             for sender_state in route.announcers.values() {
                 for board in sender_state.topology_boards.iter() {
-                    if Self::is_end_to_end_destination_sender(&board.sender_id) {
+                    if self.is_end_to_end_destination_sender(&board.sender_id) {
                         active_senders.insert(Self::sender_hash(&board.sender_id));
                     }
                 }
@@ -2107,7 +2126,7 @@ impl Relay {
         let per_side = {
             let mut st = self.state.lock();
             if Self::prune_discovery_routes_locked(&mut st, now_ms) {
-                Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
+                self.reconcile_end_to_end_acked_destinations_locked(&mut st);
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
             st.fit_discovery_budget();
@@ -2146,7 +2165,8 @@ impl Relay {
         };
         let mut st = self.state.lock();
         for (dst, endpoints, timesync_sources, topology) in per_side {
-            let pkt = discovery::build_discovery_schema("RELAY", now_ms)?;
+            let sender = self.sender_arc();
+            let pkt = discovery::build_discovery_schema(sender.as_ref(), now_ms)?;
             let data = RelayItem::Packet(Arc::new(pkt));
             let priority = Self::relay_item_priority(&data)?;
             st.push_tx(RelayTxItem {
@@ -2156,8 +2176,11 @@ impl Relay {
                 priority,
             })?;
             if !endpoints.is_empty() {
-                let pkt =
-                    discovery::build_discovery_announce("RELAY", now_ms, endpoints.as_slice())?;
+                let pkt = discovery::build_discovery_announce(
+                    sender.as_ref(),
+                    now_ms,
+                    endpoints.as_slice(),
+                )?;
                 let data = RelayItem::Packet(Arc::new(pkt));
                 let priority = Self::relay_item_priority(&data)?;
                 st.push_tx(RelayTxItem {
@@ -2169,7 +2192,7 @@ impl Relay {
             }
             if !timesync_sources.is_empty() {
                 let pkt = discovery::build_discovery_timesync_sources(
-                    "RELAY",
+                    sender.as_ref(),
                     now_ms,
                     timesync_sources.as_slice(),
                 )?;
@@ -2183,7 +2206,7 @@ impl Relay {
                 })?;
             }
             if !topology.is_empty() {
-                let pkt = discovery::build_discovery_topology("RELAY", now_ms, &topology)?;
+                let pkt = discovery::build_discovery_topology(sender.as_ref(), now_ms, &topology)?;
                 let data = RelayItem::Packet(Arc::new(pkt));
                 let priority = Self::relay_item_priority(&data)?;
                 st.push_tx(RelayTxItem {
@@ -2204,7 +2227,7 @@ impl Relay {
             let mut st = self.state.lock();
             let removed = Self::prune_discovery_routes_locked(&mut st, now_ms);
             if removed {
-                Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
+                self.reconcile_end_to_end_acked_destinations_locked(&mut st);
                 Self::note_discovery_topology_change_locked(&mut st, now_ms);
             }
             st.fit_discovery_budget();
@@ -2330,7 +2353,7 @@ impl Relay {
             Self::note_discovery_topology_change_locked(&mut st, now_ms);
         }
         let _ = Self::prune_discovery_routes_locked(&mut st, now_ms);
-        Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
+        self.reconcile_end_to_end_acked_destinations_locked(&mut st);
         Ok(())
     }
 
@@ -2813,7 +2836,7 @@ impl Relay {
         let now_ms = self.clock.now_ms();
         let mut st = self.state.lock();
         if Self::prune_discovery_routes_locked(&mut st, now_ms) {
-            Self::reconcile_end_to_end_acked_destinations_locked(&mut st);
+            self.reconcile_end_to_end_acked_destinations_locked(&mut st);
             Self::note_discovery_topology_change_locked(&mut st, now_ms);
         }
         let routes = st

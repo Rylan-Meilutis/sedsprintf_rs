@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod reliable_drop_tests {
+    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType, RELIABLE_RETRANSMIT_MS};
     use sedsprintf_rs::discovery::build_discovery_announce;
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::{Relay, RelaySideOptions};
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use sedsprintf_rs::serialize;
-    use sedsprintf_rs::TelemetryResult;
 
     use std::collections::{BTreeSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,7 +91,7 @@ mod reliable_drop_tests {
                         Ok(())
                     },
                 )])
-                    .with_sender("AB"),
+                .with_sender("AB"),
                 shared_clock(now.clone()),
             );
             let valve = Router::new_with_clock(
@@ -99,7 +99,7 @@ mod reliable_drop_tests {
                     DataEndpoint::named("SD_CARD"),
                     |_pkt| Ok(()),
                 )])
-                    .with_sender("VB"),
+                .with_sender("VB"),
                 shared_clock(now.clone()),
             );
             let daq = Router::new_with_clock(
@@ -533,7 +533,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 i as u64,
             )
-                .expect("failed to build packet");
+            .expect("failed to build packet");
             router_a.tx(pkt).expect("tx failed");
         }
 
@@ -645,14 +645,14 @@ mod reliable_drop_tests {
             &[DataEndpoint::named("RADIO")],
             1,
         )
-            .expect("failed to build packet");
+        .expect("failed to build packet");
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[2.0_f32, 0.0, 0.0],
             &[DataEndpoint::named("RADIO")],
             2,
         )
-            .expect("failed to build packet");
+        .expect("failed to build packet");
 
         let seq1 = serialize::serialize_packet_with_reliable(
             &pkt1,
@@ -808,7 +808,7 @@ mod reliable_drop_tests {
             &[DataEndpoint::named("RADIO")],
             42,
         )
-            .expect("failed to build packet");
+        .expect("failed to build packet");
         source.tx(pkt).expect("source tx failed");
 
         let mut dropped_end_to_end_ack = false;
@@ -1067,7 +1067,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 7,
             )
-                .unwrap())
+            .unwrap())
             .unwrap();
         source.process_all_queues_with_timeout(0).unwrap();
 
@@ -1231,7 +1231,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 42,
             )
-                .unwrap())
+            .unwrap())
             .unwrap();
 
         for _ in 0..80 {
@@ -1272,7 +1272,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-                .with_sender("AB"),
+            .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let valve = Router::new_with_clock(
@@ -1280,7 +1280,7 @@ mod reliable_drop_tests {
                 DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )])
-                .with_sender("VB"),
+            .with_sender("VB"),
             shared_clock(now.clone()),
         );
         let daq = Router::new_with_clock(
@@ -1429,7 +1429,7 @@ mod reliable_drop_tests {
             &[DataEndpoint::named("RADIO")],
             99,
         )
-            .unwrap())
+        .unwrap())
             .unwrap();
 
         for _ in 0..96 {
@@ -1523,7 +1523,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-                .with_sender("AB"),
+            .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let valve = Router::new_with_clock(
@@ -1531,7 +1531,7 @@ mod reliable_drop_tests {
                 DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )])
-                .with_sender("VB"),
+            .with_sender("VB"),
             shared_clock(now.clone()),
         );
         let daq = Router::new_with_clock(
@@ -1627,7 +1627,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 7,
             )
-                .unwrap())
+            .unwrap())
             .unwrap();
 
         let mut dropped_actuator_first_delivery = false;
@@ -1766,7 +1766,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-                .with_sender("AB"),
+            .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let valve = Router::new_with_clock(
@@ -1774,7 +1774,7 @@ mod reliable_drop_tests {
                 DataEndpoint::named("SD_CARD"),
                 |_pkt| Ok(()),
             )])
-                .with_sender("VB"),
+            .with_sender("VB"),
             shared_clock(now.clone()),
         );
         let daq = Router::new_with_clock(
@@ -1870,7 +1870,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 11,
             )
-                .unwrap())
+            .unwrap())
             .unwrap();
 
         let mut saw_reliable_source_frame = false;
@@ -1977,7 +1977,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-                .with_sender("AB"),
+            .with_sender("AB"),
             shared_clock(now.clone()),
         );
 
@@ -2069,7 +2069,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 21,
             )
-                .unwrap())
+            .unwrap())
             .unwrap();
 
         for _ in 0..32 {
@@ -2132,7 +2132,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-                .with_sender("AB"),
+            .with_sender("AB"),
             shared_clock(now.clone()),
         );
 
@@ -2224,7 +2224,7 @@ mod reliable_drop_tests {
                 &[DataEndpoint::named("RADIO")],
                 33,
             )
-                .unwrap())
+            .unwrap())
             .unwrap();
 
         let mut delayed_first_hop_frames = Vec::new();
@@ -2288,7 +2288,7 @@ mod reliable_drop_tests {
                     Ok(())
                 },
             )])
-                .with_sender("AB"),
+            .with_sender("AB"),
             shared_clock(now.clone()),
         );
         let echoed_frames: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -2314,14 +2314,14 @@ mod reliable_drop_tests {
             &[DataEndpoint::named("RADIO")],
             1,
         )
-            .unwrap();
+        .unwrap();
         let pkt2 = Packet::from_f32_slice(
             DataType::named("GPS_DATA"),
             &[2.0, 0.0, 0.0],
             &[DataEndpoint::named("RADIO")],
             2,
         )
-            .unwrap();
+        .unwrap();
         let seq1 = serialize::serialize_packet_with_reliable(
             &pkt1,
             serialize::ReliableHeader {

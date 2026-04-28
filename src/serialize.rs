@@ -11,9 +11,9 @@
 
 use crate::MessageElement;
 use crate::{
-    get_message_name, is_reliable_type, packet::Packet, DataEndpoint, TelemetryError,
-    TelemetryResult,
-    {config::DataType, MAX_VALUE_DATA_ENDPOINT, MAX_VALUE_DATA_TYPE},
+    DataEndpoint, TelemetryError, TelemetryResult, get_message_name, is_reliable_type,
+    packet::Packet,
+    {MAX_VALUE_DATA_ENDPOINT, MAX_VALUE_DATA_TYPE, config::DataType},
 };
 
 use crate::packet::hash_bytes_u64;

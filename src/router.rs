@@ -19,8 +19,8 @@ use crate::diagnostics::{
 };
 #[cfg(feature = "discovery")]
 use crate::discovery::{
-    self, DiscoveryCadenceState, TopologyAnnouncerRoute, TopologyBoardNode, TopologySideRoute,
-    TopologySnapshot, DISCOVERY_ROUTE_TTL_MS,
+    self, DISCOVERY_ROUTE_TTL_MS, DiscoveryCadenceState, TopologyAnnouncerRoute, TopologyBoardNode,
+    TopologySideRoute, TopologySnapshot,
 };
 use crate::packet::hash_bytes_u64;
 use crate::queue::{BoundedDeque, ByteCost};
@@ -28,24 +28,24 @@ use crate::queue::{BoundedDeque, ByteCost};
 use crate::seds_error_msg;
 #[cfg(feature = "timesync")]
 use crate::timesync::{
-    advance_network_time, compute_network_time_sample, decode_timesync_announce,
-    decode_timesync_request, decode_timesync_response, NetworkClock,
+    INTERNAL_TIMESYNC_SOURCE_ID, LOCAL_TIMESYNC_DATE_SOURCE_ID, LOCAL_TIMESYNC_FULL_SOURCE_ID,
+    LOCAL_TIMESYNC_SUBSEC_SOURCE_ID, LOCAL_TIMESYNC_TOD_SOURCE_ID, NetworkClock,
     NetworkTimeReading, PartialNetworkTime, SlewedNetworkClock, TimeSyncConfig, TimeSyncLeader,
-    TimeSyncTracker, INTERNAL_TIMESYNC_SOURCE_ID, LOCAL_TIMESYNC_DATE_SOURCE_ID, LOCAL_TIMESYNC_FULL_SOURCE_ID,
-    LOCAL_TIMESYNC_SUBSEC_SOURCE_ID, LOCAL_TIMESYNC_TOD_SOURCE_ID,
+    TimeSyncTracker, advance_network_time, compute_network_time_sample, decode_timesync_announce,
+    decode_timesync_request, decode_timesync_response,
 };
 use crate::{
+    MessageElement, RouteSelectionMode, TelemetryError, TelemetryResult,
     config::{
-        DataEndpoint, DataType, DEVICE_IDENTIFIER, MAX_HANDLER_RETRIES,
+        DEVICE_IDENTIFIER, DataEndpoint, DataType, MAX_HANDLER_RETRIES,
         RELIABLE_MAX_END_TO_END_PENDING, RELIABLE_MAX_PENDING, RELIABLE_MAX_RETRIES,
         RELIABLE_MAX_RETURN_ROUTES, RELIABLE_RETRANSMIT_MS,
-    }, get_needed_message_size, impl_letype_num, is_reliable_type,
+    },
+    get_needed_message_size, impl_letype_num, is_reliable_type,
     lock::{ReentryGate, RouterMutex},
-    message_meta, message_priority, packet::Packet,
-    reliable_mode,
-    serialize, MessageElement,
-    RouteSelectionMode,
-    TelemetryError, TelemetryResult,
+    message_meta, message_priority,
+    packet::Packet,
+    reliable_mode, serialize,
 };
 use alloc::string::{String, ToString};
 use alloc::{
@@ -801,7 +801,7 @@ fn make_error_payload(msg: &str) -> Arc<[u8]> {
 /// Builds a Packet from the provided data slice and passes it to the
 /// provided transmission function.
 fn log_raw<T, F>(
-    sender: &'static str,
+    sender: &str,
     ty: DataType,
     data: &[T],
     timestamp: u64,
@@ -1271,7 +1271,7 @@ impl IsrRxQueue {
 /// Supports queuing, processing, and dispatching to local endpoint handlers.
 /// Thread-safe via internal locking.
 pub struct Router {
-    sender: &'static str,
+    sender: RouterMutex<Arc<str>>,
     cfg: RouterConfig,
     state: RouterMutex<RouterInner>,
     isr_rx_queue: IsrRxQueue,
@@ -1337,8 +1337,9 @@ enum RemoteSidePlan {
 
 impl Debug for Router {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let sender = self.sender();
         f.debug_struct("Router")
-            .field("sender", &self.sender)
+            .field("sender", &sender)
             .field("cfg", &self.cfg)
             .field("state", &"<mutex>")
             .field("clock", &"Clock")
@@ -1752,7 +1753,8 @@ impl Router {
     }
 
     fn encode_end_to_end_ack_sender(&self) -> String {
-        format!("{}{}", Self::END_TO_END_ACK_PREFIX, self.sender)
+        let sender = self.sender_arc();
+        format!("{}{}", Self::END_TO_END_ACK_PREFIX, sender)
     }
 
     #[cfg(feature = "discovery")]
@@ -2208,7 +2210,8 @@ impl Router {
         if targets.is_empty() {
             return Ok(true);
         }
-        let local_hash = Self::sender_hash(self.sender);
+        let local_sender = self.sender_arc();
+        let local_hash = Self::sender_hash(local_sender.as_ref());
         Ok(targets.contains(&local_hash))
     }
 
@@ -2511,7 +2514,7 @@ impl Router {
                     Self::timesync_has_usable_time_locked(&st, self.monotonic_now_ns()),
                 )
             {
-                return vec![self.sender.to_owned()];
+                return vec![self.sender_arc().to_string()];
             }
         }
         Vec::new()
@@ -2532,12 +2535,16 @@ impl Router {
 
         match data {
             RouterItem::Packet(pkt) => match ty {
-                DataType::TimeSyncRequest if pkt.sender() == self.sender => Ok(self
-                    .timesync
-                    .lock()
-                    .tracker
-                    .as_ref()
-                    .and_then(|tracker| tracker.current_source().map(|src| src.sender.clone()))),
+                DataType::TimeSyncRequest => {
+                    let local_sender = self.sender_arc();
+                    if pkt.sender() == local_sender.as_ref() {
+                        Ok(self.timesync.lock().tracker.as_ref().and_then(|tracker| {
+                            tracker.current_source().map(|src| src.sender.clone())
+                        }))
+                    } else {
+                        Ok(None)
+                    }
+                }
                 DataType::TimeSyncAnnounce | DataType::TimeSyncResponse => {
                     Ok(Some(pkt.sender().to_owned()))
                 }
@@ -2631,8 +2638,9 @@ impl Router {
         }
         connections.sort_unstable();
         connections.dedup();
+        let sender = self.sender_arc();
         TopologyBoardNode {
-            sender_id: self.sender.to_string(),
+            sender_id: sender.to_string(),
             reachable_endpoints,
             reachable_timesync_sources: self.local_discovery_timesync_sources(now_ms),
             connections,
@@ -2657,17 +2665,18 @@ impl Router {
                 }
                 let mut sender_boards = sender_state.topology_boards.clone();
                 if sender_boards.is_empty() {
+                    let sender = self.sender_arc();
                     sender_boards.push(TopologyBoardNode {
                         sender_id: announcer.clone(),
                         reachable_endpoints: sender_state.reachable.clone(),
                         reachable_timesync_sources: sender_state.reachable_timesync_sources.clone(),
-                        connections: vec![self.sender.to_string()],
+                        connections: vec![sender.to_string()],
                     });
                 } else if let Some(board) = sender_boards
                     .iter_mut()
                     .find(|board| board.sender_id == *announcer)
                 {
-                    board.connections.push(self.sender.to_string());
+                    board.connections.push(self.sender_arc().to_string());
                 }
                 if !link_local_enabled {
                     for board in sender_boards.iter_mut() {
@@ -2771,7 +2780,8 @@ impl Router {
                 .collect::<Vec<_>>()
         };
         for (side_id, endpoints, timesync_sources, topology) in per_side {
-            let pkt = discovery::build_discovery_schema(self.sender, now_ms)?;
+            let sender = self.sender_arc();
+            let pkt = discovery::build_discovery_schema(sender.as_ref(), now_ms)?;
             self.tx_queue_item_with_flags(
                 RouterTxItem::ToSide {
                     src: None,
@@ -2781,8 +2791,11 @@ impl Router {
                 true,
             )?;
             if !endpoints.is_empty() {
-                let pkt =
-                    discovery::build_discovery_announce(self.sender, now_ms, endpoints.as_slice())?;
+                let pkt = discovery::build_discovery_announce(
+                    sender.as_ref(),
+                    now_ms,
+                    endpoints.as_slice(),
+                )?;
                 self.tx_queue_item_with_flags(
                     RouterTxItem::ToSide {
                         src: None,
@@ -2794,7 +2807,7 @@ impl Router {
             }
             if !timesync_sources.is_empty() {
                 let pkt = discovery::build_discovery_timesync_sources(
-                    self.sender,
+                    sender.as_ref(),
                     now_ms,
                     timesync_sources.as_slice(),
                 )?;
@@ -2808,7 +2821,7 @@ impl Router {
                 )?;
             }
             if !topology.is_empty() {
-                let pkt = discovery::build_discovery_topology(self.sender, now_ms, &topology)?;
+                let pkt = discovery::build_discovery_topology(sender.as_ref(), now_ms, &topology)?;
                 self.tx_queue_item_with_flags(
                     RouterTxItem::ToSide {
                         src: None,
@@ -2868,7 +2881,8 @@ impl Router {
         let Some(side) = src else {
             return Ok(true);
         };
-        if pkt.sender() == self.sender {
+        let local_sender = self.sender_arc();
+        if pkt.sender() == local_sender.as_ref() {
             return Ok(true);
         }
         if pkt.data_type() == DataType::DiscoverySchema {
@@ -3012,10 +3026,11 @@ impl Router {
         ty: DataType,
         seq: u32,
     ) -> TelemetryResult<Packet> {
+        let sender = self.sender_arc();
         Packet::new(
             control_ty,
             message_meta(control_ty).endpoints,
-            self.sender,
+            sender.as_ref(),
             self.packet_timestamp_ms(),
             encode_slice_le(&[ty.as_u32(), seq]),
         )
@@ -3863,10 +3878,11 @@ impl Router {
     ) -> TelemetryResult<()> {
         let pkt_ts = self.packet_timestamp_ms();
         let payload = encode_slice_le(&[seq, t1_mono_ms, t2_network_ms, t3_network_ms]);
+        let sender = self.sender_arc();
         let pkt = Packet::new(
             DataType::TimeSyncResponse,
             &[DataEndpoint::TimeSync],
-            self.sender,
+            sender.as_ref(),
             pkt_ts,
             payload,
         )?;
@@ -4115,7 +4131,7 @@ impl Router {
         #[cfg(feature = "timesync")]
         let timesync_cfg = cfg.timesync_config();
         Self {
-            sender: Box::leak(cfg.sender().to_string().into_boxed_str()),
+            sender: RouterMutex::new(Arc::from(cfg.sender())),
             cfg,
             state: RouterMutex::new(RouterInner {
                 sides: Vec::new(),
@@ -4161,6 +4177,20 @@ impl Router {
             #[cfg(feature = "timesync")]
             timesync: RouterMutex::new(TimeSyncRuntime::new(timesync_cfg)),
         }
+    }
+
+    #[inline]
+    fn sender_arc(&self) -> Arc<str> {
+        self.sender.lock().clone()
+    }
+
+    #[inline]
+    pub fn sender(&self) -> Arc<str> {
+        self.sender_arc()
+    }
+
+    pub fn set_sender<S: AsRef<str>>(&self, sender: S) {
+        *self.sender.lock() = Arc::from(sender.as_ref());
     }
 
     /// Register a side whose TX callback consumes serialized packet bytes.
@@ -4932,10 +4962,11 @@ impl Router {
 
         let payload = make_error_payload(&error_msg);
 
+        let sender = self.sender_arc();
         let error_pkt = Packet::new(
             DataType::TelemetryError,
             &recipients,
-            self.sender,
+            sender.as_ref(),
             self.packet_timestamp_ms(),
             payload,
         )?;
@@ -5724,11 +5755,12 @@ impl Router {
 
         if self.is_duplicate_pkt(&item.data)? {
             if item.src.is_some() {
+                let local_sender = self.sender_arc();
                 match &item.data {
                     RouterItem::Packet(pkt)
                         if (is_reliable_type(pkt.data_type())
                             || !pkt.wire_target_senders().is_empty())
-                            && pkt.sender() != self.sender
+                            && pkt.sender() != local_sender.as_ref()
                             && self.item_targets_local_sender(&item.data)?
                             && self.packet_has_local_handler(pkt) =>
                     {
@@ -5738,7 +5770,7 @@ impl Router {
                         if let Ok(pkt) = serialize::deserialize_packet(bytes.as_ref())
                             && (is_reliable_type(pkt.data_type())
                                 || !pkt.wire_target_senders().is_empty())
-                            && pkt.sender() != self.sender
+                            && pkt.sender() != local_sender.as_ref()
                             && self.item_targets_local_sender(&item.data)?
                             && self.packet_has_local_handler(&pkt)
                         {
@@ -6492,17 +6524,27 @@ impl Router {
         if self.side_tx_active() {
             return self.log_queue(ty, data);
         }
-        log_raw(self.sender, ty, data, self.packet_timestamp_ms(), |pkt| {
-            self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
-        })
+        let sender = self.sender_arc();
+        log_raw(
+            sender.as_ref(),
+            ty,
+            data,
+            self.packet_timestamp_ms(),
+            |pkt| self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt))),
+        )
     }
 
     /// Build a packet from typed elements and queue it for later transmission.
     #[inline]
     pub fn log_queue<T: LeBytes>(&self, ty: DataType, data: &[T]) -> TelemetryResult<()> {
-        log_raw(self.sender, ty, data, self.packet_timestamp_ms(), |pkt| {
-            self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
-        })
+        let sender = self.sender_arc();
+        log_raw(
+            sender.as_ref(),
+            ty,
+            data,
+            self.packet_timestamp_ms(),
+            |pkt| self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt))),
+        )
     }
 
     /// Build a packet with an explicit timestamp and send it immediately.
@@ -6516,7 +6558,8 @@ impl Router {
         if self.side_tx_active() {
             return self.log_queue_ts(ty, timestamp, data);
         }
-        log_raw(self.sender, ty, data, timestamp, |pkt| {
+        let sender = self.sender_arc();
+        log_raw(sender.as_ref(), ty, data, timestamp, |pkt| {
             self.tx_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
         })
     }
@@ -6529,7 +6572,8 @@ impl Router {
         timestamp: u64,
         data: &[T],
     ) -> TelemetryResult<()> {
-        log_raw(self.sender, ty, data, timestamp, |pkt| {
+        let sender = self.sender_arc();
+        log_raw(sender.as_ref(), ty, data, timestamp, |pkt| {
             self.tx_queue_item(RouterTxItem::Broadcast(RouterItem::Packet(pkt)))
         })
     }

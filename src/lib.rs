@@ -39,8 +39,8 @@ extern crate std;
 use std::io::Error;
 
 use crate::config::{
-    get_endpoint_meta, get_message_meta, max_data_type_id, max_endpoint_id, DataEndpoint,
-    DataType, STATIC_HEX_LENGTH, STATIC_STRING_LENGTH,
+    DataEndpoint, DataType, STATIC_HEX_LENGTH, STATIC_STRING_LENGTH, get_endpoint_meta,
+    get_message_meta, max_data_type_id, max_endpoint_id,
 };
 use crate::macros::{ReprI32Enum, ReprU32Enum};
 use alloc::string::ToString;

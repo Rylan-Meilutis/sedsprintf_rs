@@ -1,10 +1,10 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use sedsprintf_rs::RouteSelectionMode;
+use sedsprintf_rs::TelemetryResult;
 use sedsprintf_rs::config::{DataEndpoint, DataType};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
 use sedsprintf_rs::router::{Clock, Router, RouterConfig};
-use sedsprintf_rs::RouteSelectionMode;
-use sedsprintf_rs::TelemetryResult;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,7 @@ fn next_packet(counter: &AtomicU64) -> Packet {
         &[DataEndpoint::named("RADIO")],
         ts,
     )
-        .unwrap()
+    .unwrap()
 }
 
 fn benchmark_route_selection_paths(c: &mut Criterion) {
@@ -48,13 +48,13 @@ fn benchmark_route_selection_paths(c: &mut Criterion) {
         0,
         &[DataEndpoint::named("RADIO")],
     )
-        .unwrap();
+    .unwrap();
     let discovery_b = sedsprintf_rs::discovery::build_discovery_announce(
         "REMOTE_B",
         1,
         &[DataEndpoint::named("RADIO")],
     )
-        .unwrap();
+    .unwrap();
     router.rx_from_side(&discovery_a, side_a).unwrap();
     router.rx_from_side(&discovery_b, side_b).unwrap();
     router
@@ -97,13 +97,13 @@ fn benchmark_route_selection_paths(c: &mut Criterion) {
         0,
         &[DataEndpoint::named("RADIO")],
     )
-        .unwrap();
+    .unwrap();
     let relay_discovery_b = sedsprintf_rs::discovery::build_discovery_announce(
         "REMOTE_B",
         1,
         &[DataEndpoint::named("RADIO")],
     )
-        .unwrap();
+    .unwrap();
     relay.rx_from_side(path_a, relay_discovery_a).unwrap();
     relay.rx_from_side(path_b, relay_discovery_b).unwrap();
     relay.process_all_queues().unwrap();

@@ -35,23 +35,23 @@ use std::sync::{Arc as SArc, Mutex, OnceLock};
 #[cfg(feature = "timesync")]
 use crate::timesync::TimeSyncConfig;
 use crate::{
+    MAX_VALUE_DATA_ENDPOINT, MAX_VALUE_DATA_TYPE, MAX_VALUE_ROUTE_SELECTION_MODE, MessageElement,
+    RouteSelectionMode, TelemetryError, TelemetryResult,
     config::{
-        data_type_definition, data_type_definition_by_name, data_type_exists, endpoint_definition,
-        endpoint_definition_by_name, endpoint_exists, message_class_code, message_class_from_code,
-        message_data_type_code, message_data_type_from_code, register_data_type_id_with_description,
-        register_endpoint_id_with_description, register_schema_json_bytes,
-        reliable_code, reliable_from_code, remove_data_type,
-        remove_data_type_by_name, remove_endpoint, remove_endpoint_by_name, DataEndpoint,
-        DataType,
-    }, get_message_name, get_needed_message_size, message_meta,
-    packet::Packet, relay::{Relay, RelaySideOptions}, router::{Clock, EndpointHandler, LeBytes, Router, RouterConfig, RouterSideOptions},
+        DataEndpoint, DataType, data_type_definition, data_type_definition_by_name,
+        data_type_exists, endpoint_definition, endpoint_definition_by_name, endpoint_exists,
+        message_class_code, message_class_from_code, message_data_type_code,
+        message_data_type_from_code, register_data_type_id_with_description,
+        register_endpoint_id_with_description, register_schema_json_bytes, reliable_code,
+        reliable_from_code, remove_data_type, remove_data_type_by_name, remove_endpoint,
+        remove_endpoint_by_name,
+    },
+    get_message_name, get_needed_message_size, message_meta,
+    packet::Packet,
+    relay::{Relay, RelaySideOptions},
+    router::{Clock, EndpointHandler, LeBytes, Router, RouterConfig, RouterSideOptions},
     serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet},
-    try_enum_from_i32, try_enum_from_u32, MessageElement,
-    RouteSelectionMode,
-    TelemetryError,
-    TelemetryResult,
-    MAX_VALUE_DATA_ENDPOINT,
-    MAX_VALUE_DATA_TYPE, MAX_VALUE_ROUTE_SELECTION_MODE,
+    try_enum_from_i32, try_enum_from_u32,
 };
 
 static GLOBAL_ROUTER_SINGLETON: OnceLock<SArc<Mutex<Router>>> = OnceLock::new();
@@ -809,6 +809,24 @@ impl PyRouter {
             _ser_cbs: keep_ser,
             _side_cbs: Vec::new(),
         })
+    }
+
+    #[getter]
+    fn sender_id(&self) -> PyResult<String> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        Ok(rtr.sender().to_string())
+    }
+
+    fn set_sender_id(&self, sender_id: &str) -> PyResult<()> {
+        let rtr = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("router poisoned"))?;
+        rtr.set_sender(sender_id);
+        Ok(())
     }
 
     // ------------------------------------------------------------------------
@@ -1740,6 +1758,15 @@ impl PyRelay {
             _now_cb: now_keep,
             _tx_cbs: Vec::new(),
         })
+    }
+
+    #[getter]
+    fn sender_id(&self) -> String {
+        self.inner.sender().to_string()
+    }
+
+    fn set_sender_id(&self, sender_id: &str) {
+        self.inner.set_sender(sender_id);
     }
 
     #[pyo3(signature = (name, tx, reliable_enabled=false))]

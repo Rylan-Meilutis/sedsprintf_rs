@@ -424,4 +424,47 @@ mod tests {
         assert_eq!(q.pop_front().unwrap().id, 1);
         assert_eq!(q.pop_front().unwrap().id, 2);
     }
+
+    #[test]
+    fn bounded_queue_never_exceeds_element_cap_or_capacity() {
+        let mut q = BoundedDeque::new(256, 8, 2.0);
+        let max_elems = q.max_elems();
+        let max_bytes = q.max_bytes();
+
+        for id in 0..(max_elems * 4) {
+            q.push_back(Item {
+                id: id as u8,
+                cost: 1,
+                priority: 0,
+            })
+            .unwrap();
+            assert!(q.len() <= max_elems);
+            assert!(q.capacity() <= max_elems);
+            assert!(q.bytes_used() <= max_bytes);
+        }
+
+        assert_eq!(q.len(), max_elems);
+    }
+
+    #[test]
+    fn bounded_queue_never_exceeds_byte_budget_under_eviction() {
+        let mut q = BoundedDeque::new(48, 8, 2.0);
+        let max_elems = q.max_elems();
+        let max_bytes = q.max_bytes();
+
+        for id in 0..32u8 {
+            q.push_back(Item {
+                id,
+                cost: 17,
+                priority: 0,
+            })
+            .unwrap();
+            assert!(q.len() <= max_elems);
+            assert!(q.capacity() <= max_elems);
+            assert!(q.bytes_used() <= max_bytes);
+        }
+
+        let retained_bytes: usize = q.iter().map(ByteCost::byte_cost).sum();
+        assert_eq!(q.bytes_used(), retained_bytes);
+    }
 }

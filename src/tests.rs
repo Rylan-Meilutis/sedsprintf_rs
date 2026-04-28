@@ -1,8 +1,8 @@
-use crate::config::{get_message_meta, STATIC_HEX_LENGTH, STATIC_STRING_LENGTH};
+use crate::config::{STATIC_HEX_LENGTH, STATIC_STRING_LENGTH, get_message_meta};
 use crate::get_needed_message_size;
 use crate::packet::Packet;
 use crate::router::{Clock, EndpointHandler};
-use crate::{get_data_type, message_meta, DataEndpoint, DataType, MessageDataType, TelemetryError};
+use crate::{DataEndpoint, DataType, MessageDataType, TelemetryError, get_data_type, message_meta};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -156,6 +156,60 @@ fn recent_rx_cache_preallocates_and_reserves_shared_budget() {
     );
 }
 
+#[cfg(feature = "discovery")]
+#[test]
+fn router_sender_id_can_be_updated_at_runtime_for_emitted_packets() {
+    use crate::router::{Router, RouterConfig};
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_c = seen.clone();
+    let router = Router::new(RouterConfig::default().with_sender("OLD_SENDER"));
+    router.add_side_packet("tx", move |pkt: &Packet| {
+        seen_c.lock().unwrap().push(pkt.sender().to_string());
+        Ok(())
+    });
+
+    router.set_sender("NEW_SENDER");
+    assert_eq!(router.sender().as_ref(), "NEW_SENDER");
+
+    router.announce_discovery().unwrap();
+    router.process_tx_queue().unwrap();
+
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|sender| sender == "NEW_SENDER")
+    );
+}
+
+#[cfg(feature = "discovery")]
+#[test]
+fn runtime_sender_id_updates_are_reflected_in_topology_exports() {
+    use crate::relay::Relay;
+    use crate::router::{Router, RouterConfig};
+
+    let router = Router::new(RouterConfig::default().with_sender("ROUTER_OLD"));
+    router.set_sender("ROUTER_NEW");
+    let router_topology = router.export_topology();
+    assert!(
+        router_topology
+            .routers
+            .iter()
+            .any(|board| board.sender_id == "ROUTER_NEW")
+    );
+
+    let relay = Relay::new(Box::new(crate::tests::timeout_tests::StepClock::new(0, 0)));
+    relay.set_sender("RELAY_NEW");
+    let relay_topology = relay.export_topology();
+    assert!(
+        relay_topology
+            .routers
+            .iter()
+            .any(|board| board.sender_id == "RELAY_NEW")
+    );
+}
+
 /// Build a handler for `SD_CARD` that:
 /// - asserts `GPS_DATA` element width is `4` (f32),
 /// - decodes the payload as little-endian `f32`,
@@ -201,13 +255,13 @@ mod tests2 {
     //! router send/receive paths.
 
     use crate::tests::timeout_tests::StepClock;
-    use crate::tests::{get_sd_card_handler, SeenType};
+    use crate::tests::{SeenType, get_sd_card_handler};
     use crate::{
+        TelemetryResult,
         config::{DataEndpoint, DataType},
         packet::Packet,
         router::Router,
         serialize,
-        TelemetryResult,
     };
     use std::sync::{Arc, Mutex};
     use std::vec::Vec;
@@ -692,7 +746,7 @@ mod handler_failure_tests {
     use crate::router::EndpointHandler;
     use crate::router::{Router, RouterConfig};
     use crate::tests::timeout_tests::StepClock;
-    use crate::{DataType, TelemetryError, MAX_VALUE_DATA_TYPE};
+    use crate::{DataType, MAX_VALUE_DATA_TYPE, TelemetryError};
     use alloc::{sync::Arc, vec, vec::Vec};
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -847,10 +901,10 @@ mod timeout_tests {
 
     use crate::config::DataEndpoint;
     use crate::router::EndpointHandler;
-    use crate::tests::{get_handler, UnixClock};
+    use crate::tests::{UnixClock, get_handler};
     use crate::{
-        packet::Packet, router::Clock, router::Router, router::RouterConfig, DataType,
-        TelemetryResult,
+        DataType, TelemetryResult, packet::Packet, router::Clock, router::Router,
+        router::RouterConfig,
     };
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1187,11 +1241,11 @@ mod tests_extra {
     use crate::config::DataEndpoint;
     use crate::tests::test_payload_len_for;
     use crate::{
-        config::DataType, packet::Packet, router::{Clock, EndpointHandler, Router, RouterConfig},
+        TelemetryError, TelemetryErrorCode, TelemetryResult,
+        config::DataType,
+        packet::Packet,
+        router::{Clock, EndpointHandler, Router, RouterConfig},
         serialize,
-        TelemetryError,
-        TelemetryErrorCode,
-        TelemetryResult,
     };
     use alloc::{string::String, sync::Arc};
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1372,10 +1426,10 @@ mod tests_extra {
     #[test]
     fn endpoints_bitpack_roundtrip_many_and_extremes() {
         use crate::{
+            MAX_VALUE_DATA_ENDPOINT,
             config::{DataEndpoint, DataType},
             packet::Packet,
             serialize,
-            MAX_VALUE_DATA_ENDPOINT,
         };
 
         // Build a long endpoint list by cycling through all enum values (0..=MAX)
@@ -1452,10 +1506,10 @@ mod tests_extra {
     #[test]
     fn corrupt_endpoint_bits_yields_bad_endpoint_error() {
         use crate::{
+            MAX_VALUE_DATA_ENDPOINT,
             config::{DataEndpoint, DataType},
             packet::Packet,
             serialize,
-            MAX_VALUE_DATA_ENDPOINT,
         };
 
         // Recompute EP_BITS the same way the module does.
@@ -1798,13 +1852,13 @@ mod tests_more {
     use crate::config::get_message_meta;
     use crate::tests::UnixClock;
     use crate::{
-        config::{DataEndpoint, DataType}, get_data_type, get_needed_message_size, message_meta,
-        packet::Packet, router::{Clock, EndpointHandler, Router, RouterConfig}, serialize,
-        MessageDataType,
-        MessageElement, TelemetryError, TelemetryErrorCode,
-        TelemetryResult,
-        MAX_VALUE_DATA_ENDPOINT,
-        MAX_VALUE_DATA_TYPE,
+        MAX_VALUE_DATA_ENDPOINT, MAX_VALUE_DATA_TYPE, MessageDataType, MessageElement,
+        TelemetryError, TelemetryErrorCode, TelemetryResult,
+        config::{DataEndpoint, DataType},
+        get_data_type, get_needed_message_size, message_meta,
+        packet::Packet,
+        router::{Clock, EndpointHandler, Router, RouterConfig},
+        serialize,
     };
     use alloc::{sync::Arc, vec::Vec};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2272,14 +2326,14 @@ mod concurrency_tests {
     //! guarantees for logging, receiving, and processing.
 
     use crate::{
+        TelemetryResult,
         config::{DataEndpoint, DataType},
         packet::Packet,
         router::{Clock, EndpointHandler, Router, RouterConfig},
         serialize,
-        TelemetryResult,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -2819,7 +2873,7 @@ mod data_conversion_types {
 
     use crate::config::{DataEndpoint, DataType};
     use crate::packet::Packet;
-    use crate::{get_data_type, MessageDataType, TelemetryError, MAX_VALUE_DATA_TYPE};
+    use crate::{MAX_VALUE_DATA_TYPE, MessageDataType, TelemetryError, get_data_type};
 
     /// data_as_f32 should round-trip values written via from_f32_slice.
     #[test]
@@ -2891,7 +2945,7 @@ mod relay_tests {
 
     use crate::relay::Relay;
     use crate::tests::timeout_tests::StepClock;
-    use crate::{packet::Packet, serialize, TelemetryError, TelemetryResult};
+    use crate::{TelemetryError, TelemetryResult, packet::Packet, serialize};
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -3205,10 +3259,10 @@ mod dedupe_tests {
     use crate::relay::Relay;
     use crate::router::{Clock, EndpointHandler, Router, RouterConfig};
     use crate::tests::timeout_tests::StepClock;
-    use crate::{packet::Packet, serialize, TelemetryResult};
+    use crate::{TelemetryResult, packet::Packet, serialize};
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Simple clock that always returns 0.
     fn zero_clock() -> Box<dyn Clock + Send + Sync> {
@@ -3496,7 +3550,7 @@ mod relay_reliable_tests {
     use crate::relay::{Relay, RelaySideOptions};
     use crate::router::Clock;
     use crate::tests::timeout_tests::StepClock;
-    use crate::{packet::Packet, serialize, TelemetryResult};
+    use crate::{TelemetryResult, packet::Packet, serialize};
 
     use std::sync::{Arc, Mutex};
 
@@ -3850,10 +3904,10 @@ mod reliable_tests {
     use crate::config::{DataEndpoint, DataType};
     use crate::router::{Clock, EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use crate::tests::timeout_tests::StepClock;
-    use crate::{packet::Packet, serialize, TelemetryResult};
+    use crate::{TelemetryResult, packet::Packet, serialize};
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
 
     fn zero_clock() -> Box<dyn Clock + Send + Sync> {
@@ -4309,7 +4363,7 @@ mod router_tests {
     use crate::packet::Packet;
     use crate::router::{EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use crate::tests::timeout_tests::StepClock;
-    use crate::{serialize, TelemetryResult};
+    use crate::{TelemetryResult, serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -4521,22 +4575,22 @@ mod router_tests {
         use std::sync::Once;
 
         use crate::config::{
-            register_data_type_with_description, register_endpoint_with_description,
             MAX_HANDLER_RETRIES, RELIABLE_MAX_END_TO_END_ACK_CACHE,
             RELIABLE_MAX_END_TO_END_PENDING, RELIABLE_MAX_RETURN_ROUTES,
+            register_data_type_with_description, register_endpoint_with_description,
         };
         use crate::discovery::{
+            DISCOVERY_FAST_INTERVAL_MS, DISCOVERY_ROUTE_TTL_MS, TopologyBoardNode,
             build_discovery_announce, build_discovery_timesync_sources, build_discovery_topology,
-            TopologyBoardNode, DISCOVERY_FAST_INTERVAL_MS, DISCOVERY_ROUTE_TTL_MS,
         };
         use crate::relay::Relay;
         use crate::router::{Clock, EndpointHandler, RouterConfig};
         use crate::tests::timeout_tests::StepClock;
-        use crate::{packet::Packet, router::Router};
         use crate::{
             DataEndpoint, DataType, MessageClass, MessageDataType, MessageElement, ReliableMode,
             RouteSelectionMode, TelemetryError, TelemetryResult,
         };
+        use crate::{packet::Packet, router::Router};
         use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
 
@@ -7844,24 +7898,24 @@ mod router_tests {
         use alloc::{boxed::Box, sync::Arc};
 
         use crate::{
-            config::{
-                data_type_definition_by_name, data_type_exists, endpoint_definition_by_name, endpoint_exists,
-                export_schema, merge_owned_schema_snapshot, merge_owned_schema_snapshot_with_budget,
-                merge_schema_snapshot, owned_schema_byte_cost, register_data_type_id,
-                register_data_type_id_with_description, register_data_type_with_description, register_endpoint_id_with_description,
-                register_endpoint_with_description, register_schema_json_bytes,
-                register_schema_json_file, remove_data_type_by_name,
-                remove_endpoint, remove_endpoint_by_name,
-                schema_bytes_used, DataTypeDefinition,
-                EndpointDefinition, OwnedDataTypeDefinition, OwnedEndpointDefinition,
-                OwnedRuntimeSchemaSnapshot, RuntimeSchemaSnapshot, MAX_QUEUE_BUDGET,
-            }, discovery::{build_discovery_schema_from_snapshot, decode_discovery_schema}, message_meta, packet::Packet, router::EndpointHandler, DataEndpoint,
-            DataType,
-            MessageClass,
-            MessageDataType,
-            MessageElement,
-            ReliableMode,
+            DataEndpoint, DataType, MessageClass, MessageDataType, MessageElement, ReliableMode,
             TelemetryError,
+            config::{
+                DataTypeDefinition, EndpointDefinition, MAX_QUEUE_BUDGET, OwnedDataTypeDefinition,
+                OwnedEndpointDefinition, OwnedRuntimeSchemaSnapshot, RuntimeSchemaSnapshot,
+                data_type_definition_by_name, data_type_exists, endpoint_definition_by_name,
+                endpoint_exists, export_schema, merge_owned_schema_snapshot,
+                merge_owned_schema_snapshot_with_budget, merge_schema_snapshot,
+                owned_schema_byte_cost, register_data_type_id,
+                register_data_type_id_with_description, register_data_type_with_description,
+                register_endpoint_id_with_description, register_endpoint_with_description,
+                register_schema_json_bytes, register_schema_json_file, remove_data_type_by_name,
+                remove_endpoint, remove_endpoint_by_name, schema_bytes_used,
+            },
+            discovery::{build_discovery_schema_from_snapshot, decode_discovery_schema},
+            message_meta,
+            packet::Packet,
+            router::EndpointHandler,
         };
 
         #[test]

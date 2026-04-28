@@ -173,6 +173,7 @@ SedsRouter * seds_router_new(
 
 /** @brief Destroy a router created by seds_router_new(). */
 void seds_router_free(SedsRouter * r);
+SedsResult seds_router_set_sender_id(SedsRouter * r, const char * sender, size_t sender_len);
 
 /**
  * @brief Read the router's current internally-synthesized network time in Unix milliseconds.
@@ -768,6 +769,7 @@ SedsRelay * seds_relay_new(SedsNowMsFn now_ms_cb, void * user);
  * @brief Destroy a relay previously returned by seds_relay_new().
  */
 void seds_relay_free(SedsRelay * r);
+SedsResult seds_relay_set_sender_id(SedsRelay * r, const char * sender, size_t sender_len);
 
 /**
  * @brief Queue a built-in discovery advertisement immediately for this relay.

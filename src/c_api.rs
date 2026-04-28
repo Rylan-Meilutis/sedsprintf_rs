@@ -14,24 +14,24 @@
 #[cfg(feature = "timesync")]
 use crate::timesync::{NetworkTimeReading, PartialNetworkTime, TimeSyncConfig};
 use crate::{
-    config::{
-        data_type_definition, data_type_definition_by_name, data_type_exists, endpoint_definition,
-        endpoint_definition_by_name, endpoint_exists, message_class_code, message_class_from_code,
-        message_data_type_code, message_data_type_from_code, register_data_type_id,
-        register_data_type_id_with_description, register_endpoint_id, register_endpoint_id_with_description,
-        register_schema_json_bytes, reliable_code, reliable_from_code,
-        remove_data_type, remove_data_type_by_name, remove_endpoint, remove_endpoint_by_name,
-        DataEndpoint,
-    }, do_vec_log_typed, get_needed_message_size, message_meta, packet::Packet,
-    router::{endpoint_is_router_internal, Clock, LeBytes, RouterSideOptions},
-    router::{EndpointHandler, Router, RouterConfig},
-    serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet}, DataType, MessageElement,
-    RouteSelectionMode,
-    TelemetryError,
-    TelemetryErrorCode,
+    DataType, MessageElement, RouteSelectionMode, TelemetryError, TelemetryErrorCode,
     TelemetryResult,
+    config::{
+        DataEndpoint, data_type_definition, data_type_definition_by_name, data_type_exists,
+        endpoint_definition, endpoint_definition_by_name, endpoint_exists, message_class_code,
+        message_class_from_code, message_data_type_code, message_data_type_from_code,
+        register_data_type_id, register_data_type_id_with_description, register_endpoint_id,
+        register_endpoint_id_with_description, register_schema_json_bytes, reliable_code,
+        reliable_from_code, remove_data_type, remove_data_type_by_name, remove_endpoint,
+        remove_endpoint_by_name,
+    },
+    do_vec_log_typed, get_needed_message_size, message_meta,
+    packet::Packet,
+    router::{Clock, LeBytes, RouterSideOptions, endpoint_is_router_internal},
+    router::{EndpointHandler, Router, RouterConfig},
+    serialize::{deserialize_packet, packet_wire_size, peek_envelope, serialize_packet},
 };
-use crate::{get_data_type, MessageDataType::NoData};
+use crate::{MessageDataType::NoData, get_data_type};
 use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use core::{ffi::c_char, ffi::c_void, mem::size_of, ptr, slice, str::from_utf8};
 
@@ -1050,6 +1050,29 @@ pub extern "C" fn seds_router_free(r: *mut SedsRouter) {
     unsafe {
         drop(Box::from_raw(r));
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_router_set_sender_id(
+    r: *mut SedsRouter,
+    sender: *const c_char,
+    sender_len: usize,
+) -> i32 {
+    if r.is_null() || (sender_len > 0 && sender.is_null()) {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let sender_id = if sender_len == 0 {
+        ""
+    } else {
+        let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(sender), sender_len) };
+        match from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return status_from_err(TelemetryError::BadArg),
+        }
+    };
+    let router = unsafe { &mut *r };
+    router.inner.set_sender(sender_id);
+    status_from_result_code(SedsResult::SedsOk)
 }
 
 #[cfg(feature = "timesync")]
@@ -2231,6 +2254,29 @@ pub extern "C" fn seds_relay_free(r: *mut SedsRelay) {
     unsafe {
         drop(Box::from_raw(r));
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seds_relay_set_sender_id(
+    r: *mut SedsRelay,
+    sender: *const c_char,
+    sender_len: usize,
+) -> i32 {
+    if r.is_null() || (sender_len > 0 && sender.is_null()) {
+        return status_from_err(TelemetryError::BadArg);
+    }
+    let sender_id = if sender_len == 0 {
+        ""
+    } else {
+        let bytes = unsafe { slice::from_raw_parts(c_char_ptr_as_u8(sender), sender_len) };
+        match from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return status_from_err(TelemetryError::BadArg),
+        }
+    };
+    let relay = unsafe { &mut *r };
+    relay.inner.set_sender(sender_id);
+    status_from_result_code(SedsResult::SedsOk)
 }
 
 #[cfg(feature = "discovery")]
@@ -4015,7 +4061,7 @@ pub extern "C" fn seds_owned_header_view(
 #[cfg(all(test, feature = "discovery"))]
 mod tests {
     use super::*;
-    use crate::discovery::{build_discovery_announce, DISCOVERY_FAST_INTERVAL_MS};
+    use crate::discovery::{DISCOVERY_FAST_INTERVAL_MS, build_discovery_announce};
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use serde_json::Value;
@@ -4142,7 +4188,12 @@ mod tests {
         assert!(queues.get("shared_queue_bytes_used").unwrap().is_u64());
 
         let reliable = doc.get("reliable").unwrap();
-        assert!(reliable.get("reliable_return_route_count").unwrap().is_u64());
+        assert!(
+            reliable
+                .get("reliable_return_route_count")
+                .unwrap()
+                .is_u64()
+        );
         assert!(reliable.get("end_to_end_pending_count").unwrap().is_u64());
 
         let discovery = doc.get("discovery").unwrap();
@@ -4170,7 +4221,13 @@ mod tests {
         assert!(local.get("reachable_endpoints").unwrap().is_array());
         assert!(local.get("reachable_timesync_sources").unwrap().is_array());
 
-        let route = doc.get("routes").unwrap().as_array().unwrap().first().unwrap();
+        let route = doc
+            .get("routes")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap();
         assert!(route.get("side_id").unwrap().is_u64());
         assert!(route.get("side_name").unwrap().is_string());
         assert!(route.get("announcers").unwrap().is_array());
@@ -4770,7 +4827,10 @@ mod tests {
 
         let discovery = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
         unsafe {
-            assert_eq!(ok_or_status((*router).inner.rx_from_side(&discovery, side_id as usize)), 0);
+            assert_eq!(
+                ok_or_status((*router).inner.rx_from_side(&discovery, side_id as usize)),
+                0
+            );
         }
 
         let topology: Value = serde_json::from_str(&export_router_json(
@@ -4833,6 +4893,84 @@ mod tests {
         .unwrap();
         assert_runtime_json_shape(&runtime, "UPLINK");
 
+        seds_relay_free(relay);
+    }
+
+    #[test]
+    fn c_abi_sender_id_setters_update_exported_topology() {
+        let router = seds_router_new(1, None, ptr::null_mut(), ptr::null(), 0);
+        assert!(!router.is_null());
+        let side_name = b"UPLINK";
+        let side_id = seds_router_add_side_serialized(
+            router,
+            side_name.as_ptr() as *const c_char,
+            side_name.len(),
+            Some(serialized_ok_cb),
+            ptr::null_mut(),
+            false,
+        );
+        assert!(side_id >= 0);
+        let discovery = build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
+        unsafe {
+            assert_eq!(
+                ok_or_status((*router).inner.rx_from_side(&discovery, side_id as usize)),
+                0
+            );
+        }
+        let router_sender = b"ROUTER_RUNTIME";
+        assert_eq!(
+            seds_router_set_sender_id(
+                router,
+                router_sender.as_ptr() as *const c_char,
+                router_sender.len(),
+            ),
+            0
+        );
+        let router_topology: Value = serde_json::from_str(&export_router_json(
+            router,
+            seds_router_export_topology_len,
+            seds_router_export_topology,
+        ))
+        .unwrap();
+        assert_topology_json_shape(&router_topology, "ROUTER_RUNTIME");
+        seds_router_free(router);
+
+        let relay = seds_relay_new(None, ptr::null_mut());
+        assert!(!relay.is_null());
+        let relay_side_id = seds_relay_add_side_serialized(
+            relay,
+            side_name.as_ptr() as *const c_char,
+            side_name.len(),
+            Some(serialized_ok_cb),
+            ptr::null_mut(),
+            false,
+        );
+        assert!(relay_side_id >= 0);
+        let relay_discovery =
+            build_discovery_announce("REMOTE_A", 0, &[DataEndpoint(101)]).unwrap();
+        unsafe {
+            (*relay)
+                .inner
+                .rx_from_side(relay_side_id as RelaySideId, relay_discovery)
+                .unwrap();
+        }
+        assert_eq!(seds_relay_process_rx_queue(relay), 0);
+        let relay_sender = b"RELAY_RUNTIME";
+        assert_eq!(
+            seds_relay_set_sender_id(
+                relay,
+                relay_sender.as_ptr() as *const c_char,
+                relay_sender.len(),
+            ),
+            0
+        );
+        let relay_topology: Value = serde_json::from_str(&export_relay_json(
+            relay,
+            seds_relay_export_topology_len,
+            seds_relay_export_topology,
+        ))
+        .unwrap();
+        assert_topology_json_shape(&relay_topology, "RELAY_RUNTIME");
         seds_relay_free(relay);
     }
 

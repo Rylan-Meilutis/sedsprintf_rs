@@ -6,8 +6,8 @@
 //! endpoints/types as the network announces them.
 
 use crate::{
-    parse_f64, parse_strings, parse_usize, EndpointMeta, MessageClass, MessageDataType,
-    MessageElement, MessageMeta, ReliableMode, TelemetryError, TelemetryResult,
+    EndpointMeta, MessageClass, MessageDataType, MessageElement, MessageMeta, ReliableMode,
+    TelemetryError, TelemetryResult, parse_f64, parse_strings, parse_usize,
 };
 #[cfg(feature = "std")]
 use alloc::string::ToString;

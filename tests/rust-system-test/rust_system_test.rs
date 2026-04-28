@@ -1,18 +1,18 @@
 #[cfg(test)]
 mod threaded_system_tests {
+    use sedsprintf_rs::RouteSelectionMode;
+    use sedsprintf_rs::TelemetryResult;
     use sedsprintf_rs::config::{DataEndpoint, DataType};
-    use sedsprintf_rs::discovery::{build_discovery_announce, DISCOVERY_ROUTE_TTL_MS};
+    use sedsprintf_rs::discovery::{DISCOVERY_ROUTE_TTL_MS, build_discovery_announce};
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::Relay;
     use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
-    use sedsprintf_rs::RouteSelectionMode;
-    use sedsprintf_rs::TelemetryResult;
 
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::Arc;
-    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -71,7 +71,7 @@ mod threaded_system_tests {
             &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
             ts,
         )
-            .unwrap()
+        .unwrap()
     }
 
     #[test]
@@ -112,7 +112,7 @@ mod threaded_system_tests {
             DISCOVERY_ROUTE_TTL_MS / 2,
             &[DataEndpoint::named("RADIO")],
         )
-            .unwrap();
+        .unwrap();
         router
             .rx_serialized_queue_from_side(
                 &sedsprintf_rs::serialize::serialize_packet(&discovery_b),
@@ -136,7 +136,7 @@ mod threaded_system_tests {
                 &[DataEndpoint::named("RADIO")],
                 seq as u64,
             )
-                .unwrap();
+            .unwrap();
             router.tx_queue(pkt).unwrap();
         }
         router.process_tx_queue().unwrap();
@@ -156,7 +156,7 @@ mod threaded_system_tests {
             &[DataEndpoint::named("RADIO")],
             99,
         )
-            .unwrap();
+        .unwrap();
         router.tx_queue(failover_pkt).unwrap();
         router.process_tx_queue().unwrap();
 
@@ -200,7 +200,7 @@ mod threaded_system_tests {
             DISCOVERY_ROUTE_TTL_MS / 2,
             &[DataEndpoint::named("RADIO")],
         )
-            .unwrap();
+        .unwrap();
         relay
             .rx_serialized_from_side(
                 side_b,
@@ -224,7 +224,7 @@ mod threaded_system_tests {
                 &[DataEndpoint::named("RADIO")],
                 seq as u64,
             )
-                .unwrap();
+            .unwrap();
             relay.rx_from_side(ingress, pkt).unwrap();
         }
         relay.process_all_queues().unwrap();
@@ -244,7 +244,7 @@ mod threaded_system_tests {
             &[DataEndpoint::named("RADIO")],
             99,
         )
-            .unwrap();
+        .unwrap();
         relay.rx_from_side(ingress, failover_pkt).unwrap();
         relay.process_all_queues().unwrap();
 
@@ -527,7 +527,7 @@ mod threaded_system_tests {
                     &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
                     i + 300,
                 )
-                    .unwrap();
+                .unwrap();
                 power_router.tx(pkt2).unwrap();
                 thread::sleep(Duration::from_millis(5));
             }
