@@ -60,21 +60,21 @@ mod mega_library_system_tests {
         let r_a_tx = bus_a_tx.clone();
         let relay_side_a =
             relay.add_side_serialized("bus_a", move |bytes: &[u8]| -> TelemetryResult<()> {
-                r_a_tx.send(("relay", bytes.to_vec())).unwrap();
+                let _ = r_a_tx.send(("relay", bytes.to_vec()));
                 Ok(())
             });
 
         let r_b_tx = bus_b_tx.clone();
         let relay_side_b =
             relay.add_side_serialized("bus_b", move |bytes: &[u8]| -> TelemetryResult<()> {
-                r_b_tx.send(("relay", bytes.to_vec())).unwrap();
+                let _ = r_b_tx.send(("relay", bytes.to_vec()));
                 Ok(())
             });
 
         let r_c_tx = bus_c_tx.clone();
         let relay_side_c =
             relay.add_side_serialized("bus_c", move |bytes: &[u8]| -> TelemetryResult<()> {
-                r_c_tx.send(("relay", bytes.to_vec())).unwrap();
+                let _ = r_c_tx.send(("relay", bytes.to_vec()));
                 Ok(())
             });
 
@@ -105,7 +105,7 @@ mod mega_library_system_tests {
             router.add_side_serialized("bus_a", {
                 let bus = bus_a_tx.clone();
                 move |bytes: &[u8]| -> TelemetryResult<()> {
-                    bus.send(("node_a", bytes.to_vec())).unwrap();
+                    let _ = bus.send(("node_a", bytes.to_vec()));
                     Ok(())
                 }
             });
@@ -122,7 +122,7 @@ mod mega_library_system_tests {
             router.add_side_serialized("bus_b", {
                 let bus = bus_b_tx.clone();
                 move |bytes: &[u8]| -> TelemetryResult<()> {
-                    bus.send(("node_b", bytes.to_vec())).unwrap();
+                    let _ = bus.send(("node_b", bytes.to_vec()));
                     Ok(())
                 }
             });
@@ -139,7 +139,7 @@ mod mega_library_system_tests {
             router.add_side_serialized("bus_c", {
                 let bus = bus_c_tx.clone();
                 move |bytes: &[u8]| -> TelemetryResult<()> {
-                    bus.send(("node_c", bytes.to_vec())).unwrap();
+                    let _ = bus.send(("node_c", bytes.to_vec()));
                     Ok(())
                 }
             });
@@ -154,21 +154,21 @@ mod mega_library_system_tests {
             let hub_side_a = router.add_side_serialized("bus_a", {
                 let bus = bus_a_tx.clone();
                 move |bytes: &[u8]| -> TelemetryResult<()> {
-                    bus.send(("hub_router", bytes.to_vec())).unwrap();
+                    let _ = bus.send(("hub_router", bytes.to_vec()));
                     Ok(())
                 }
             });
             let hub_side_b = router.add_side_serialized("bus_b", {
                 let bus = bus_b_tx.clone();
                 move |bytes: &[u8]| -> TelemetryResult<()> {
-                    bus.send(("hub_router", bytes.to_vec())).unwrap();
+                    let _ = bus.send(("hub_router", bytes.to_vec()));
                     Ok(())
                 }
             });
             let hub_side_c = router.add_side_serialized("bus_c", {
                 let bus = bus_c_tx.clone();
                 move |bytes: &[u8]| -> TelemetryResult<()> {
-                    bus.send(("hub_router", bytes.to_vec())).unwrap();
+                    let _ = bus.send(("hub_router", bytes.to_vec()));
                     Ok(())
                 }
             });

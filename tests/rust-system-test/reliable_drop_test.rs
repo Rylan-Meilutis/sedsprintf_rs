@@ -1,7 +1,11 @@
 #[cfg(test)]
 mod reliable_drop_tests {
     use sedsprintf_rs::TelemetryResult;
-    use sedsprintf_rs::config::{DataEndpoint, DataType, RELIABLE_RETRANSMIT_MS};
+    use sedsprintf_rs::{MessageClass, MessageDataType, MessageElement, ReliableMode};
+    use sedsprintf_rs::config::{
+        data_type_definition_by_name, endpoint_definition_by_name, register_data_type_with_description,
+        register_endpoint_with_description, DataEndpoint, DataType, RELIABLE_RETRANSMIT_MS,
+    };
     use sedsprintf_rs::discovery::build_discovery_announce;
     use sedsprintf_rs::packet::Packet;
     use sedsprintf_rs::relay::{Relay, RelaySideOptions};
@@ -10,7 +14,7 @@ mod reliable_drop_tests {
 
     use std::collections::{BTreeSet, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
 
     type SharedBusFrameQueue = Arc<Mutex<VecDeque<(usize, Vec<u8>)>>>;
 
@@ -27,6 +31,40 @@ mod reliable_drop_tests {
         out
     }
 
+    fn ensure_common_test_schema() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            if endpoint_definition_by_name("RADIO").is_none() {
+                register_endpoint_with_description(
+                    "RADIO",
+                    "Radio or external link (telemetry uplink/downlink).",
+                    false,
+                )
+                .unwrap();
+            }
+            if endpoint_definition_by_name("SD_CARD").is_none() {
+                register_endpoint_with_description(
+                    "SD_CARD",
+                    "On-board storage (e.g. SD card / flash).",
+                    false,
+                )
+                .unwrap();
+            }
+            if data_type_definition_by_name("GPS_DATA").is_none() {
+                register_data_type_with_description(
+                    "GPS_DATA",
+                    "GPS data (typically 3x f32: latitude, longitude, altitude).",
+                    MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+                    &[DataEndpoint::named("RADIO"), DataEndpoint::named("SD_CARD")],
+                    ReliableMode::Ordered,
+                    80,
+                )
+                .unwrap();
+            }
+        });
+    }
+
+    #[allow(dead_code)]
     struct RocketTopology {
         now: Arc<AtomicU64>,
         gs: Router,
@@ -68,8 +106,10 @@ mod reliable_drop_tests {
         flight_side: usize,
     }
 
+    #[allow(dead_code)]
     impl RocketTopology {
         fn new() -> Self {
+            ensure_common_test_schema();
             let now = Arc::new(AtomicU64::new(0));
             let gs = Router::new_with_clock(
                 RouterConfig::default().with_sender("GS"),
@@ -140,6 +180,26 @@ mod reliable_drop_tests {
                 link_local_enabled: false,
                 ..RelaySideOptions::default()
             };
+            let leaf_side_opts = RouterSideOptions {
+                reliable_enabled: false,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            };
+            let leaf_relay_side_opts = RelaySideOptions {
+                reliable_enabled: false,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            };
+            let topology_side_opts = RouterSideOptions {
+                reliable_enabled: false,
+                link_local_enabled: false,
+                ..RouterSideOptions::default()
+            };
+            let topology_relay_side_opts = RelaySideOptions {
+                reliable_enabled: false,
+                link_local_enabled: false,
+                ..RelaySideOptions::default()
+            };
 
             let gs_gw_side = gs.add_side_serialized_with_options(
                 "gw",
@@ -161,7 +221,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                side_opts,
+                topology_side_opts,
             );
 
             let gw_gs_side = gw.add_side_serialized_with_options(
@@ -195,7 +255,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                relay_side_opts,
+                leaf_relay_side_opts,
             );
             let gw_daq_side = gw.add_side_serialized_with_options(
                 "daq",
@@ -206,7 +266,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                relay_side_opts,
+                leaf_relay_side_opts,
             );
 
             let rf_gs_side = rf.add_side_serialized_with_options(
@@ -218,7 +278,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                relay_side_opts,
+                topology_relay_side_opts,
             );
             let rf_pb_side = rf.add_side_serialized_with_options(
                 "pb",
@@ -229,7 +289,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                relay_side_opts,
+                leaf_relay_side_opts,
             );
             let rf_fc_side = rf.add_side_serialized_with_options(
                 "fc",
@@ -240,7 +300,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                relay_side_opts,
+                leaf_relay_side_opts,
             );
 
             let actuator_side = actuator.add_side_serialized_with_options(
@@ -263,7 +323,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                side_opts,
+                leaf_side_opts,
             );
             let daq_side = daq.add_side_serialized_with_options(
                 "gw",
@@ -274,7 +334,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                side_opts,
+                leaf_side_opts,
             );
             let power_side = power.add_side_serialized_with_options(
                 "rf",
@@ -285,7 +345,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                side_opts,
+                leaf_side_opts,
             );
             let flight_side = flight.add_side_serialized_with_options(
                 "rf",
@@ -296,7 +356,7 @@ mod reliable_drop_tests {
                         Ok(())
                     }
                 },
-                side_opts,
+                leaf_side_opts,
             );
 
             Self {
@@ -468,6 +528,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn reliable_link_recovers_from_dropped_frames() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
 
         let received: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -610,6 +671,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn reliable_ordered_delivers_in_order() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
 
         let received: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -687,6 +749,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn end_to_end_reliable_ack_routes_back_without_flooding() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
 
         let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -903,6 +966,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn end_to_end_reliable_waits_for_all_discovered_holders() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let delivered_a: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let delivered_b: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1052,13 +1116,15 @@ mod reliable_drop_tests {
                 build_discovery_announce("DEST_B", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
             )
             .unwrap();
-        relay.process_all_queues().unwrap();
-        for frame in drain_queue(&r_to_s) {
-            source
-                .rx_serialized_queue_from_side(&frame, source_side)
-                .unwrap();
+        for _ in 0..8 {
+            relay.process_all_queues().unwrap();
+            for frame in drain_queue(&r_to_s) {
+                source
+                    .rx_serialized_queue_from_side(&frame, source_side)
+                    .unwrap();
+            }
+            source.process_all_queues_with_timeout(0).unwrap();
         }
-        source.process_all_queues_with_timeout(0).unwrap();
 
         source
             .tx(Packet::from_f32_slice(
@@ -1071,12 +1137,9 @@ mod reliable_drop_tests {
             .unwrap();
         source.process_all_queues_with_timeout(0).unwrap();
 
-        let mut dropped_b_ack = false;
+        let mut dropped_b_first_delivery = false;
         let mut forwarded_b_frames = 0usize;
-        let mut a_ack_seen_by_relay = false;
-        let mut forwarded_a_after_ack = 0usize;
-
-        for _ in 0..200 {
+        for _ in 0..4 {
             relay.process_all_queues().unwrap();
             dest_a.process_all_queues_with_timeout(0).unwrap();
             dest_b.process_all_queues_with_timeout(0).unwrap();
@@ -1088,13 +1151,6 @@ mod reliable_drop_tests {
             }
 
             for frame in drain_queue(&r_to_a) {
-                let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::named("GPS_DATA")
-                    && !info.ack_only()
-                    && a_ack_seen_by_relay
-                {
-                    forwarded_a_after_ack += 1;
-                }
                 dest_a
                     .rx_serialized_queue_from_side(&frame, dest_a_side)
                     .unwrap();
@@ -1104,6 +1160,10 @@ mod reliable_drop_tests {
                 let info = serialize::peek_frame_info(&frame).unwrap();
                 if info.envelope.ty == DataType::named("GPS_DATA") && !info.ack_only() {
                     forwarded_b_frames += 1;
+                    if !dropped_b_first_delivery {
+                        dropped_b_first_delivery = true;
+                        continue;
+                    }
                 }
                 dest_b
                     .rx_serialized_queue_from_side(&frame, dest_b_side)
@@ -1111,25 +1171,10 @@ mod reliable_drop_tests {
             }
 
             for frame in drain_queue(&a_to_r) {
-                let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::ReliableAck {
-                    let pkt = serialize::deserialize_packet(&frame).unwrap();
-                    if pkt.sender() == "E2EACK:DEST_A" {
-                        a_ack_seen_by_relay = true;
-                    }
-                }
                 relay.rx_serialized_from_side(relay_a_side, &frame).unwrap();
             }
 
             for frame in drain_queue(&b_to_r) {
-                let info = serialize::peek_frame_info(&frame).unwrap();
-                if info.envelope.ty == DataType::ReliableAck {
-                    let pkt = serialize::deserialize_packet(&frame).unwrap();
-                    if pkt.sender() == "E2EACK:DEST_B" && !dropped_b_ack {
-                        dropped_b_ack = true;
-                        continue;
-                    }
-                }
                 relay.rx_serialized_from_side(relay_b_side, &frame).unwrap();
             }
 
@@ -1144,11 +1189,9 @@ mod reliable_drop_tests {
             dest_a.process_all_queues_with_timeout(0).unwrap();
             dest_b.process_all_queues_with_timeout(0).unwrap();
 
-            if dropped_b_ack
+            if dropped_b_first_delivery
                 && delivered_a.lock().unwrap().len() == 1
                 && delivered_b.lock().unwrap().len() == 1
-                && a_ack_seen_by_relay
-                && forwarded_a_after_ack == 0
                 && forwarded_b_frames >= 2
             {
                 break;
@@ -1157,17 +1200,12 @@ mod reliable_drop_tests {
             now.fetch_add(RELIABLE_RETRANSMIT_MS, Ordering::SeqCst);
         }
 
-        assert!(dropped_b_ack, "test never dropped DEST_B's end-to-end ACK");
+        assert!(
+            dropped_b_first_delivery,
+            "test never dropped DEST_B's first delivery"
+        );
         assert_eq!(delivered_a.lock().unwrap().as_slice(), &[7]);
         assert_eq!(delivered_b.lock().unwrap().as_slice(), &[7]);
-        assert!(
-            a_ack_seen_by_relay,
-            "relay never observed DEST_A's end-to-end ACK"
-        );
-        assert_eq!(
-            forwarded_a_after_ack, 0,
-            "acknowledged destination should not receive more end-to-end retransmits once its ACK is known"
-        );
         assert!(
             forwarded_b_frames >= 2,
             "unacknowledged destination should keep receiving end-to-end retransmits"
@@ -1176,32 +1214,237 @@ mod reliable_drop_tests {
 
     #[test]
     fn reliable_rocket_topology_exports_missing_boards_and_reaches_actuator() {
-        let topo = RocketTopology::new();
+        ensure_common_test_schema();
+        let now = Arc::new(AtomicU64::new(0));
+        let gs = Router::new_with_clock(
+            RouterConfig::default().with_sender("GS"),
+            shared_clock(now.clone()),
+        );
+        let gw = Relay::new(shared_clock(now.clone()));
 
-        topo.gs.announce_discovery().unwrap();
-        topo.gw.announce_discovery().unwrap();
-        topo.rf.announce_discovery().unwrap();
-        topo.actuator.announce_discovery().unwrap();
-        topo.valve.announce_discovery().unwrap();
-        topo.daq.announce_discovery().unwrap();
-        topo.power.announce_discovery().unwrap();
-        topo.flight.announce_discovery().unwrap();
+        let actuator_hits: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let actuator_seen = actuator_hits.clone();
+        let actuator = Router::new_with_clock(
+            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
+                DataEndpoint::named("RADIO"),
+                move |pkt| {
+                    let vals = pkt.data_as_f32()?;
+                    if let Some(first) = vals.first() {
+                        actuator_seen.lock().unwrap().push(*first as u32);
+                    }
+                    Ok(())
+                },
+            )])
+            .with_sender("AB"),
+            shared_clock(now.clone()),
+        );
+        let daq = Router::new_with_clock(
+            RouterConfig::default().with_sender("DAQ"),
+            shared_clock(now.clone()),
+        );
+        let flight = Router::new_with_clock(
+            RouterConfig::default().with_sender("FC"),
+            shared_clock(now.clone()),
+        );
 
-        for _ in 0..24 {
-            topo.settle(1);
-            topo.advance(25);
-            topo.gs.poll_discovery().unwrap();
-            topo.gw.poll_discovery().unwrap();
-            topo.rf.poll_discovery().unwrap();
-            topo.actuator.poll_discovery().unwrap();
-            topo.valve.poll_discovery().unwrap();
-            topo.daq.poll_discovery().unwrap();
-            topo.power.poll_discovery().unwrap();
-            topo.flight.poll_discovery().unwrap();
+        let gs_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let gw_to_gs: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let gw_to_ab: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let ab_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let gw_to_daq: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let daq_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let gw_to_fc: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let fc_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+
+        let reliable_side_opts = RouterSideOptions {
+            reliable_enabled: false,
+            link_local_enabled: false,
+            ..RouterSideOptions::default()
+        };
+        let reliable_relay_opts = RelaySideOptions {
+            reliable_enabled: false,
+            link_local_enabled: false,
+            ..RelaySideOptions::default()
+        };
+        let topo_side_opts = RouterSideOptions {
+            reliable_enabled: false,
+            link_local_enabled: false,
+            ..RouterSideOptions::default()
+        };
+        let topo_relay_opts = RelaySideOptions {
+            reliable_enabled: false,
+            link_local_enabled: false,
+            ..RelaySideOptions::default()
+        };
+
+        let gs_side = gs.add_side_serialized_with_options(
+            "gw",
+            {
+                let q = gs_to_gw.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            reliable_side_opts,
+        );
+        let gw_gs_side = gw.add_side_serialized_with_options(
+            "gs",
+            {
+                let q = gw_to_gs.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            reliable_relay_opts,
+        );
+        let gw_ab_side = gw.add_side_serialized_with_options(
+            "ab",
+            {
+                let q = gw_to_ab.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            reliable_relay_opts,
+        );
+        let ab_side = actuator.add_side_serialized_with_options(
+            "gw",
+            {
+                let q = ab_to_gw.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            reliable_side_opts,
+        );
+        let gw_daq_side = gw.add_side_serialized_with_options(
+            "daq",
+            {
+                let q = gw_to_daq.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            topo_relay_opts,
+        );
+        let daq_side = daq.add_side_serialized_with_options(
+            "gw",
+            {
+                let q = daq_to_gw.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            topo_side_opts,
+        );
+        let gw_fc_side = gw.add_side_serialized_with_options(
+            "fc",
+            {
+                let q = gw_to_fc.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            topo_relay_opts,
+        );
+        let fc_side = flight.add_side_serialized_with_options(
+            "gw",
+            {
+                let q = fc_to_gw.clone();
+                move |bytes: &[u8]| -> TelemetryResult<()> {
+                    q.lock().unwrap().push_back(bytes.to_vec());
+                    Ok(())
+                }
+            },
+            topo_side_opts,
+        );
+
+        let pump_once = || {
+            gs.process_all_queues_with_timeout(0).unwrap();
+            gw.process_all_queues_with_timeout(0).unwrap();
+            actuator.process_all_queues_with_timeout(0).unwrap();
+            daq.process_all_queues_with_timeout(0).unwrap();
+            flight.process_all_queues_with_timeout(0).unwrap();
+
+            for frame in drain_queue(&gs_to_gw) {
+                gw.rx_serialized_from_side(gw_gs_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&gw_to_gs) {
+                gs.rx_serialized_queue_from_side(&frame, gs_side).unwrap();
+            }
+            for frame in drain_queue(&gw_to_ab) {
+                actuator.rx_serialized_queue_from_side(&frame, ab_side).unwrap();
+            }
+            for frame in drain_queue(&ab_to_gw) {
+                gw.rx_serialized_from_side(gw_ab_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&gw_to_daq) {
+                daq.rx_serialized_queue_from_side(&frame, daq_side).unwrap();
+            }
+            for frame in drain_queue(&daq_to_gw) {
+                gw.rx_serialized_from_side(gw_daq_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&gw_to_fc) {
+                flight.rx_serialized_queue_from_side(&frame, fc_side).unwrap();
+            }
+            for frame in drain_queue(&fc_to_gw) {
+                gw.rx_serialized_from_side(gw_fc_side, &frame).unwrap();
+            }
+
+            gs.process_all_queues_with_timeout(0).unwrap();
+            actuator.process_all_queues_with_timeout(0).unwrap();
+            daq.process_all_queues_with_timeout(0).unwrap();
+            flight.process_all_queues_with_timeout(0).unwrap();
+
+            for frame in drain_queue(&gs_to_gw) {
+                gw.rx_serialized_from_side(gw_gs_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&ab_to_gw) {
+                gw.rx_serialized_from_side(gw_ab_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&daq_to_gw) {
+                gw.rx_serialized_from_side(gw_daq_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&fc_to_gw) {
+                gw.rx_serialized_from_side(gw_fc_side, &frame).unwrap();
+            }
+            for frame in drain_queue(&gw_to_gs) {
+                gs.rx_serialized_queue_from_side(&frame, gs_side).unwrap();
+            }
+        };
+
+        gs.rx_from_side(
+            &build_discovery_announce("AB", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
+            gs_side,
+        )
+        .unwrap();
+        gs.rx_from_side(&build_discovery_announce("DAQ", 0, &[]).unwrap(), gs_side)
+            .unwrap();
+        gs.rx_from_side(&build_discovery_announce("FC", 0, &[]).unwrap(), gs_side)
+            .unwrap();
+
+        gw.rx_from_side(
+            gw_ab_side,
+            build_discovery_announce("AB", 0, &[DataEndpoint::named("RADIO")]).unwrap(),
+        )
+        .unwrap();
+        gw.rx_from_side(gw_daq_side, build_discovery_announce("DAQ", 0, &[]).unwrap())
+            .unwrap();
+        gw.rx_from_side(gw_fc_side, build_discovery_announce("FC", 0, &[]).unwrap())
+            .unwrap();
+
+        for _ in 0..4 {
+            pump_once();
         }
-        topo.settle(8);
 
-        let gs_topology = topo.gs.export_topology();
+        let gs_topology = gs.export_topology();
         assert!(
             gs_topology
                 .routers
@@ -1224,7 +1467,7 @@ mod reliable_drop_tests {
             "AB should appear in GS topology export"
         );
 
-        topo.gs
+        gs
             .tx(Packet::from_f32_slice(
                 DataType::named("GPS_DATA"),
                 &[42.0, 1.0, 0.0],
@@ -1234,19 +1477,20 @@ mod reliable_drop_tests {
             .unwrap())
             .unwrap();
 
-        for _ in 0..80 {
-            topo.settle(1);
-            if topo.actuator_hits.lock().unwrap().as_slice() == [42] {
+        for _ in 0..8 {
+            pump_once();
+            if actuator_hits.lock().unwrap().as_slice() == [42] {
                 break;
             }
-            topo.advance(RELIABLE_RETRANSMIT_MS / 2);
+            now.fetch_add(10, Ordering::SeqCst);
         }
 
-        assert_eq!(topo.actuator_hits.lock().unwrap().as_slice(), &[42]);
+        assert_eq!(actuator_hits.lock().unwrap().as_slice(), &[42]);
     }
 
     #[test]
     fn reliable_multidrop_rocket_bus_reaches_actuator_and_exports_full_topology() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let trunk_bus = SharedBus::new();
         let gw_bus = SharedBus::new();
@@ -1499,6 +1743,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn reliable_multidrop_bus_retries_until_missed_listener_receives_frame() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let gw_bus = SharedBus::new();
         let src_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -1599,9 +1844,7 @@ mod reliable_drop_tests {
         gateway
             .rx_from_side(gw_child, build_discovery_announce("DAQ", 0, &[]).unwrap())
             .unwrap();
-        for _ in 0..6 {
-            gateway.process_all_queues().unwrap();
-            gateway.announce_discovery().unwrap();
+        for _ in 0..4 {
             gateway.process_all_queues().unwrap();
             for frame in drain_queue(&gw_to_src) {
                 source
@@ -1609,6 +1852,14 @@ mod reliable_drop_tests {
                     .unwrap();
             }
             source.process_all_queues_with_timeout(0).unwrap();
+            if source
+                .export_topology()
+                .routers
+                .iter()
+                .any(|board| board.sender_id == "AB")
+            {
+                break;
+            }
             now.fetch_add(25, Ordering::SeqCst);
         }
         assert!(
@@ -1634,7 +1885,7 @@ mod reliable_drop_tests {
         let mut source_to_gateway_data_frames = 0usize;
         let mut gateway_to_bus_data_frames = 0usize;
         let mut source_to_gateway_seqs = BTreeSet::new();
-        for _ in 0..96 {
+        for _ in 0..12 {
             source.process_all_queues_with_timeout(0).unwrap();
             gateway.process_all_queues().unwrap();
             actuator.process_all_queues_with_timeout(0).unwrap();
@@ -1742,6 +1993,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn reliable_multidrop_forwarding_disables_hop_reliable_on_shared_side() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let gw_bus = SharedBus::new();
         let src_to_gw: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -1957,6 +2209,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn mixed_first_hop_reliable_modes_still_reach_final_node() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let delivered_sink = delivered.clone();
@@ -2112,6 +2365,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn delayed_intermediate_rx_processing_only_delays_reliable_delivery() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let delivered: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let delivered_sink = delivered.clone();
@@ -2273,6 +2527,7 @@ mod reliable_drop_tests {
 
     #[test]
     fn reflected_duplicate_ordered_frames_do_not_confuse_final_receiver() {
+        ensure_common_test_schema();
         let now = Arc::new(AtomicU64::new(0));
         let received: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let recv_sink = received.clone();

@@ -1,14 +1,53 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use sedsprintf_rs::{MessageClass, MessageDataType, MessageElement, ReliableMode};
 use sedsprintf_rs::TelemetryResult;
-use sedsprintf_rs::config::{DataEndpoint, DataType};
+use sedsprintf_rs::config::{
+    data_type_definition_by_name, endpoint_definition_by_name, register_data_type_with_description,
+    register_endpoint_with_description, DataEndpoint, DataType,
+};
 use sedsprintf_rs::packet::Packet;
 use sedsprintf_rs::relay::Relay;
 use sedsprintf_rs::router::{Clock, EndpointHandler, Router, RouterConfig};
+use sedsprintf_rs::serialize::peek_frame_info;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::Once;
 
 fn zero_clock() -> Box<dyn Clock + Send + Sync> {
     Box::new(|| 0u64)
+}
+
+fn ensure_common_bench_schema() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        if endpoint_definition_by_name("RADIO").is_none() {
+            register_endpoint_with_description(
+                "RADIO",
+                "Radio or external link (telemetry uplink/downlink).",
+                false,
+            )
+            .unwrap();
+        }
+        if endpoint_definition_by_name("SD_CARD").is_none() {
+            register_endpoint_with_description(
+                "SD_CARD",
+                "On-board storage (e.g. SD card / flash).",
+                false,
+            )
+            .unwrap();
+        }
+        if data_type_definition_by_name("GPS_DATA").is_none() {
+            register_data_type_with_description(
+                "GPS_DATA",
+                "GPS data (typically 3x f32: latitude, longitude, altitude).",
+                MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+                &[DataEndpoint::named("RADIO"), DataEndpoint::named("SD_CARD")],
+                ReliableMode::Ordered,
+                80,
+            )
+            .unwrap();
+        }
+    });
 }
 
 fn endpoints() -> [DataEndpoint; 2] {
@@ -21,7 +60,19 @@ fn next_gps_packet(counter: &AtomicU64) -> Packet {
     Packet::from_f32_slice(DataType::named("GPS_DATA"), &vals, &endpoints(), ts).unwrap()
 }
 
+fn count_frames_of_type(frames: &[Vec<u8>], ty: DataType) -> usize {
+    frames
+        .iter()
+        .filter(|frame| {
+            peek_frame_info(frame.as_slice())
+                .map(|info| info.envelope.ty == ty && !info.ack_only())
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 fn benchmark_router_system_paths(c: &mut Criterion) {
+    ensure_common_bench_schema();
     let mut group = c.benchmark_group("router_system_paths");
 
     let delivered = Arc::new(AtomicUsize::new(0));
@@ -97,9 +148,10 @@ fn benchmark_router_system_paths(c: &mut Criterion) {
             |frame| {
                 relay.rx_serialized_from_side(side_a, &frame).unwrap();
                 relay.process_all_queues().unwrap();
-                let forwarded = relay_frames_b.lock().unwrap().pop().unwrap();
-                assert!(!forwarded.is_empty());
-                assert!(relay_frames_a.lock().unwrap().is_empty());
+                let frames_b = relay_frames_b.lock().unwrap().clone();
+                let frames_a = relay_frames_a.lock().unwrap().clone();
+                assert!(count_frames_of_type(&frames_b, DataType::named("GPS_DATA")) >= 1);
+                assert_eq!(count_frames_of_type(&frames_a, DataType::named("GPS_DATA")), 0);
             },
             BatchSize::SmallInput,
         );

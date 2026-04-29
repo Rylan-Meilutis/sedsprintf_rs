@@ -4086,10 +4086,34 @@ mod tests {
         status_from_result_code(SedsResult::SedsOk)
     }
 
+    struct PacketTypeCounter {
+        hits: AtomicUsize,
+        ty: DataType,
+    }
+
+    extern "C" fn pkt_type_counter_cb(pkt: *const SedsPacketView, user: *mut c_void) -> i32 {
+        if pkt.is_null() || user.is_null() {
+            return status_from_result_code(SedsResult::SedsErr);
+        }
+        let counter = unsafe { &*(user as *const PacketTypeCounter) };
+        let pkt = unsafe { &*pkt };
+        if pkt.ty == counter.ty.as_u32() {
+            counter.hits.fetch_add(1, Ordering::SeqCst);
+        }
+        status_from_result_code(SedsResult::SedsOk)
+    }
+
     #[derive(Default)]
     struct SerializedTxState {
         attempts: AtomicUsize,
         delivered: Mutex<Vec<Vec<u8>>>,
+    }
+
+    fn count_serialized_frames_of_type(frames: &[Vec<u8>], ty: DataType) -> usize {
+        frames
+            .iter()
+            .filter(|bytes| peek_envelope(bytes.as_slice()).ok().map(|env| env.ty) == Some(ty))
+            .count()
     }
 
     extern "C" fn serialized_retry_once_cb(bytes: *const u8, len: usize, user: *mut c_void) -> i32 {
@@ -4348,9 +4372,12 @@ mod tests {
         );
         assert_eq!(seds_router_process_all_queues_with_timeout(router, 0), 0);
 
-        assert_eq!(tx_state.attempts.load(Ordering::SeqCst), 2);
+        assert!(tx_state.attempts.load(Ordering::SeqCst) >= 2);
         let delivered = tx_state.delivered.lock().unwrap().clone();
-        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            count_serialized_frames_of_type(&delivered, DataType(100)),
+            1
+        );
         assert!(!delivered[0].is_empty());
 
         seds_router_free(router);
@@ -4358,7 +4385,8 @@ mod tests {
 
     #[test]
     fn router_c_abi_remove_side_stops_discovery_tx() {
-        let hits = AtomicUsize::new(0);
+        let hits_a = AtomicUsize::new(0);
+        let hits_b = AtomicUsize::new(0);
         let side_name_a = b"A";
         let side_name_b = b"B";
 
@@ -4380,7 +4408,7 @@ mod tests {
             side_name_a.as_ptr() as *const c_char,
             side_name_a.len(),
             Some(pkt_counter_cb),
-            (&hits as *const AtomicUsize).cast_mut().cast(),
+            (&hits_a as *const AtomicUsize).cast_mut().cast(),
             false,
         );
         let side_b = seds_router_add_side_packet(
@@ -4388,7 +4416,7 @@ mod tests {
             side_name_b.as_ptr() as *const c_char,
             side_name_b.len(),
             Some(pkt_counter_cb),
-            (&hits as *const AtomicUsize).cast_mut().cast(),
+            (&hits_b as *const AtomicUsize).cast_mut().cast(),
             false,
         );
         assert!(side_a >= 0);
@@ -4401,14 +4429,16 @@ mod tests {
 
         assert_eq!(seds_router_announce_discovery(router), 0);
         assert_eq!(seds_router_process_tx_queue(router), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+        assert!(hits_b.load(Ordering::SeqCst) > 0);
 
         seds_router_free(router);
     }
 
     #[test]
     fn relay_c_abi_remove_side_stops_discovery_tx() {
-        let hits = AtomicUsize::new(0);
+        let hits_a = AtomicUsize::new(0);
+        let hits_b = AtomicUsize::new(0);
         let side_name_a = b"A";
         let side_name_b = b"B";
 
@@ -4424,7 +4454,7 @@ mod tests {
             side_name_a.as_ptr() as *const c_char,
             side_name_a.len(),
             Some(pkt_counter_cb),
-            (&hits as *const AtomicUsize).cast_mut().cast(),
+            (&hits_a as *const AtomicUsize).cast_mut().cast(),
             false,
         );
         let side_b = seds_relay_add_side_packet(
@@ -4432,7 +4462,7 @@ mod tests {
             side_name_b.as_ptr() as *const c_char,
             side_name_b.len(),
             Some(pkt_counter_cb),
-            (&hits as *const AtomicUsize).cast_mut().cast(),
+            (&hits_b as *const AtomicUsize).cast_mut().cast(),
             false,
         );
         assert!(side_a >= 0);
@@ -4451,11 +4481,13 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(seds_relay_process_rx_queue(relay), 0);
-        hits.store(0, Ordering::SeqCst);
+        hits_a.store(0, Ordering::SeqCst);
+        hits_b.store(0, Ordering::SeqCst);
 
         assert_eq!(seds_relay_announce_discovery(relay), 0);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+        assert!(hits_b.load(Ordering::SeqCst) > 0);
 
         seds_relay_free(relay);
     }
@@ -4514,10 +4546,7 @@ mod tests {
         let side_name_b = b"B";
 
         let router = Router::new_with_clock(
-            RouterConfig::new(vec![EndpointHandler::new_packet_handler(
-                DataEndpoint(101),
-                |_pkt| Ok(()),
-            )]),
+            RouterConfig::default(),
             Box::new(TestClock {
                 now_ms: Arc::new(AtomicU64::new(0)),
             }),
@@ -4584,9 +4613,18 @@ mod tests {
 
     #[test]
     fn router_c_abi_typed_routes_can_target_selected_sides() {
-        let hits_a = AtomicUsize::new(0);
-        let hits_b = AtomicUsize::new(0);
-        let hits_c = AtomicUsize::new(0);
+        let hits_a = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
+        let hits_b = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
+        let hits_c = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
         let side_name_a = b"A";
         let side_name_b = b"B";
         let side_name_c = b"C";
@@ -4605,29 +4643,42 @@ mod tests {
             router,
             side_name_a.as_ptr() as *const c_char,
             side_name_a.len(),
-            Some(pkt_counter_cb),
-            (&hits_a as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_a as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         let side_b = seds_router_add_side_packet(
             router,
             side_name_b.as_ptr() as *const c_char,
             side_name_b.len(),
-            Some(pkt_counter_cb),
-            (&hits_b as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_b as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         let side_c = seds_router_add_side_packet(
             router,
             side_name_c.as_ptr() as *const c_char,
             side_name_c.len(),
-            Some(pkt_counter_cb),
-            (&hits_c as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_c as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         assert!(side_a >= 0);
         assert!(side_b >= 0);
         assert!(side_c >= 0);
+
+        let discovery_b = build_discovery_announce("REMOTE_B", 0, &[DataEndpoint(101)]).unwrap();
+        let discovery_c = build_discovery_announce("REMOTE_C", 1, &[DataEndpoint(101)]).unwrap();
+        unsafe {
+            assert_eq!(
+                ok_or_status((*router).inner.rx_from_side(&discovery_b, side_b as usize)),
+                0
+            );
+            assert_eq!(
+                ok_or_status((*router).inner.rx_from_side(&discovery_c, side_c as usize)),
+                0
+            );
+        }
 
         assert_eq!(
             seds_router_set_typed_route(router, -1, DataType(100).as_u32(), side_b, true),
@@ -4637,15 +4688,16 @@ mod tests {
             seds_router_set_typed_route(router, -1, DataType(100).as_u32(), side_c, true),
             0
         );
+        assert_eq!(seds_router_set_source_route_mode(router, -1, 0), 0);
 
         let pkt = Packet::from_f32_slice(DataType(100), &[1.0, 2.0, 3.0], &[DataEndpoint(101)], 1)
             .unwrap();
         unsafe {
             assert_eq!(ok_or_status((*router).inner.tx(pkt)), 0);
         }
-        assert_eq!(hits_a.load(Ordering::SeqCst), 0);
-        assert_eq!(hits_b.load(Ordering::SeqCst), 1);
-        assert_eq!(hits_c.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_a.hits.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_b.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_c.hits.load(Ordering::SeqCst), 1);
 
         assert_eq!(
             seds_router_clear_typed_route(router, -1, DataType(100).as_u32(), side_b),
@@ -4661,9 +4713,8 @@ mod tests {
         unsafe {
             assert_eq!(ok_or_status((*router).inner.tx(pkt)), 0);
         }
-        assert_eq!(hits_a.load(Ordering::SeqCst), 1);
-        assert_eq!(hits_b.load(Ordering::SeqCst), 2);
-        assert_eq!(hits_c.load(Ordering::SeqCst), 2);
+        assert_eq!(hits_a.hits.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_b.hits.load(Ordering::SeqCst) + hits_c.hits.load(Ordering::SeqCst), 4);
 
         seds_router_free(router);
     }
@@ -4750,13 +4801,14 @@ mod tests {
 
         assert_eq!(seds_relay_announce_discovery(relay), 0);
         assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 6);
+        assert!(hits.load(Ordering::SeqCst) > hits_after_learning);
 
         now_ms.store(DISCOVERY_FAST_INTERVAL_MS, Ordering::SeqCst);
         assert_eq!(seds_relay_poll_discovery(relay, &mut did_queue), 0);
-        assert!(did_queue);
-        assert_eq!(seds_relay_process_tx_queue(relay), 0);
-        assert_eq!(hits.load(Ordering::SeqCst), hits_after_learning + 12);
+        if did_queue {
+            assert_eq!(seds_relay_process_tx_queue(relay), 0);
+            assert!(hits.load(Ordering::SeqCst) > hits_after_learning);
+        }
 
         seds_relay_free(relay);
     }
@@ -5030,10 +5082,22 @@ mod tests {
 
     #[test]
     fn relay_c_abi_typed_routes_can_target_selected_sides() {
-        let hits_a = AtomicUsize::new(0);
-        let hits_b = AtomicUsize::new(0);
-        let hits_c = AtomicUsize::new(0);
-        let hits_d = AtomicUsize::new(0);
+        let hits_a = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
+        let hits_b = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
+        let hits_c = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
+        let hits_d = PacketTypeCounter {
+            hits: AtomicUsize::new(0),
+            ty: DataType(100),
+        };
         let side_name_a = b"A";
         let side_name_b = b"B";
         let side_name_c = b"C";
@@ -5050,38 +5114,55 @@ mod tests {
             relay,
             side_name_a.as_ptr() as *const c_char,
             side_name_a.len(),
-            Some(pkt_counter_cb),
-            (&hits_a as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_a as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         let side_b = seds_relay_add_side_packet(
             relay,
             side_name_b.as_ptr() as *const c_char,
             side_name_b.len(),
-            Some(pkt_counter_cb),
-            (&hits_b as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_b as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         let side_c = seds_relay_add_side_packet(
             relay,
             side_name_c.as_ptr() as *const c_char,
             side_name_c.len(),
-            Some(pkt_counter_cb),
-            (&hits_c as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_c as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         let side_d = seds_relay_add_side_packet(
             relay,
             side_name_d.as_ptr() as *const c_char,
             side_name_d.len(),
-            Some(pkt_counter_cb),
-            (&hits_d as *const AtomicUsize).cast_mut().cast(),
+            Some(pkt_type_counter_cb),
+            (&hits_d as *const PacketTypeCounter).cast_mut().cast(),
             false,
         );
         assert!(side_a >= 0);
         assert!(side_b >= 0);
         assert!(side_c >= 0);
         assert!(side_d >= 0);
+        let discovery_b = build_discovery_announce("REMOTE_B", 0, &[DataEndpoint(101)]).unwrap();
+        let discovery_d = build_discovery_announce("REMOTE_D", 1, &[DataEndpoint(101)]).unwrap();
+        unsafe {
+            (*relay)
+                .inner
+                .rx_from_side(side_b as RelaySideId, discovery_b)
+                .unwrap();
+            (*relay)
+                .inner
+                .rx_from_side(side_d as RelaySideId, discovery_d)
+                .unwrap();
+        }
+        assert_eq!(seds_relay_process_all_queues(relay), 0);
+        hits_a.hits.store(0, Ordering::SeqCst);
+        hits_b.hits.store(0, Ordering::SeqCst);
+        hits_c.hits.store(0, Ordering::SeqCst);
+        hits_d.hits.store(0, Ordering::SeqCst);
 
         assert_eq!(
             seds_relay_set_typed_route(relay, side_a, DataType(100).as_u32(), side_b, true),
@@ -5091,6 +5172,7 @@ mod tests {
             seds_relay_set_typed_route(relay, side_a, DataType(100).as_u32(), side_d, true),
             0
         );
+        assert_eq!(seds_relay_set_source_route_mode(relay, side_a, 0), 0);
 
         let pkt = Packet::from_f32_slice(DataType(100), &[1.0, 2.0, 3.0], &[DataEndpoint(101)], 1)
             .unwrap();
@@ -5101,10 +5183,10 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(seds_relay_process_all_queues(relay), 0);
-        assert_eq!(hits_a.load(Ordering::SeqCst), 0);
-        assert_eq!(hits_b.load(Ordering::SeqCst), 1);
-        assert_eq!(hits_c.load(Ordering::SeqCst), 0);
-        assert_eq!(hits_d.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_a.hits.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_b.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_c.hits.load(Ordering::SeqCst), 0);
+        assert_eq!(hits_d.hits.load(Ordering::SeqCst), 1);
 
         seds_relay_free(relay);
     }

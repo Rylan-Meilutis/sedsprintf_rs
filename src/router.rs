@@ -1350,11 +1350,28 @@ impl Debug for Router {
 /// Check if any of the provided endpoints require remote forwarding when
 /// discovery is unavailable and routing falls back to local-vs-remote schema.
 #[inline]
-#[cfg(not(feature = "discovery"))]
 fn has_nonlocal_endpoint(eps: &[DataEndpoint], cfg: &RouterConfig) -> bool {
-    eps.iter()
-        .copied()
-        .any(|ep| !cfg.is_local_endpoint(ep) && !ep.is_link_local_only())
+    eps.iter().copied().any(|ep| !cfg.is_local_endpoint(ep))
+}
+
+#[inline]
+fn force_remote_for_type(ty: DataType) -> bool {
+    matches!(
+        ty,
+        DataType::ReliableAck | DataType::ReliablePartialAck | DataType::ReliablePacketRequest
+    ) || {
+        #[cfg(feature = "timesync")]
+        {
+            matches!(
+                ty,
+                DataType::TimeSyncAnnounce | DataType::TimeSyncRequest | DataType::TimeSyncResponse
+            )
+        }
+        #[cfg(not(feature = "timesync"))]
+        {
+            false
+        }
+    }
 }
 
 #[inline]
@@ -2359,6 +2376,9 @@ impl Router {
                     sides,
                     RouteSelectionOrigin::Flood,
                 )));
+            }
+            if !(has_nonlocal_endpoint(&eps, &self.cfg) || force_remote_for_type(ty)) {
+                return Ok(RemoteSidePlan::Target(Vec::new()));
             }
 
             #[cfg(feature = "timesync")]
