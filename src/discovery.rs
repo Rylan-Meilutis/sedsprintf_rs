@@ -1,5 +1,6 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::router::encode_slice_le;
@@ -109,6 +110,16 @@ pub const fn is_discovery_type(ty: DataType) -> bool {
             | DataType::DiscoveryTimeSyncSources
             | DataType::DiscoveryTopology
             | DataType::DiscoverySchema
+            | DataType::DiscoveryTopologyRequest
+            | DataType::DiscoverySchemaRequest
+    )
+}
+
+#[inline]
+pub const fn is_discovery_request_type(ty: DataType) -> bool {
+    matches!(
+        ty,
+        DataType::DiscoveryTopologyRequest | DataType::DiscoverySchemaRequest
     )
 }
 
@@ -244,6 +255,29 @@ pub fn build_discovery_timesync_sources<S: AsRef<str>>(
         sender,
         timestamp_ms,
         payload.into(),
+    )
+}
+
+pub fn build_discovery_topology_request(
+    sender: &str,
+    timestamp_ms: u64,
+) -> TelemetryResult<Packet> {
+    Packet::new(
+        DataType::DiscoveryTopologyRequest,
+        &[DataEndpoint::Discovery],
+        sender,
+        timestamp_ms,
+        Vec::<u8>::new().into(),
+    )
+}
+
+pub fn build_discovery_schema_request(sender: &str, timestamp_ms: u64) -> TelemetryResult<Packet> {
+    Packet::new(
+        DataType::DiscoverySchemaRequest,
+        &[DataEndpoint::Discovery],
+        sender,
+        timestamp_ms,
+        Vec::<u8>::new().into(),
     )
 }
 
@@ -515,6 +549,81 @@ fn read_u32(payload: &[u8], cursor: &mut usize, label: &'static str) -> Telemetr
 /// Builds a discovery packet containing the complete runtime schema snapshot.
 pub fn build_discovery_schema(sender: &str, timestamp_ms: u64) -> TelemetryResult<Packet> {
     build_discovery_schema_from_snapshot(sender, timestamp_ms, export_schema())
+}
+
+/// Elects the authoritative discovery/schema master for the current topology view.
+///
+/// Tie-breaks are deterministic:
+/// 1. Fewest unreachable boards.
+/// 2. Lowest maximum hop distance to any reachable board.
+/// 3. Lowest total hop distance across all reachable boards.
+/// 4. Lexicographically smallest sender ID.
+pub fn elect_discovery_master(local_sender: &str, boards: &[TopologyBoardNode]) -> String {
+    let mut nodes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for board in boards {
+        nodes.entry(board.sender_id.clone()).or_default();
+        for peer in board.connections.iter() {
+            nodes
+                .entry(peer.clone())
+                .or_default()
+                .push(board.sender_id.clone());
+            nodes
+                .entry(board.sender_id.clone())
+                .or_default()
+                .push(peer.clone());
+        }
+    }
+    nodes.entry(local_sender.to_string()).or_default();
+    for peers in nodes.values_mut() {
+        peers.sort_unstable();
+        peers.dedup();
+    }
+
+    let mut best_sender = local_sender.to_string();
+    let mut best_unreachable = usize::MAX;
+    let mut best_max_hops = usize::MAX;
+    let mut best_total_hops = usize::MAX;
+
+    for sender in nodes.keys() {
+        let mut frontier = vec![sender.clone()];
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        seen.insert(sender.clone(), 0);
+        let mut idx = 0;
+        while idx < frontier.len() {
+            let cur = frontier[idx].clone();
+            idx += 1;
+            let cur_dist = seen[&cur];
+            if let Some(peers) = nodes.get(&cur) {
+                for peer in peers {
+                    if !seen.contains_key(peer) {
+                        seen.insert(peer.clone(), cur_dist + 1);
+                        frontier.push(peer.clone());
+                    }
+                }
+            }
+        }
+
+        let unreachable = nodes.len().saturating_sub(seen.len());
+        let max_hops = seen.values().copied().max().unwrap_or(0);
+        let total_hops = seen.values().copied().sum();
+        let better = unreachable < best_unreachable
+            || (unreachable == best_unreachable && max_hops < best_max_hops)
+            || (unreachable == best_unreachable
+                && max_hops == best_max_hops
+                && total_hops < best_total_hops)
+            || (unreachable == best_unreachable
+                && max_hops == best_max_hops
+                && total_hops == best_total_hops
+                && sender < &best_sender);
+        if better {
+            best_sender = sender.clone();
+            best_unreachable = unreachable;
+            best_max_hops = max_hops;
+            best_total_hops = total_hops;
+        }
+    }
+
+    best_sender
 }
 
 /// Builds a discovery schema packet from an explicit snapshot.

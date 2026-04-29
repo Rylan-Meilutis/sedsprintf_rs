@@ -196,6 +196,8 @@ impl DataType {
     pub const DISCOVERY_TIMESYNC_SOURCES: Self = Self(8);
     pub const DISCOVERY_TOPOLOGY: Self = Self(9);
     pub const DISCOVERY_SCHEMA: Self = Self(10);
+    pub const DISCOVERY_TOPOLOGY_REQUEST: Self = Self(11);
+    pub const DISCOVERY_SCHEMA_REQUEST: Self = Self(12);
 
     #[allow(non_upper_case_globals)]
     pub const TelemetryError: Self = Self::TELEMETRY_ERROR;
@@ -219,6 +221,10 @@ impl DataType {
     pub const DiscoveryTopology: Self = Self::DISCOVERY_TOPOLOGY;
     #[allow(non_upper_case_globals)]
     pub const DiscoverySchema: Self = Self::DISCOVERY_SCHEMA;
+    #[allow(non_upper_case_globals)]
+    pub const DiscoveryTopologyRequest: Self = Self::DISCOVERY_TOPOLOGY_REQUEST;
+    #[allow(non_upper_case_globals)]
+    pub const DiscoverySchemaRequest: Self = Self::DISCOVERY_SCHEMA_REQUEST;
 
     #[inline]
     pub const fn as_u32(self) -> u32 {
@@ -259,6 +265,8 @@ impl core::fmt::Debug for DataType {
             Self::DiscoveryTimeSyncSources => "DiscoveryTimeSyncSources",
             Self::DiscoveryTopology => "DiscoveryTopology",
             Self::DiscoverySchema => "DiscoverySchema",
+            Self::DiscoveryTopologyRequest => "DiscoveryTopologyRequest",
+            Self::DiscoverySchemaRequest => "DiscoverySchemaRequest",
             _ => {
                 let meta = get_message_meta(*self);
                 if meta.name != "UNKNOWN_TYPE" {
@@ -489,7 +497,7 @@ impl Registry {
             description: "",
             element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
             endpoints: leak_endpoints(vec![DataEndpoint::Discovery]),
-            reliable: ReliableMode::None,
+            reliable: ReliableMode::Ordered,
             priority: 240,
         })
         .expect("built-in type");
@@ -499,8 +507,28 @@ impl Registry {
             description: "",
             element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
             endpoints: leak_endpoints(vec![DataEndpoint::Discovery]),
-            reliable: ReliableMode::None,
+            reliable: ReliableMode::Ordered,
             priority: 241,
+        })
+        .expect("built-in type");
+        reg.register_type_definition(DataTypeDefinition {
+            id: DataType::DiscoveryTopologyRequest,
+            name: "DISCOVERY_TOPOLOGY_REQUEST",
+            description: "",
+            element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
+            endpoints: leak_endpoints(vec![DataEndpoint::Discovery]),
+            reliable: ReliableMode::Ordered,
+            priority: 242,
+        })
+        .expect("built-in type");
+        reg.register_type_definition(DataTypeDefinition {
+            id: DataType::DiscoverySchemaRequest,
+            name: "DISCOVERY_SCHEMA_REQUEST",
+            description: "",
+            element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
+            endpoints: leak_endpoints(vec![DataEndpoint::Discovery]),
+            reliable: ReliableMode::Ordered,
+            priority: 242,
         })
         .expect("built-in type");
         #[cfg(all(feature = "embedded", sedsprintf_has_telemetry_config_json))]
@@ -1372,6 +1400,8 @@ fn is_internal_data_type(ty: DataType) -> bool {
             | DataType::DiscoveryTimeSyncSources
             | DataType::DiscoveryTopology
             | DataType::DiscoverySchema
+            | DataType::DiscoveryTopologyRequest
+            | DataType::DiscoverySchemaRequest
     )
 }
 
@@ -1766,7 +1796,7 @@ pub fn known_data_types() -> Vec<DataTypeDefinition> {
             description: "",
             element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
             endpoints: &[DataEndpoint::Discovery],
-            reliable: ReliableMode::None,
+            reliable: ReliableMode::Ordered,
             priority: 240,
         },
         DataTypeDefinition {
@@ -1775,8 +1805,26 @@ pub fn known_data_types() -> Vec<DataTypeDefinition> {
             description: "",
             element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
             endpoints: &[DataEndpoint::Discovery],
-            reliable: ReliableMode::None,
+            reliable: ReliableMode::Ordered,
             priority: 241,
+        },
+        DataTypeDefinition {
+            id: DataType::DiscoveryTopologyRequest,
+            name: "DISCOVERY_TOPOLOGY_REQUEST",
+            description: "",
+            element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
+            endpoints: &[DataEndpoint::Discovery],
+            reliable: ReliableMode::Ordered,
+            priority: 242,
+        },
+        DataTypeDefinition {
+            id: DataType::DiscoverySchemaRequest,
+            name: "DISCOVERY_SCHEMA_REQUEST",
+            description: "",
+            element: MessageElement::Dynamic(MessageDataType::UInt8, MessageClass::Data),
+            endpoints: &[DataEndpoint::Discovery],
+            reliable: ReliableMode::Ordered,
+            priority: 242,
         },
     ];
     #[cfg(all(feature = "serde", sedsprintf_has_telemetry_config_json))]

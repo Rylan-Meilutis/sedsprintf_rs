@@ -1654,22 +1654,17 @@ impl Relay {
                 RouteSelectionOrigin::Discovered
             };
             if st.discovery_routes.is_empty() {
-                if restrict_link_local {
-                    let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), true);
-                    return Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
-                        &mut st,
-                        Some(exclude),
-                        targets,
-                        RouteSelectionOrigin::Flood,
-                    )));
-                }
-                let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), false);
-                return Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
-                    &mut st,
+                let fallback = self.eligible_side_ids_locked(
+                    &st,
                     Some(exclude),
-                    targets,
-                    RouteSelectionOrigin::Flood,
-                )));
+                    Some(ty),
+                    restrict_link_local,
+                );
+                return Ok(RemoteSidePlan::Target(if fallback.len() == 1 {
+                    fallback
+                } else {
+                    Vec::new()
+                }));
             }
             let now_ms = self.clock.now_ms();
             let mut had_exact = false;
@@ -1742,35 +1737,18 @@ impl Relay {
                     targets,
                     discovered_origin,
                 )))
-            } else if !target_senders.is_empty() {
-                let targets = self.eligible_side_ids_locked(
+            } else {
+                let fallback = self.eligible_side_ids_locked(
                     &st,
                     Some(exclude),
                     Some(ty),
                     restrict_link_local,
                 );
-                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
-                    &mut st,
-                    Some(exclude),
-                    targets,
-                    RouteSelectionOrigin::Flood,
-                )))
-            } else if restrict_link_local {
-                let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), true);
-                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
-                    &mut st,
-                    Some(exclude),
-                    targets,
-                    RouteSelectionOrigin::Flood,
-                )))
-            } else {
-                let targets = self.eligible_side_ids_locked(&st, Some(exclude), Some(ty), false);
-                Ok(RemoteSidePlan::Target(self.apply_route_selection_locked(
-                    &mut st,
-                    Some(exclude),
-                    targets,
-                    RouteSelectionOrigin::Flood,
-                )))
+                Ok(RemoteSidePlan::Target(if fallback.len() == 1 {
+                    fallback
+                } else {
+                    Vec::new()
+                }))
             }
         }
         #[cfg(not(feature = "discovery"))]
@@ -3541,6 +3519,10 @@ impl Relay {
         if self.side_tx_active() {
             return Ok(());
         }
+        #[cfg(feature = "discovery")]
+        {
+            let _ = self.poll_discovery()?;
+        }
         let start = self.clock.now_ms();
         loop {
             self.process_reliable_timeouts()?;
@@ -3581,6 +3563,10 @@ impl Relay {
 
     /// Process RX queue with timeout.
     pub fn process_rx_queue_with_timeout(&self, timeout_ms: u32) -> TelemetryResult<()> {
+        #[cfg(feature = "discovery")]
+        {
+            let _ = self.poll_discovery()?;
+        }
         let start = self.clock.now_ms();
         loop {
             let item_opt = {
@@ -3604,6 +3590,10 @@ impl Relay {
     pub fn process_all_queues_with_timeout(&self, timeout_ms: u32) -> TelemetryResult<()> {
         if self.side_tx_active() {
             return Ok(());
+        }
+        #[cfg(feature = "discovery")]
+        {
+            let _ = self.poll_discovery()?;
         }
         let drain_fully = timeout_ms == 0;
         let start = if drain_fully { 0 } else { self.clock.now_ms() };

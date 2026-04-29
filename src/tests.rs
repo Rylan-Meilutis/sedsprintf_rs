@@ -3901,11 +3901,18 @@ mod relay_reliable_tests {
 
 #[cfg(test)]
 mod reliable_tests {
-    use crate::config::{DataEndpoint, DataType};
+    use crate::config::{
+        DataEndpoint, DataType, register_data_type_with_description,
+        register_endpoint_with_description,
+    };
     use crate::router::{Clock, EndpointHandler, Router, RouterConfig, RouterSideOptions};
     use crate::tests::timeout_tests::StepClock;
-    use crate::{TelemetryResult, packet::Packet, serialize};
+    use crate::{
+        MessageClass, MessageDataType, MessageElement, ReliableMode, TelemetryResult,
+        packet::Packet, serialize,
+    };
 
+    use std::sync::Once;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
@@ -3914,8 +3921,35 @@ mod reliable_tests {
         Box::new(|| 0u64)
     }
 
+    fn ensure_reliable_test_schema() {
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            let radio = DataEndpoint::try_named("RADIO").unwrap_or_else(|| {
+                register_endpoint_with_description("RADIO", "test radio endpoint", false)
+                    .expect("register RADIO")
+            });
+            let sd_card = DataEndpoint::try_named("SD_CARD").unwrap_or_else(|| {
+                register_endpoint_with_description("SD_CARD", "test sd endpoint", false)
+                    .expect("register SD_CARD")
+            });
+            if DataType::try_named("RELIABLE_TEST_DATA").is_none() {
+                register_data_type_with_description(
+                    "RELIABLE_TEST_DATA",
+                    "test reliable data type",
+                    MessageElement::Static(3, MessageDataType::Float32, MessageClass::Data),
+                    &[radio, sd_card],
+                    ReliableMode::Ordered,
+                    1,
+                )
+                .expect("register RELIABLE_TEST_DATA");
+            }
+        });
+    }
+
     #[test]
     fn reliable_retransmit_delivers_once() {
+        ensure_reliable_test_schema();
         let rx_hits = Arc::new(AtomicUsize::new(0));
         let rx_hits_c = rx_hits.clone();
         let handler = EndpointHandler::new_packet_handler(
@@ -3997,6 +4031,108 @@ mod reliable_tests {
         }
 
         assert_eq!(rx_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn immediate_rx_from_side_emits_reliable_ack_without_queue_drain() {
+        ensure_reliable_test_schema();
+
+        let sent_frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sent_frames_c = sent_frames.clone();
+        let sender = Router::new_with_clock(
+            RouterConfig::default().with_reliable_enabled(true),
+            zero_clock(),
+        );
+        sender.add_side_serialized_with_options(
+            "to_receiver",
+            move |bytes: &[u8]| {
+                sent_frames_c.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        let pkt = Packet::from_f32_slice(
+            DataType::named("RELIABLE_TEST_DATA"),
+            &[1.0_f32, 2.0, 3.0],
+            &[DataEndpoint::named("RADIO")],
+            7,
+        )
+        .unwrap();
+        sender.tx(pkt).unwrap();
+        let frame = sent_frames.lock().unwrap().first().cloned().unwrap();
+
+        let controls: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let controls_c = controls.clone();
+        let receiver = Router::new_with_clock(
+            RouterConfig::default().with_reliable_enabled(true),
+            zero_clock(),
+        );
+        let receiver_side = receiver.add_side_serialized_with_options(
+            "to_sender",
+            move |bytes: &[u8]| {
+                controls_c.lock().unwrap().push(bytes.to_vec());
+                Ok(())
+            },
+            RouterSideOptions {
+                reliable_enabled: true,
+                ..RouterSideOptions::default()
+            },
+        );
+
+        receiver
+            .rx_serialized_from_side(&frame, receiver_side)
+            .unwrap();
+
+        let controls = controls.lock().unwrap().clone();
+        assert!(
+            controls.iter().any(|bytes| {
+                serialize::peek_envelope(bytes.as_slice())
+                    .map(|env| env.ty == DataType::ReliableAck)
+                    .unwrap_or(false)
+            }),
+            "reliable ack should be emitted immediately on direct rx"
+        );
+    }
+
+    #[test]
+    fn direct_tx_handler_failure_emits_error_without_queue_drain() {
+        ensure_reliable_test_schema();
+
+        let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_c = seen.clone();
+        let handler = EndpointHandler::new_packet_handler(DataEndpoint::named("SD_CARD"), |_pkt| {
+            Err(crate::TelemetryError::Io("boom"))
+        });
+        let router = Router::new_with_clock(RouterConfig::new(vec![handler]), zero_clock());
+        router.add_side_serialized("observer", move |bytes| {
+            seen_c.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        });
+
+        let pkt = Packet::from_f32_slice(
+            DataType::named("RELIABLE_TEST_DATA"),
+            &[9.0_f32, 8.0, 7.0],
+            &[DataEndpoint::named("SD_CARD"), DataEndpoint::named("RADIO")],
+            11,
+        )
+        .unwrap();
+
+        router.rx(&pkt).unwrap();
+
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|bytes| {
+                serialize::peek_envelope(bytes.as_slice())
+                    .map(|env| env.ty == DataType::TelemetryError)
+                    .unwrap_or(false)
+            }),
+            "telemetry error should be emitted immediately on direct tx failure"
+        );
+        assert_eq!(router.debug_queue_lengths().1, 0);
     }
 
     #[test]
@@ -4590,7 +4726,7 @@ mod router_tests {
             DataEndpoint, DataType, MessageClass, MessageDataType, MessageElement, ReliableMode,
             RouteSelectionMode, TelemetryError, TelemetryResult,
         };
-        use crate::{packet::Packet, router::Router};
+        use crate::{packet::Packet, router::Router, serialize};
         use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
 
@@ -4655,6 +4791,362 @@ mod router_tests {
                 }
             }
             None
+        }
+
+        fn pump_routers(routers: &[&Router], rounds: usize) {
+            for _ in 0..rounds {
+                for router in routers {
+                    router.process_all_queues().unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn discovery_master_election_prefers_central_low_hop_router() {
+            let boards = vec![
+                TopologyBoardNode {
+                    sender_id: "A_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["B_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "B_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["A_NODE".to_string(), "C_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "C_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["B_NODE".to_string()],
+                },
+            ];
+            assert_eq!(
+                crate::discovery::elect_discovery_master("A_NODE", &boards),
+                "B_NODE"
+            );
+        }
+
+        #[test]
+        fn discovery_master_election_uses_deterministic_tiebreaks_and_fails_over() {
+            let symmetric_ring = vec![
+                TopologyBoardNode {
+                    sender_id: "A_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["B_NODE".to_string(), "D_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "B_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["A_NODE".to_string(), "C_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "C_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["B_NODE".to_string(), "D_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "D_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["A_NODE".to_string(), "C_NODE".to_string()],
+                },
+            ];
+            assert_eq!(
+                crate::discovery::elect_discovery_master("D_NODE", &symmetric_ring),
+                "A_NODE"
+            );
+
+            let failed_over_ring = vec![
+                TopologyBoardNode {
+                    sender_id: "B_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["C_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "C_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["B_NODE".to_string(), "D_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "D_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["C_NODE".to_string()],
+                },
+            ];
+            assert_eq!(
+                crate::discovery::elect_discovery_master("D_NODE", &failed_over_ring),
+                "C_NODE"
+            );
+        }
+
+        #[test]
+        fn unknown_remote_endpoint_does_not_flood_without_discovery_route() {
+            ensure_topology_test_schema();
+
+            let seen_a: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_b: Arc<Mutex<Vec<Packet>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_a_c = seen_a.clone();
+            let seen_b_c = seen_b.clone();
+
+            let router = Router::new_with_clock(RouterConfig::default(), zero_clock());
+            router.add_side_packet("A", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_a_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+            router.add_side_packet("B", move |pkt: &Packet| -> TelemetryResult<()> {
+                seen_b_c.lock().unwrap().push(pkt.clone());
+                Ok(())
+            });
+
+            let pkt = Packet::from_f32_slice(
+                DataType::named("GPS_DATA"),
+                &[1.0_f32, 2.0, 3.0],
+                &[DataEndpoint::named("RADIO")],
+                42,
+            )
+            .unwrap();
+            router.tx(pkt).unwrap();
+
+            assert!(seen_a.lock().unwrap().is_empty());
+            assert!(seen_b.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn topology_requests_use_elected_master_and_late_joiners_get_fresh_topology() {
+            ensure_topology_test_schema();
+
+            let opts = crate::router::RouterSideOptions {
+                reliable_enabled: true,
+                ..crate::router::RouterSideOptions::default()
+            };
+
+            let a = Arc::new(Router::new_with_clock(
+                RouterConfig::default().with_sender("A_NODE"),
+                zero_clock(),
+            ));
+            let b = Arc::new(Router::new_with_clock(
+                RouterConfig::default().with_sender("B_NODE"),
+                zero_clock(),
+            ));
+            let c = Arc::new(Router::new_with_clock(
+                RouterConfig::default().with_sender("C_NODE"),
+                zero_clock(),
+            ));
+
+            let a_ingress_from_b: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+            let b_ingress_from_a: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+            let b_ingress_from_c: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+            let c_ingress_from_b: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+
+            let b_for_a = b.clone();
+            let b_ingress_from_a_c = b_ingress_from_a.clone();
+            let _a_to_b = a.add_side_serialized_with_options(
+                "A_TO_B",
+                move |bytes| {
+                    if let Some(side) = *b_ingress_from_a_c.lock().unwrap() {
+                        b_for_a.rx_serialized_from_side(bytes, side)?;
+                    }
+                    Ok(())
+                },
+                opts,
+            );
+
+            let a_for_b = a.clone();
+            let a_ingress_from_b_c = a_ingress_from_b.clone();
+            let b_to_a = b.add_side_serialized_with_options(
+                "B_TO_A",
+                move |bytes| {
+                    if let Some(side) = *a_ingress_from_b_c.lock().unwrap() {
+                        a_for_b.rx_serialized_from_side(bytes, side)?;
+                    }
+                    Ok(())
+                },
+                opts,
+            );
+            *b_ingress_from_a.lock().unwrap() = Some(b_to_a);
+            *a_ingress_from_b.lock().unwrap() = Some(_a_to_b);
+
+            a.announce_discovery().unwrap();
+            b.announce_discovery().unwrap();
+            pump_routers(&[a.as_ref(), b.as_ref()], 6);
+
+            let b_to_c_frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+            let b_to_c_frames_c = b_to_c_frames.clone();
+            let c_to_b_frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+            let c_to_b_frames_c = c_to_b_frames.clone();
+            let c_for_b = c.clone();
+            let c_ingress_from_b_c = c_ingress_from_b.clone();
+            let _b_to_c = b.add_side_serialized_with_options(
+                "B_TO_C",
+                move |bytes| {
+                    b_to_c_frames_c.lock().unwrap().push(bytes.to_vec());
+                    if let Some(side) = *c_ingress_from_b_c.lock().unwrap() {
+                        c_for_b.rx_serialized_from_side(bytes, side)?;
+                    }
+                    Ok(())
+                },
+                opts,
+            );
+
+            let b_for_c = b.clone();
+            let b_ingress_from_c_c = b_ingress_from_c.clone();
+            let c_to_b = c.add_side_serialized_with_options(
+                "C_TO_B",
+                move |bytes| {
+                    c_to_b_frames_c.lock().unwrap().push(bytes.to_vec());
+                    if let Some(side) = *b_ingress_from_c_c.lock().unwrap() {
+                        b_for_c.rx_serialized_from_side(bytes, side)?;
+                    }
+                    Ok(())
+                },
+                opts,
+            );
+            *c_ingress_from_b.lock().unwrap() = Some(c_to_b);
+            *b_ingress_from_c.lock().unwrap() = Some(_b_to_c);
+
+            assert!(
+                !c.export_topology()
+                    .routers
+                    .iter()
+                    .any(|board| board.sender_id == "A_NODE")
+            );
+            b_to_c_frames.lock().unwrap().clear();
+            c_to_b_frames.lock().unwrap().clear();
+
+            c.request_topology().unwrap();
+            c.request_schema().unwrap();
+            pump_routers(
+                &[c.as_ref(), b.as_ref(), a.as_ref(), b.as_ref(), c.as_ref()],
+                8,
+            );
+
+            let c_topology = c.export_topology();
+            assert!(
+                c_topology
+                    .routers
+                    .iter()
+                    .any(|board| board.sender_id == "A_NODE")
+                    && c_topology
+                        .routers
+                        .iter()
+                        .any(|board| board.sender_id == "B_NODE")
+                    && c_topology
+                        .routers
+                        .iter()
+                        .any(|board| board.sender_id == "C_NODE")
+            );
+
+            let a_topology = a.export_topology();
+            assert!(
+                a_topology
+                    .routers
+                    .iter()
+                    .any(|board| board.sender_id == "C_NODE"),
+                "topology reply propagation should update routers along the path too"
+            );
+
+            let request_frames = c_to_b_frames.lock().unwrap().clone();
+            assert!(request_frames.iter().any(|bytes| {
+                serialize::peek_frame_info(bytes.as_slice())
+                    .map(|frame| {
+                        frame.envelope.ty == DataType::DiscoveryTopologyRequest
+                            && frame.reliable.is_some()
+                    })
+                    .unwrap_or(false)
+            }));
+
+            let frames = b_to_c_frames.lock().unwrap().clone();
+            let frame_summary: Vec<(DataType, String, bool)> = frames
+                .iter()
+                .map(|bytes| {
+                    let frame = serialize::peek_frame_info(bytes.as_slice()).unwrap();
+                    let pkt = serialize::deserialize_packet(bytes.as_slice()).unwrap();
+                    (
+                        frame.envelope.ty,
+                        pkt.sender().to_string(),
+                        frame.reliable.is_some(),
+                    )
+                })
+                .collect();
+            assert!(
+                frames.iter().any(|bytes| {
+                    let frame = serialize::peek_frame_info(bytes.as_slice()).unwrap();
+                    frame.envelope.ty == DataType::DiscoveryTopology && frame.reliable.is_some()
+                }),
+                "{frame_summary:?}"
+            );
+            assert!(
+                frames.iter().any(|bytes| {
+                    let frame = serialize::peek_frame_info(bytes.as_slice()).unwrap();
+                    frame.envelope.ty == DataType::DiscoverySchema && frame.reliable.is_some()
+                }),
+                "{frame_summary:?}"
+            );
+        }
+
+        #[cfg(feature = "timesync")]
+        #[test]
+        fn timesync_leadership_is_separate_from_discovery_master_election() {
+            let boards = vec![
+                TopologyBoardNode {
+                    sender_id: "A_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: vec!["A_NODE".to_string()],
+                    connections: vec!["B_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "B_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: vec!["B_NODE".to_string()],
+                    connections: vec!["A_NODE".to_string(), "C_NODE".to_string()],
+                },
+                TopologyBoardNode {
+                    sender_id: "C_NODE".to_string(),
+                    reachable_endpoints: Vec::new(),
+                    reachable_timesync_sources: Vec::new(),
+                    connections: vec!["B_NODE".to_string()],
+                },
+            ];
+            assert_eq!(
+                crate::discovery::elect_discovery_master("C_NODE", &boards),
+                "B_NODE"
+            );
+
+            let mut tracker =
+                crate::timesync::TimeSyncTracker::new(crate::timesync::TimeSyncConfig {
+                    role: crate::timesync::TimeSyncRole::Consumer,
+                    priority: 100,
+                    ..Default::default()
+                });
+            tracker
+                .handle_announce(
+                    &crate::timesync::build_timesync_announce_with_sender("A_NODE", 1, 1_000)
+                        .unwrap(),
+                    0,
+                )
+                .unwrap();
+            tracker
+                .handle_announce(
+                    &crate::timesync::build_timesync_announce_with_sender("B_NODE", 20, 1_000)
+                        .unwrap(),
+                    0,
+                )
+                .unwrap();
+
+            let leader = tracker.leader(0, false);
+            assert!(matches!(
+                leader,
+                Some(crate::timesync::TimeSyncLeader::Remote(ref src)) if src.sender == "A_NODE"
+            ));
         }
 
         fn side_stats(
